@@ -1,0 +1,16 @@
+{
+  "name": "macro-agent",
+  "version": "0.0.1",
+  "description": "Interact with multiple agents as if they were a single agent.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexngai/macro-agent.git"
+  }
+}
