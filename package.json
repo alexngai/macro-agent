@@ -2,15 +2,28 @@
   "name": "macro-agent",
   "version": "0.0.1",
   "description": "Interact with multiple agents as if they were a single agent.",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "dev": "tsc --watch"
   },
-  "keywords": [],
+  "keywords": ["multi-agent", "claude", "orchestration"],
   "author": "",
   "license": "ISC",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/macro-agent.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "dependencies": {
+    "tinybase": "^5.0.0",
+    "nanoid": "^5.0.0"
   }
 }
