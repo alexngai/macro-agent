@@ -7,5 +7,14 @@
     "enableSparseCheckout": false,
     "branchPrefix": "sudocode",
     "cleanupOrphanedWorktreesOnStartup": true
+  },
+  "integrations": {
+    "openspec": {
+      "enabled": true,
+      "auto_sync": true,
+      "options": {
+        "path": "openspec"
+      }
+    }
   }
 }

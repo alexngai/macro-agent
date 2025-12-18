@@ -16,17 +16,17 @@
 
 ## Phase 2: Core Managers (Parallel - 3 Streams)
 
-### Stream A: Agent Manager
-- [ ] 2A.1 Define AgentManager interface (spawn, terminate, get, list, getChildren, getHierarchy)
-- [ ] 2A.2 Implement spawn() with ID generation and event emission
-- [ ] 2A.3 Integrate with ACP wrapper for session creation (stub initially)
-- [ ] 2A.4 Implement default subscription setup on spawn
-- [ ] 2A.5 Implement terminate() with event emission and task status update
-- [ ] 2A.6 Implement get() and list() queries from agents view
-- [ ] 2A.7 Implement getChildren() and getHierarchy()
-- [ ] 2A.8 Implement getOrCreateHeadManager()
-- [ ] 2A.9 Implement system prompt generator with templates
-- [ ] 2A.10 Write tests for agent lifecycle
+### Stream A: Agent Manager ✅ COMPLETE
+- [x] 2A.1 Define AgentManager interface (spawn, terminate, get, list, getChildren, getHierarchy)
+- [x] 2A.2 Implement spawn() with ID generation and event emission
+- [x] 2A.3 Integrate with acp-factory for session creation
+- [x] 2A.4 Implement default subscription setup on spawn
+- [x] 2A.5 Implement terminate() with event emission and task status update
+- [x] 2A.6 Implement get() and list() queries from agents view
+- [x] 2A.7 Implement getChildren() and getHierarchy()
+- [x] 2A.8 Implement getOrCreateHeadManager()
+- [x] 2A.9 Implement system prompt generator with templates
+- [x] 2A.10 Write tests for agent lifecycle (29 tests passing)
 
 ### Stream B: Task Manager
 - [ ] 2B.1 Define TaskManager interface (create, get, list, update, assign, updateStatus)

@@ -10,7 +10,11 @@
     "test:run": "vitest run",
     "dev": "tsc --watch"
   },
-  "keywords": ["multi-agent", "claude", "orchestration"],
+  "keywords": [
+    "multi-agent",
+    "claude",
+    "orchestration"
+  ],
   "author": "",
   "license": "ISC",
   "repository": {
@@ -23,7 +27,8 @@
     "vitest": "^1.0.0"
   },
   "dependencies": {
-    "tinybase": "^5.0.0",
-    "nanoid": "^5.0.0"
+    "acp-factory": "^0.0.1",
+    "nanoid": "^5.0.0",
+    "tinybase": "^5.0.0"
   }
 }
