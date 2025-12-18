@@ -751,6 +751,7 @@ function applyTaskEvent(
         status: 'pending',
         assigned_agent: '',
         parent_task: details.parent_task ?? '',
+        subtasks: JSON.stringify([]),
         created_at: event.timestamp,
         started_at: 0,
         completed_at: 0,
@@ -758,41 +759,97 @@ function applyTaskEvent(
         inputs: JSON.stringify(details.inputs ?? {}),
         outputs: JSON.stringify({}),
         artifacts: JSON.stringify([]),
+        agent_history: JSON.stringify([]),
       });
       break;
     }
     case 'assigned': {
-      const details = payload.details as { agent_id: AgentId };
+      const details = payload.details as { agent_id: AgentId; role?: string };
+      const existing = store.getRow('tasks', taskId);
+      const history = existing.agent_history
+        ? JSON.parse(existing.agent_history as string)
+        : [];
+      history.push({
+        agent_id: details.agent_id,
+        role: details.role,
+        assigned_at: event.timestamp,
+      });
       store.setPartialRow('tasks', taskId, {
         status: 'assigned',
         assigned_agent: details.agent_id,
+        agent_history: JSON.stringify(history),
       });
       break;
     }
     case 'unassigned': {
+      const details = payload.details as { agent_id: AgentId };
+      const existing = store.getRow('tasks', taskId);
+      const history = existing.agent_history
+        ? JSON.parse(existing.agent_history as string)
+        : [];
+      // Update the last entry for this agent with ended_at
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].agent_id === details.agent_id && !history[i].ended_at) {
+          history[i].ended_at = event.timestamp;
+          break;
+        }
+      }
       store.setPartialRow('tasks', taskId, {
         assigned_agent: '',
+        agent_history: JSON.stringify(history),
       });
       break;
     }
     case 'status_change': {
-      const details = payload.details as { status: TaskStatus };
-      if (details.status === 'in_progress') {
-        const existing = store.getRow('tasks', taskId);
-        if (!existing.started_at) {
-          store.setPartialRow('tasks', taskId, {
-            status: details.status,
-            started_at: event.timestamp,
-          });
-        } else {
-          store.setPartialRow('tasks', taskId, {
-            status: details.status,
-          });
+      const details = payload.details as {
+        status?: TaskStatus;
+        outputs?: Record<string, unknown>;
+        artifacts?: unknown[];
+        description?: string;
+        subtask_added?: TaskId;
+      };
+      const updates: Record<string, unknown> = {};
+
+      if (details.status) {
+        updates.status = details.status;
+        if (details.status === 'in_progress') {
+          const existing = store.getRow('tasks', taskId);
+          if (!existing.started_at) {
+            updates.started_at = event.timestamp;
+          }
         }
-      } else {
-        store.setPartialRow('tasks', taskId, {
-          status: details.status,
-        });
+      }
+
+      if (details.outputs !== undefined) {
+        updates.outputs = JSON.stringify(details.outputs);
+      }
+
+      if (details.artifacts !== undefined) {
+        const existing = store.getRow('tasks', taskId);
+        const currentArtifacts = existing.artifacts
+          ? JSON.parse(existing.artifacts as string)
+          : [];
+        updates.artifacts = JSON.stringify([
+          ...currentArtifacts,
+          ...details.artifacts,
+        ]);
+      }
+
+      if (details.description !== undefined) {
+        updates.description = details.description;
+      }
+
+      if (details.subtask_added) {
+        const existing = store.getRow('tasks', taskId);
+        const subtasks = existing.subtasks
+          ? JSON.parse(existing.subtasks as string)
+          : [];
+        subtasks.push(details.subtask_added);
+        updates.subtasks = JSON.stringify(subtasks);
+      }
+
+      if (Object.keys(updates).length > 0) {
+        store.setPartialRow('tasks', taskId, updates as Record<string, string | number | boolean>);
       }
       break;
     }
@@ -847,6 +904,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     status: row.status as TaskStatus,
     assigned_agent: (row.assigned_agent as string) || undefined,
     parent_task: (row.parent_task as string) || undefined,
+    subtasks: row.subtasks ? JSON.parse(row.subtasks as string) : undefined,
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     completed_at: (row.completed_at as number) || undefined,
@@ -854,5 +912,6 @@ function rowToTask(row: Record<string, unknown>): Task {
     inputs: row.inputs ? JSON.parse(row.inputs as string) : undefined,
     outputs: row.outputs ? JSON.parse(row.outputs as string) : undefined,
     artifacts: row.artifacts ? JSON.parse(row.artifacts as string) : undefined,
+    agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
   };
 }

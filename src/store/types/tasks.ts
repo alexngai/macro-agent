@@ -28,6 +28,14 @@ export interface ArtifactRef {
   description?: string;
 }
 
+// Agent assignment history entry
+export interface AgentHistoryEntry {
+  agent_id: AgentId;
+  role?: string;
+  assigned_at: Timestamp;
+  ended_at?: Timestamp;
+}
+
 // Task record in materialized view
 export interface Task {
   id: TaskId;
@@ -35,6 +43,7 @@ export interface Task {
   status: TaskStatus;
   assigned_agent?: AgentId;
   parent_task?: TaskId;
+  subtasks?: TaskId[];
   created_at: Timestamp;
   started_at?: Timestamp;
   completed_at?: Timestamp;
@@ -42,4 +51,5 @@ export interface Task {
   inputs?: Record<string, unknown>;
   outputs?: Record<string, unknown>;
   artifacts?: ArtifactRef[];
+  agent_history?: AgentHistoryEntry[];
 }

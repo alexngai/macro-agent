@@ -28,15 +28,15 @@
 - [x] 2A.9 Implement system prompt generator with templates
 - [x] 2A.10 Write tests for agent lifecycle (29 tests passing)
 
-### Stream B: Task Manager
-- [ ] 2B.1 Define TaskManager interface (create, get, list, update, assign, updateStatus)
-- [ ] 2B.2 Implement create() with ID generation and event emission
-- [ ] 2B.3 Implement get() and list() queries from tasks view
-- [ ] 2B.4 Implement assign() and unassign() with event emission
-- [ ] 2B.5 Implement updateStatus() with valid transitions
-- [ ] 2B.6 Implement update() for metadata (outputs, artifacts)
-- [ ] 2B.7 Implement createSubtask() and getSubtasks()
-- [ ] 2B.8 Write tests for task lifecycle
+### Stream B: Task Manager ✅ COMPLETE
+- [x] 2B.1 Define TaskManager interface (create, get, list, update, assign, updateStatus)
+- [x] 2B.2 Implement create() with ID generation and event emission
+- [x] 2B.3 Implement get() and list() queries from tasks view
+- [x] 2B.4 Implement assign() and unassign() with event emission
+- [x] 2B.5 Implement updateStatus() with valid transitions
+- [x] 2B.6 Implement update() for metadata (outputs, artifacts)
+- [x] 2B.7 Implement createSubtask() and getSubtasks()
+- [x] 2B.8 Write tests for task lifecycle (39 tests passing)
 
 ### Stream C: Message Router ✅ COMPLETE
 - [x] 2C.1 Define MessageRouter interface (send, getMessages, subscribe, unsubscribe)
