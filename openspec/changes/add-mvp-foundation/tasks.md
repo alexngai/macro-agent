@@ -38,17 +38,17 @@
 - [ ] 2B.7 Implement createSubtask() and getSubtasks()
 - [ ] 2B.8 Write tests for task lifecycle
 
-### Stream C: Message Router
-- [ ] 2C.1 Define MessageRouter interface (send, getMessages, subscribe, unsubscribe)
-- [ ] 2C.2 Implement send() with target resolution (agent, task, topic)
-- [ ] 2C.3 Implement message queue routing logic
-- [ ] 2C.4 Implement getMessages() with limit and getFullMessage()
-- [ ] 2C.5 Implement subscribe() and unsubscribe() for topics
-- [ ] 2C.6 Implement getSubscriptions()
-- [ ] 2C.7 Implement automatic subscription setup helper
-- [ ] 2C.8 Implement status event routing to subtree subscribers
-- [ ] 2C.9 Implement message truncation for large content
-- [ ] 2C.10 Write tests for message routing
+### Stream C: Message Router ✅ COMPLETE
+- [x] 2C.1 Define MessageRouter interface (send, getMessages, subscribe, unsubscribe)
+- [x] 2C.2 Implement send() with target resolution (agent, task, topic)
+- [x] 2C.3 Implement message queue routing logic
+- [x] 2C.4 Implement getMessages() with limit and getFullMessage()
+- [x] 2C.5 Implement subscribe() and unsubscribe() for topics
+- [x] 2C.6 Implement getSubscriptions()
+- [x] 2C.7 Implement automatic subscription setup helper
+- [x] 2C.8 Implement status event routing to subtree subscribers
+- [x] 2C.9 Implement message truncation for large content
+- [x] 2C.10 Write tests for message routing (35 tests passing)
 
 ---
 
