@@ -52,22 +52,22 @@
 
 ---
 
-## Phase 3: MCP Tools (Parallel - by tool)
+## Phase 3: MCP Tools (Parallel - by tool) ✅ COMPLETE
 
 ### 3. MCP Server & Tools
-- [ ] 3.1 Set up MCP server with tool registration
-- [ ] 3.2 Implement tool context injection (agent_id, session_id)
-- [ ] 3.3 Implement spawn_agent tool
-- [ ] 3.4 Implement emit_status tool
-- [ ] 3.5 Implement send_message tool
-- [ ] 3.6 Implement check_messages tool
-- [ ] 3.7 Implement query_index tool
-- [ ] 3.8 Implement get_hierarchy tool
-- [ ] 3.9 Implement get_agent_summary tool
-- [ ] 3.10 Implement stop_agent tool (with subtree ownership check)
-- [ ] 3.11 Implement create_task tool
-- [ ] 3.12 Implement get_task tool
-- [ ] 3.13 Write tests for all MCP tools
+- [x] 3.1 Set up MCP server with tool registration
+- [x] 3.2 Implement tool context injection (agent_id, session_id)
+- [x] 3.3 Implement spawn_agent tool
+- [x] 3.4 Implement emit_status tool
+- [x] 3.5 Implement send_message tool
+- [x] 3.6 Implement check_messages tool
+- [x] 3.7 Implement query_index tool
+- [x] 3.8 Implement get_hierarchy tool
+- [x] 3.9 Implement get_agent_summary tool
+- [x] 3.10 Implement stop_agent tool (with subtree ownership check)
+- [x] 3.11 Implement create_task tool
+- [x] 3.12 Implement get_task tool
+- [x] 3.13 Write tests for all MCP tools (28 tests passing)
 
 ---
 
