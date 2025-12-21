@@ -132,7 +132,7 @@ export {
   type QueryIndexOutput,
   type GetHierarchyInput,
   type GetHierarchyOutput,
-  type HierarchyNode,
+  type HierarchyNode as MCPHierarchyNode,
   type GetAgentSummaryInput,
   type GetAgentSummaryOutput,
   type StopAgentInput,
@@ -144,3 +144,41 @@ export {
   MCPToolError,
   type MCPToolErrorCode,
 } from './mcp/types.js';
+
+// API server
+export {
+  createAPIServer,
+  type APIServer,
+  type APIServerConfig,
+  type APIServices,
+} from './api/server.js';
+
+export {
+  type SystemStatus,
+  type InitRequest,
+  type InitResponse,
+  type ConversationMessageRequest,
+  type ConversationMessageResponse,
+  type ConversationHistoryEntry,
+  type ConversationHistoryResponse,
+  type AgentSummary,
+  type AgentDetail,
+  type AgentListResponse,
+  type HierarchyNode as APIHierarchyNode,
+  type HierarchyResponse,
+  type TaskSummary,
+  type TaskDetail,
+  type TaskListResponse,
+  type EventSummary,
+  type EventListResponse,
+  type WSMessage,
+  type WSMessageType,
+  type WSSubscribeMessage,
+  type WSAgentUpdate,
+  type WSTaskUpdate,
+  type WSConversationMessage,
+  type AgentQueryParams,
+  type TaskQueryParams,
+  type EventQueryParams,
+  type APIError,
+} from './api/types.js';

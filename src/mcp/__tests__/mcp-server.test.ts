@@ -51,6 +51,7 @@ function createMockEventStore(): EventStore {
     emit: vi.fn((input) => {
       const event = {
         id: `evt_${Date.now()}`,
+        version: 1,
         timestamp: Date.now(),
         ...input,
       };
@@ -204,7 +205,8 @@ describe("MCP Server", () => {
 
   describe("spawn_agent tool", () => {
     it("should spawn a child agent", async () => {
-      const mcpServer = createMCPServer(context, services);
+      // Create MCP server (tools are registered on creation)
+      createMCPServer(context, services);
 
       // Access the tool handler directly through the server's internal registry
       // For testing, we'll verify the agentManager.spawn was called correctly
