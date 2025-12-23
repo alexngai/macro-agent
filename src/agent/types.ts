@@ -136,6 +136,14 @@ export interface AgentHierarchy {
   totalAgents: number;
 }
 
+/**
+ * Options for getHierarchy
+ */
+export interface HierarchyOptions {
+  /** Maximum depth to traverse (undefined = full tree) */
+  depth?: number;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Session Management
 // ─────────────────────────────────────────────────────────────────
@@ -191,6 +199,12 @@ export interface HeadManagerOptions {
 
   /** Initial topics to subscribe to */
   topics?: string[];
+
+  /** Resume a specific session by ID */
+  sessionId?: string;
+
+  /** Force creation of a new session, ignoring existing ones */
+  forceNew?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────

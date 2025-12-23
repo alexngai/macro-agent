@@ -135,4 +135,27 @@ export type RoutingErrorCode =
   | "AGENT_NOT_FOUND" // Target agent doesn't exist
   | "TASK_NOT_FOUND" // Target task doesn't exist
   | "TASK_UNASSIGNED" // Task has no assigned agent
+  | "SPAWN_FAILED" // Failed to spawn agent for unassigned task
   | "TOPIC_NO_SUBSCRIBERS"; // Topic has no subscribers (warning, not error)
+
+/**
+ * Result from spawning an agent for an unassigned task.
+ */
+export interface SpawnedAgentResult {
+  agent_id: AgentId;
+  session_id: string;
+}
+
+/**
+ * Callback to spawn an agent for a task.
+ * Used when a message is routed to a task with no assigned agent.
+ */
+export type AgentSpawner = (
+  taskId: TaskId,
+  taskDescription: string
+) => Promise<SpawnedAgentResult>;
+
+/**
+ * Callback to check if an agent has an active session.
+ */
+export type AgentSessionChecker = (agentId: AgentId) => boolean;

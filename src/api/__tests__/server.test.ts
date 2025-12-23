@@ -442,4 +442,79 @@ describe("API Server", () => {
       expect(res.body.total).toBe(0);
     });
   });
+
+  describe("Graceful Shutdown", () => {
+    it("should call eventStore.persist and close on graceful shutdown", async () => {
+      const server = createAPIServer(services);
+      await server.start();
+      await server.stop();
+
+      expect(eventStore.persist).toHaveBeenCalled();
+      expect(eventStore.close).toHaveBeenCalled();
+      expect(agentManager.close).toHaveBeenCalled();
+    });
+
+    it("should skip grace period on force shutdown", async () => {
+      const server = createAPIServer(services, { shutdownGracePeriodMs: 5000 });
+      await server.start();
+
+      const startTime = Date.now();
+      await server.stop({ force: true });
+      const elapsed = Date.now() - startTime;
+
+      // Force shutdown should complete quickly (well under grace period)
+      expect(elapsed).toBeLessThan(1000);
+      expect(eventStore.persist).toHaveBeenCalled();
+      expect(eventStore.close).toHaveBeenCalled();
+    });
+
+    it("should reject new messages during shutdown", async () => {
+      const server = createAPIServer(services);
+      await server.start();
+
+      // Initialize first
+      await request(server.app).post("/api/init").send({});
+
+      // Start shutdown but don't await it yet
+      const stopPromise = server.stop();
+
+      // Try to send a message during shutdown
+      const res = await request(server.app)
+        .post("/api/conversation/message")
+        .send({ message: "Hello" });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("SHUTTING_DOWN");
+
+      await stopPromise;
+    });
+
+    it("should have registerSignalHandlers method", () => {
+      const server = createAPIServer(services);
+      expect(typeof server.registerSignalHandlers).toBe("function");
+    });
+
+    it("should only shutdown once on multiple stop calls", async () => {
+      const server = createAPIServer(services);
+      await server.start();
+
+      // Call stop twice concurrently
+      await Promise.all([server.stop(), server.stop()]);
+
+      // Services should only be closed once
+      expect(eventStore.close).toHaveBeenCalledTimes(1);
+      expect(agentManager.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("should use custom shutdown grace period", async () => {
+      const customGracePeriod = 100;
+      const server = createAPIServer(services, {
+        shutdownGracePeriodMs: customGracePeriod,
+      });
+      await server.start();
+      await server.stop();
+
+      expect(eventStore.persist).toHaveBeenCalled();
+    });
+  });
 });

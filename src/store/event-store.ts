@@ -43,6 +43,33 @@ export type MessageCallback = (agentId: AgentId, messages: QueuedMessage[]) => v
 // Unsubscribe function type
 export type Unsubscribe = () => void;
 
+// Archive-related types
+export interface ArchiveOptions {
+  olderThan?: string; // "7d", "30d"
+  before?: Timestamp;
+}
+
+export interface ArchiveResult {
+  archivedCount: number;
+  archivePath: string;
+  oldestRetained: Timestamp;
+}
+
+export interface ArchiveInfo {
+  archives: Array<{ path: string; from: Timestamp; to: Timestamp; eventCount: number }>;
+  totalArchivedEvents: number;
+}
+
+interface ArchiveManifest {
+  version: number;
+  archives: Array<{ path: string; from: Timestamp; to: Timestamp; eventCount: number }>;
+}
+
+interface LoadArchiveOptions {
+  from?: Timestamp;
+  to?: Timestamp;
+}
+
 /**
  * Event Store interface
  */
@@ -78,6 +105,33 @@ export interface EventStore {
   // Lifecycle
   persist(): Promise<void>;
   close(): Promise<void>;
+
+  // Archival
+  archive(options?: ArchiveOptions): Promise<ArchiveResult>;
+  loadArchive(options?: LoadArchiveOptions): Promise<Event[]>;
+  getArchiveInfo(): Promise<ArchiveInfo>;
+}
+
+/**
+ * Parse a duration string (e.g., "30d", "7d") to milliseconds
+ */
+export function parseDuration(duration: string): number {
+  const match = duration.match(/^(\d+)([dhms])$/);
+  if (!match) {
+    throw new Error(`Invalid duration format: "${duration}". Use format like "30d", "7d", "24h", "60m", "30s".`);
+  }
+
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+
+  const multipliers: Record<string, number> = {
+    s: 1000,
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+  };
+
+  return value * multipliers[unit];
 }
 
 /**
@@ -459,6 +513,187 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     }
   }
 
+  /**
+   * Get archives directory path
+   */
+  function getArchivesDir(): string {
+    return path.join(path.dirname(storagePath), 'archives');
+  }
+
+  /**
+   * Get manifest file path
+   */
+  function getManifestPath(): string {
+    return path.join(getArchivesDir(), 'manifest.json');
+  }
+
+  /**
+   * Read archive manifest
+   */
+  function readManifest(): ArchiveManifest {
+    const manifestPath = getManifestPath();
+    if (fs.existsSync(manifestPath)) {
+      return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    }
+    return { version: 1, archives: [] };
+  }
+
+  /**
+   * Write archive manifest
+   */
+  function writeManifest(manifest: ArchiveManifest): void {
+    const manifestPath = getManifestPath();
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+
+  /**
+   * Archive old events to prevent unbounded store growth
+   */
+  async function archive(options: ArchiveOptions = {}): Promise<ArchiveResult> {
+    // Calculate cutoff timestamp
+    let cutoff: Timestamp;
+    if (options.before !== undefined) {
+      cutoff = options.before;
+    } else if (options.olderThan) {
+      cutoff = Date.now() - parseDuration(options.olderThan);
+    } else {
+      // Default to 30 days
+      cutoff = Date.now() - parseDuration('30d');
+    }
+
+    // Query events older than cutoff
+    const allEvents = query();
+    const eventsToArchive = allEvents.filter((e) => e.timestamp < cutoff);
+    const eventsToRetain = allEvents.filter((e) => e.timestamp >= cutoff);
+
+    if (eventsToArchive.length === 0) {
+      return {
+        archivedCount: 0,
+        archivePath: '',
+        oldestRetained: eventsToRetain.length > 0 ? eventsToRetain[0].timestamp : Date.now(),
+      };
+    }
+
+    // Ensure archives directory exists
+    const archivesDir = getArchivesDir();
+    if (!fs.existsSync(archivesDir)) {
+      fs.mkdirSync(archivesDir, { recursive: true });
+    }
+
+    // Group events by month
+    const eventsByMonth = new Map<string, Event[]>();
+    for (const event of eventsToArchive) {
+      const date = new Date(event.timestamp);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      if (!eventsByMonth.has(monthKey)) {
+        eventsByMonth.set(monthKey, []);
+      }
+      eventsByMonth.get(monthKey)!.push(event);
+    }
+
+    // Read existing manifest
+    const manifest = readManifest();
+
+    // Write archive files and update manifest
+    let lastArchivePath = '';
+    for (const [monthKey, monthEvents] of eventsByMonth) {
+      const archivePath = path.join(archivesDir, `${monthKey}.json`);
+      lastArchivePath = archivePath;
+
+      // Read existing archive if it exists and merge
+      let existingEvents: Event[] = [];
+      if (fs.existsSync(archivePath)) {
+        existingEvents = JSON.parse(fs.readFileSync(archivePath, 'utf-8'));
+      }
+
+      // Merge and deduplicate by event ID
+      const mergedEvents = [...existingEvents, ...monthEvents];
+      const uniqueEvents = Array.from(new Map(mergedEvents.map((e) => [e.id, e])).values());
+      uniqueEvents.sort((a, b) => a.timestamp - b.timestamp);
+
+      // Write archive file
+      fs.writeFileSync(archivePath, JSON.stringify(uniqueEvents, null, 2));
+
+      // Update manifest entry
+      const existingIndex = manifest.archives.findIndex((a) => a.path === archivePath);
+      const archiveEntry = {
+        path: archivePath,
+        from: uniqueEvents[0].timestamp,
+        to: uniqueEvents[uniqueEvents.length - 1].timestamp,
+        eventCount: uniqueEvents.length,
+      };
+
+      if (existingIndex >= 0) {
+        manifest.archives[existingIndex] = archiveEntry;
+      } else {
+        manifest.archives.push(archiveEntry);
+      }
+    }
+
+    // Sort manifest archives by date
+    manifest.archives.sort((a, b) => a.from - b.from);
+
+    // Write updated manifest
+    writeManifest(manifest);
+
+    // Remove archived events from active store
+    for (const event of eventsToArchive) {
+      store.delRow('events', event.id);
+    }
+
+    // Persist the updated store
+    await persist();
+
+    return {
+      archivedCount: eventsToArchive.length,
+      archivePath: lastArchivePath,
+      oldestRetained: eventsToRetain.length > 0 ? eventsToRetain[0].timestamp : Date.now(),
+    };
+  }
+
+  /**
+   * Load archived events by date range
+   */
+  async function loadArchive(options: LoadArchiveOptions = {}): Promise<Event[]> {
+    const manifest = readManifest();
+    const events: Event[] = [];
+
+    for (const archive of manifest.archives) {
+      // Skip archives outside the requested range
+      if (options.from !== undefined && archive.to < options.from) continue;
+      if (options.to !== undefined && archive.from > options.to) continue;
+
+      // Read archive file
+      if (!fs.existsSync(archive.path)) continue;
+      const archiveEvents: Event[] = JSON.parse(fs.readFileSync(archive.path, 'utf-8'));
+
+      // Filter by date range
+      for (const event of archiveEvents) {
+        if (options.from !== undefined && event.timestamp < options.from) continue;
+        if (options.to !== undefined && event.timestamp > options.to) continue;
+        events.push(event);
+      }
+    }
+
+    // Sort by timestamp
+    events.sort((a, b) => a.timestamp - b.timestamp);
+
+    return events;
+  }
+
+  /**
+   * Get information about available archives
+   */
+  async function getArchiveInfo(): Promise<ArchiveInfo> {
+    const manifest = readManifest();
+    const totalArchivedEvents = manifest.archives.reduce((sum, a) => sum + a.eventCount, 0);
+
+    return {
+      archives: manifest.archives,
+      totalArchivedEvents,
+    };
+  }
+
   return {
     emit,
     query,
@@ -477,6 +712,9 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     onMessageChange,
     persist,
     close,
+    archive,
+    loadArchive,
+    getArchiveInfo,
   };
 }
 

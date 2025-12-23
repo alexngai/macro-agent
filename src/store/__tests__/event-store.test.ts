@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createEventStore, EventStore } from '../event-store.js';
+import { createEventStore, EventStore, parseDuration } from '../event-store.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 describe('EventStore', () => {
   let store: EventStore;
@@ -514,6 +517,241 @@ describe('EventStore', () => {
 
       // Should only have one change (before unsubscribe)
       expect(changes.length).toBe(1);
+    });
+  });
+});
+
+describe('parseDuration', () => {
+  it('should parse seconds', () => {
+    expect(parseDuration('30s')).toBe(30 * 1000);
+  });
+
+  it('should parse minutes', () => {
+    expect(parseDuration('60m')).toBe(60 * 60 * 1000);
+  });
+
+  it('should parse hours', () => {
+    expect(parseDuration('24h')).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('should parse days', () => {
+    expect(parseDuration('30d')).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(parseDuration('7d')).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+
+  it('should throw on invalid format', () => {
+    expect(() => parseDuration('30')).toThrow('Invalid duration format');
+    expect(() => parseDuration('30x')).toThrow('Invalid duration format');
+    expect(() => parseDuration('abc')).toThrow('Invalid duration format');
+  });
+});
+
+describe('Event Archival', () => {
+  let store: EventStore;
+  let testDir: string;
+
+  beforeEach(async () => {
+    // Create a temporary directory for testing
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'event-store-test-'));
+    const storePath = path.join(testDir, 'store.json');
+    store = await createEventStore({ path: storePath });
+  });
+
+  afterEach(async () => {
+    await store.close();
+    // Clean up temp directory
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  describe('archive', () => {
+    it('should archive events older than threshold', async () => {
+      // Create events with old timestamps by manipulating time
+      const now = Date.now();
+      const oldTimestamp = now - 40 * 24 * 60 * 60 * 1000; // 40 days ago
+
+      // Emit some events
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+
+      // Archive with 'before' option to archive all current events
+      const result = await store.archive({ before: now + 10000 });
+
+      expect(result.archivedCount).toBe(2);
+      expect(result.archivePath).toContain('.json');
+
+      // Verify events are removed from active store
+      const remainingEvents = store.query();
+      expect(remainingEvents.length).toBe(0);
+    });
+
+    it('should return empty result when no events to archive', async () => {
+      // Emit recent events
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work' },
+      });
+
+      // Archive with olderThan that won't match any events
+      const result = await store.archive({ olderThan: '30d' });
+
+      expect(result.archivedCount).toBe(0);
+      expect(result.archivePath).toBe('');
+    });
+
+    it('should preserve materialized views after archive', async () => {
+      // Create agent
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work' },
+      });
+
+      store.emit({
+        type: 'status',
+        source: { agent_id: 'agent_1' },
+        payload: { status_type: 'started', summary: 'Starting' },
+      });
+
+      // Verify agent exists before archive
+      const agentBefore = store.getAgent('agent_1');
+      expect(agentBefore).not.toBeNull();
+      expect(agentBefore!.state).toBe('running');
+
+      // Archive all events
+      await store.archive({ before: Date.now() + 10000 });
+
+      // Agent view should still work (materialized views aren't affected)
+      const agentAfter = store.getAgent('agent_1');
+      expect(agentAfter).not.toBeNull();
+      expect(agentAfter!.state).toBe('running');
+    });
+  });
+
+  describe('loadArchive', () => {
+    it('should load archived events by date range', async () => {
+      // Emit events
+      const event1 = store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+
+      const event2 = store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+
+      // Archive all events
+      await store.archive({ before: Date.now() + 10000 });
+
+      // Load all archived events
+      const archivedEvents = await store.loadArchive();
+
+      expect(archivedEvents.length).toBe(2);
+      expect(archivedEvents[0].id).toBe(event1.id);
+      expect(archivedEvents[1].id).toBe(event2.id);
+    });
+
+    it('should filter archived events by date range', async () => {
+      // Emit events
+      const event1 = store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+
+      // Archive all events
+      await store.archive({ before: Date.now() + 10000 });
+
+      // Load with from filter (should return event1)
+      const archivedEvents = await store.loadArchive({
+        from: event1.timestamp - 1000,
+        to: event1.timestamp + 1000,
+      });
+
+      expect(archivedEvents.length).toBe(1);
+      expect(archivedEvents[0].id).toBe(event1.id);
+    });
+
+    it('should return empty array when no archives exist', async () => {
+      const events = await store.loadArchive();
+      expect(events).toEqual([]);
+    });
+  });
+
+  describe('getArchiveInfo', () => {
+    it('should return correct metadata about archives', async () => {
+      // Emit events
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+
+      // Archive all events
+      await store.archive({ before: Date.now() + 10000 });
+
+      // Get archive info
+      const info = await store.getArchiveInfo();
+
+      expect(info.totalArchivedEvents).toBe(2);
+      expect(info.archives.length).toBe(1);
+      expect(info.archives[0].eventCount).toBe(2);
+      expect(info.archives[0].path).toContain('.json');
+    });
+
+    it('should return empty info when no archives exist', async () => {
+      const info = await store.getArchiveInfo();
+
+      expect(info.totalArchivedEvents).toBe(0);
+      expect(info.archives).toEqual([]);
+    });
+  });
+
+  describe('multiple archive operations', () => {
+    it('should merge events into existing archive files', async () => {
+      // First batch
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+
+      await store.archive({ before: Date.now() + 5000 });
+
+      // Second batch
+      store.emit({
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+
+      await store.archive({ before: Date.now() + 10000 });
+
+      // Should have merged into same archive file
+      const info = await store.getArchiveInfo();
+      expect(info.totalArchivedEvents).toBe(2);
+
+      // Load and verify all events are there
+      const events = await store.loadArchive();
+      expect(events.length).toBe(2);
     });
   });
 });

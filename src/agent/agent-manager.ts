@@ -29,6 +29,7 @@ import type {
   AgentFilter,
   AgentHierarchy,
   AgentHierarchyNode,
+  HierarchyOptions,
   ActiveSession,
   AgentStopReason,
   HeadManagerOptions,
@@ -82,8 +83,9 @@ export interface AgentManager {
 
   /**
    * Get full hierarchy tree starting from an agent.
+   * @param options.depth - Maximum depth to traverse (undefined = full tree)
    */
-  getHierarchy(agentId: AgentId): AgentHierarchy | null;
+  getHierarchy(agentId: AgentId, options?: HierarchyOptions): AgentHierarchy | null;
 
   // ── Head Manager ───────────────────────────────────────────────
 
@@ -467,19 +469,26 @@ export function createAgentManager(
     return eventStore.listAgents({ parent: agentId });
   }
 
-  function getHierarchy(agentId: AgentId): AgentHierarchy | null {
+  function getHierarchy(
+    agentId: AgentId,
+    options?: HierarchyOptions
+  ): AgentHierarchy | null {
     const agent = eventStore.getAgent(agentId);
     if (!agent) return null;
 
-    function buildNode(a: Agent): AgentHierarchyNode {
-      const children = getChildren(a.id);
+    const maxDepth = options?.depth;
+
+    function buildNode(a: Agent, currentDepth: number): AgentHierarchyNode {
+      const shouldIncludeChildren =
+        maxDepth === undefined || currentDepth < maxDepth;
+      const children = shouldIncludeChildren ? getChildren(a.id) : [];
       return {
         agent: a,
-        children: children.map(buildNode),
+        children: children.map((c) => buildNode(c, currentDepth + 1)),
       };
     }
 
-    const root = buildNode(agent);
+    const root = buildNode(agent, 1);
 
     // Calculate depth and total agents
     function calcDepth(node: AgentHierarchyNode): number {
@@ -505,11 +514,54 @@ export function createAgentManager(
   async function getOrCreateHeadManager(
     options: HeadManagerOptions
   ): Promise<SpawnedAgent> {
-    const { cwd, systemPrompt, permissionMode, topics = [] } = options;
+    const {
+      cwd,
+      systemPrompt,
+      permissionMode,
+      topics = [],
+      sessionId,
+      forceNew = false,
+    } = options;
 
-    // Check for existing running head manager in this cwd
-    // (For simplicity, we create new ones; could add cwd tracking if needed)
+    // If not forcing new, attempt to resume an existing session
+    if (!forceNew) {
+      const headManagers = listHeadManagers()
+        .filter((h) => h.state === "running")
+        .sort((a, b) => {
+          // Sort by started_at descending, then by created_at descending as tiebreaker
+          const startDiff = (b.started_at ?? 0) - (a.started_at ?? 0);
+          if (startDiff !== 0) return startDiff;
+          return b.created_at - a.created_at;
+        });
 
+      if (sessionId) {
+        // Resume specific session by ID
+        const specific = headManagers.find((h) => h.session_id === sessionId);
+        if (specific && activeSessions.has(specific.id)) {
+          const activeSession = activeSessions.get(specific.id)!;
+          return {
+            id: specific.id,
+            session_id: specific.session_id,
+            agent: specific,
+            session: activeSession.session,
+          };
+        }
+      } else if (headManagers.length > 0) {
+        // Resume latest running session with active session
+        const latest = headManagers[0];
+        if (activeSessions.has(latest.id)) {
+          const activeSession = activeSessions.get(latest.id)!;
+          return {
+            id: latest.id,
+            session_id: latest.session_id,
+            agent: latest,
+            session: activeSession.session,
+          };
+        }
+      }
+    }
+
+    // No existing session found or forceNew requested - create new
     return spawn({
       task:
         systemPrompt ??

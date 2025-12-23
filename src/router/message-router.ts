@@ -31,6 +31,8 @@ import type {
   EmitStatusRequest,
   StatusNotification,
   TruncationConfig,
+  AgentSpawner,
+  AgentSessionChecker,
 } from "./types.js";
 import { RoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
 
@@ -45,9 +47,10 @@ export interface MessageRouter {
   /**
    * Send a message to target(s).
    * Routes based on target type: agent_id, task_id, or topic.
+   * If the target is a task with no assigned agent, may spawn a new agent.
    * @throws RoutingError if target cannot be resolved
    */
-  send(request: SendMessageRequest): SentMessage;
+  send(request: SendMessageRequest): Promise<SentMessage>;
 
   /**
    * Emit a status event from an agent.
@@ -132,6 +135,16 @@ export interface MessageRouter {
  */
 export interface MessageRouterConfig {
   truncation?: TruncationConfig;
+  /**
+   * Optional callback to spawn an agent for a task.
+   * Used when routing to a task with no assigned agent.
+   */
+  agentSpawner?: AgentSpawner;
+  /**
+   * Optional callback to check if an agent has an active session.
+   * Used to determine if a previous agent can be reused.
+   */
+  agentSessionChecker?: AgentSessionChecker;
 }
 
 /**
@@ -142,6 +155,8 @@ export function createMessageRouter(
   config: MessageRouterConfig = {}
 ): MessageRouter {
   const truncationConfig = config.truncation ?? DEFAULT_TRUNCATION_CONFIG;
+  const agentSpawner = config.agentSpawner;
+  const agentSessionChecker = config.agentSessionChecker;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -150,7 +165,7 @@ export function createMessageRouter(
   // Message Operations
   // ─────────────────────────────────────────────────────────────────
 
-  function send(request: SendMessageRequest): SentMessage {
+  async function send(request: SendMessageRequest): Promise<SentMessage> {
     const { from, to, content, correlation_id } = request;
 
     // Validate target
@@ -159,7 +174,7 @@ export function createMessageRouter(
     }
 
     // Resolve recipients and build effective target
-    const resolvedTarget = resolveTarget(to);
+    const resolvedTarget = await resolveTarget(to);
 
     // Emit message event with resolved target
     const event = eventStore.emit({
@@ -356,10 +371,10 @@ export function createMessageRouter(
    * Converts task_id to assigned agent_id.
    * Returns target suitable for EventStore emission.
    */
-  function resolveTarget(target: MessageTarget): {
+  async function resolveTarget(target: MessageTarget): Promise<{
     agent_id?: string;
     topic?: string;
-  } {
+  }> {
     const resolved: { agent_id?: string; topic?: string } = {};
 
     // Direct agent target
@@ -386,18 +401,13 @@ export function createMessageRouter(
         );
       }
       if (!task.assigned_agent) {
-        // TODO: When AgentManager is available, implement:
-        // 1. Find last agent that worked on this task
-        // 2. Wake that agent session
-        // 3. If unavailable, spawn new agent with task history
-        throw new RoutingError(
-          `Task ${target.task_id} has no assigned agent`,
-          "TASK_UNASSIGNED",
-          target
-        );
+        // Try to find or spawn an agent for this task
+        const agentId = await resolveOrSpawnAgentForTask(task);
+        resolved.agent_id = agentId;
+      } else {
+        // Route to the assigned agent
+        resolved.agent_id = task.assigned_agent;
       }
-      // Route to the assigned agent
-      resolved.agent_id = task.assigned_agent;
     }
 
     // Topic target - pass through for EventStore to handle
@@ -406,6 +416,53 @@ export function createMessageRouter(
     }
 
     return resolved;
+  }
+
+  /**
+   * Resolve or spawn an agent for an unassigned task.
+   * 1. Check if last assigned agent is still running → use it
+   * 2. Otherwise, spawn new agent with task description
+   * 3. The new agent gets assigned to the task by the spawner
+   */
+  async function resolveOrSpawnAgentForTask(task: {
+    id: TaskId;
+    description: string;
+    agent_history?: Array<{ agent_id: AgentId }>;
+  }): Promise<AgentId> {
+    // 1. Check if last assigned agent from history is still running
+    if (task.agent_history && task.agent_history.length > 0) {
+      const lastEntry = task.agent_history[task.agent_history.length - 1];
+      const lastAgentId = lastEntry.agent_id;
+
+      // Check if agent exists and has an active session
+      const lastAgent = eventStore.getAgent(lastAgentId);
+      if (lastAgent && lastAgent.state === "running") {
+        // Verify with session checker if available
+        if (!agentSessionChecker || agentSessionChecker(lastAgentId)) {
+          return lastAgentId;
+        }
+      }
+    }
+
+    // 2. No running previous agent - spawn a new one
+    if (!agentSpawner) {
+      throw new RoutingError(
+        `Task ${task.id} has no assigned agent and no agent spawner configured`,
+        "TASK_UNASSIGNED",
+        { task_id: task.id }
+      );
+    }
+
+    try {
+      const result = await agentSpawner(task.id, task.description);
+      return result.agent_id;
+    } catch (error) {
+      throw new RoutingError(
+        `Failed to spawn agent for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+        "SPAWN_FAILED",
+        { task_id: task.id }
+      );
+    }
   }
 
   /**

@@ -175,6 +175,76 @@ describe("AgentManager", () => {
         const hierarchy = agentManager.getHierarchy("nonexistent");
         expect(hierarchy).toBeNull();
       });
+
+      it("should return full hierarchy when no depth specified", () => {
+        createAgentDirectly("root", null);
+        createAgentDirectly("child_1", "root");
+        createAgentDirectly("grandchild_1", "child_1");
+        createAgentDirectly("great_grandchild_1", "grandchild_1");
+
+        const hierarchy = agentManager.getHierarchy("root");
+
+        expect(hierarchy).toBeDefined();
+        expect(hierarchy!.depth).toBe(4);
+        expect(hierarchy!.totalAgents).toBe(4);
+        // Verify full tree is present
+        expect(hierarchy!.root.children).toHaveLength(1);
+        expect(hierarchy!.root.children[0].children).toHaveLength(1);
+        expect(hierarchy!.root.children[0].children[0].children).toHaveLength(1);
+      });
+
+      it("should limit hierarchy with depth=1 (root only)", () => {
+        createAgentDirectly("root", null);
+        createAgentDirectly("child_1", "root");
+        createAgentDirectly("child_2", "root");
+        createAgentDirectly("grandchild_1", "child_1");
+
+        const hierarchy = agentManager.getHierarchy("root", { depth: 1 });
+
+        expect(hierarchy).toBeDefined();
+        expect(hierarchy!.root.agent.id).toBe("root");
+        expect(hierarchy!.root.children).toHaveLength(0);
+        expect(hierarchy!.totalAgents).toBe(1);
+        expect(hierarchy!.depth).toBe(1);
+      });
+
+      it("should limit hierarchy with depth=2 (root + children)", () => {
+        createAgentDirectly("root", null);
+        createAgentDirectly("child_1", "root");
+        createAgentDirectly("child_2", "root");
+        createAgentDirectly("grandchild_1", "child_1");
+        createAgentDirectly("grandchild_2", "child_2");
+
+        const hierarchy = agentManager.getHierarchy("root", { depth: 2 });
+
+        expect(hierarchy).toBeDefined();
+        expect(hierarchy!.root.agent.id).toBe("root");
+        expect(hierarchy!.root.children).toHaveLength(2);
+        // Children should have no children (depth limit reached)
+        expect(hierarchy!.root.children[0].children).toHaveLength(0);
+        expect(hierarchy!.root.children[1].children).toHaveLength(0);
+        expect(hierarchy!.totalAgents).toBe(3);
+        expect(hierarchy!.depth).toBe(2);
+      });
+
+      it("should respect depth limit on deep hierarchy", () => {
+        createAgentDirectly("root", null);
+        createAgentDirectly("level2", "root");
+        createAgentDirectly("level3", "level2");
+        createAgentDirectly("level4", "level3");
+        createAgentDirectly("level5", "level4");
+
+        const hierarchy = agentManager.getHierarchy("root", { depth: 3 });
+
+        expect(hierarchy).toBeDefined();
+        expect(hierarchy!.root.agent.id).toBe("root");
+        expect(hierarchy!.root.children).toHaveLength(1);
+        expect(hierarchy!.root.children[0].children).toHaveLength(1);
+        // Level 3 should have no children due to depth limit
+        expect(hierarchy!.root.children[0].children[0].children).toHaveLength(0);
+        expect(hierarchy!.totalAgents).toBe(3);
+        expect(hierarchy!.depth).toBe(3);
+      });
     });
 
     describe("listHeadManagers()", () => {
@@ -306,15 +376,22 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
 
-    // Set up mocks
-    mockSession = {
-      id: "mock_session_123",
-      prompt: vi.fn(),
-    };
+    // Counter for unique session IDs
+    let sessionCounter = 0;
 
+    // Set up mocks with unique session IDs per call
     mockHandle = {
-      createSession: vi.fn().mockResolvedValue(mockSession),
-      loadSession: vi.fn().mockResolvedValue(mockSession),
+      createSession: vi.fn().mockImplementation(() => {
+        sessionCounter++;
+        mockSession = {
+          id: `mock_session_${sessionCounter}`,
+          prompt: vi.fn(),
+        };
+        return Promise.resolve(mockSession);
+      }),
+      loadSession: vi.fn().mockImplementation(() => {
+        return Promise.resolve(mockSession);
+      }),
       close: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -338,8 +415,8 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       });
 
       expect(result.id).toMatch(/^agent_/);
-      expect(result.session_id).toBe("mock_session_123");
-      expect(result.session).toBe(mockSession);
+      expect(result.session_id).toMatch(/^mock_session_/);
+      expect(result.session).toBeDefined();
 
       // Verify agent in EventStore
       const agent = agentManager.get(result.id);
@@ -443,7 +520,7 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
   });
 
   describe("getOrCreateHeadManager()", () => {
-    it("should create a head manager", async () => {
+    it("should create a head manager when none exist", async () => {
       const head = await agentManager.getOrCreateHeadManager({
         cwd: "/tmp",
       });
@@ -452,6 +529,85 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(agentManager.listHeadManagers()).toContainEqual(
         expect.objectContaining({ id: head.id }),
       );
+    });
+
+    it("should resume latest session when calling without options", async () => {
+      // Create first head manager
+      const first = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+      });
+
+      // Small delay to ensure different timestamp
+      await new Promise((r) => setTimeout(r, 5));
+
+      // Create second head manager
+      const second = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+        forceNew: true,
+      });
+
+      // Call again without forceNew - should resume the latest (second)
+      const resumed = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+      });
+
+      expect(resumed.id).toBe(second.id);
+      expect(resumed.session_id).toBe(second.session_id);
+    });
+
+    it("should create new session with forceNew: true", async () => {
+      // Create initial head manager
+      const first = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+      });
+
+      // Force create new one
+      const second = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+        forceNew: true,
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(second.session_id).not.toBe(first.session_id);
+      expect(agentManager.listHeadManagers()).toHaveLength(2);
+    });
+
+    it("should resume specific session with sessionId", async () => {
+      // Create first head manager
+      const first = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+      });
+
+      // Create second head manager
+      const second = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+        forceNew: true,
+      });
+
+      // Resume specific session by ID
+      const resumed = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+        sessionId: first.session_id,
+      });
+
+      expect(resumed.id).toBe(first.id);
+      expect(resumed.session_id).toBe(first.session_id);
+    });
+
+    it("should create new session when specified sessionId not found", async () => {
+      // Create a head manager
+      const first = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+      });
+
+      // Try to resume non-existent session
+      const newOne = await agentManager.getOrCreateHeadManager({
+        cwd: "/tmp",
+        sessionId: "nonexistent_session",
+      });
+
+      // Should create a new session since the specified one doesn't exist
+      expect(newOne.id).not.toBe(first.id);
     });
   });
 

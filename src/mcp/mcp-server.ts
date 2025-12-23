@@ -290,7 +290,7 @@ export function createMCPServer(
     inputSchema: SendMessageSchema,
   }, async (args) => {
     try {
-      const result = messageRouter.send({
+      const result = await messageRouter.send({
         from: { agent_id: context.agent_id, task_id: context.task_id },
         to: args.to,
         content: args.content,

@@ -20,7 +20,7 @@ describe("MessageRouter", () => {
     await eventStore.close();
   });
 
-  // Helper to create an agent
+  // Helper to create an agent (starts in "running" state)
   function createAgent(id: string, parent?: string, taskId?: string) {
     eventStore.emit({
       type: "spawn",
@@ -31,6 +31,15 @@ describe("MessageRouter", () => {
         task: `Task for ${id}`,
         task_id: taskId,
         parent: parent ?? null,
+      },
+    });
+    // Emit "started" status to transition to running state
+    eventStore.emit({
+      type: "status",
+      source: { agent_id: id },
+      payload: {
+        status_type: "started",
+        summary: "Agent started",
       },
     });
   }
@@ -67,11 +76,11 @@ describe("MessageRouter", () => {
 
   describe("send()", () => {
     describe("direct agent messaging", () => {
-      it("should send message to agent", () => {
+      it("should send message to agent", async () => {
         createAgent("sender_1");
         createAgent("recipient_1");
 
-        const result = router.send({
+        const result = await router.send({
           from: { agent_id: "sender_1" },
           to: { agent_id: "recipient_1" },
           content: "Hello",
@@ -84,11 +93,11 @@ describe("MessageRouter", () => {
         expect(result.timestamp).toBeDefined();
       });
 
-      it("should appear in recipient pending queue", () => {
+      it("should appear in recipient pending queue", async () => {
         createAgent("sender_1");
         createAgent("recipient_1");
 
-        router.send({
+        await router.send({
           from: { agent_id: "sender_1" },
           to: { agent_id: "recipient_1" },
           content: "Hello",
@@ -100,29 +109,29 @@ describe("MessageRouter", () => {
         expect(messages[0].from.agent_id).toBe("sender_1");
       });
 
-      it("should throw error if agent not found", () => {
+      it("should throw error if agent not found", async () => {
         createAgent("sender_1");
 
-        expect(() => {
+        await expect(
           router.send({
             from: { agent_id: "sender_1" },
             to: { agent_id: "nonexistent" },
             content: "Hello",
-          });
-        }).toThrow(RoutingError);
+          })
+        ).rejects.toThrow(RoutingError);
       });
 
-      it("should include correlation_id for threading", () => {
+      it("should include correlation_id for threading", async () => {
         createAgent("requester");
         createAgent("responder");
 
-        const original = router.send({
+        const original = await router.send({
           from: { agent_id: "requester" },
           to: { agent_id: "responder" },
           content: "Request",
         });
 
-        router.send({
+        await router.send({
           from: { agent_id: "responder" },
           to: { agent_id: "requester" },
           content: "Response",
@@ -135,13 +144,13 @@ describe("MessageRouter", () => {
     });
 
     describe("task messaging", () => {
-      it("should route message to task assigned agent", () => {
+      it("should route message to task assigned agent", async () => {
         createAgent("sender_1");
         createAgent("worker_1");
         createTask("task_1", "sender_1");
         assignTask("task_1", "worker_1");
 
-        router.send({
+        await router.send({
           from: { agent_id: "sender_1" },
           to: { task_id: "task_1" },
           content: "Status update needed",
@@ -152,34 +161,230 @@ describe("MessageRouter", () => {
         expect(messages[0].content).toBe("Status update needed");
       });
 
-      it("should throw error if task not found", () => {
+      it("should throw error if task not found", async () => {
         createAgent("sender_1");
 
-        expect(() => {
+        await expect(
           router.send({
             from: { agent_id: "sender_1" },
             to: { task_id: "nonexistent" },
             content: "Hello",
-          });
-        }).toThrow(RoutingError);
+          })
+        ).rejects.toThrow(RoutingError);
       });
 
-      it("should throw error if task has no assigned agent", () => {
+      it("should throw error if task has no assigned agent and no spawner", async () => {
         createAgent("sender_1");
         createTask("task_1", "sender_1");
 
-        expect(() => {
+        await expect(
           router.send({
             from: { agent_id: "sender_1" },
             to: { task_id: "task_1" },
             content: "Hello",
+          })
+        ).rejects.toThrow(RoutingError);
+      });
+
+      describe("auto-spawn agent for unassigned tasks", () => {
+        it("should spawn new agent when task has no assigned agent", async () => {
+          // Create a router with an agent spawner
+          const spawnerMock = async (taskId: string, description: string) => {
+            // Simulate creating an agent for the task
+            eventStore.emit({
+              type: "spawn",
+              source: { agent_id: "system" },
+              payload: {
+                agent_id: "spawned_agent",
+                session_id: "session_spawned",
+                task: description,
+                task_id: taskId,
+                parent: null,
+              },
+            });
+            // Assign the agent to the task
+            eventStore.emit({
+              type: "task",
+              source: { agent_id: "spawned_agent" },
+              payload: {
+                task_id: taskId,
+                action: "assigned",
+                details: { agent_id: "spawned_agent" },
+              },
+            });
+            return { agent_id: "spawned_agent", session_id: "session_spawned" };
+          };
+
+          const routerWithSpawner = createMessageRouter(eventStore, {
+            agentSpawner: spawnerMock,
           });
-        }).toThrow(RoutingError);
+
+          createAgent("sender_1");
+          createTask("task_1", "sender_1");
+
+          // Send message to unassigned task - should auto-spawn
+          await routerWithSpawner.send({
+            from: { agent_id: "sender_1" },
+            to: { task_id: "task_1" },
+            content: "Hello spawned agent!",
+          });
+
+          // Verify agent was spawned
+          const spawnedAgent = eventStore.getAgent("spawned_agent");
+          expect(spawnedAgent).toBeDefined();
+
+          // Verify message was delivered
+          const messages = routerWithSpawner.getMessages("spawned_agent");
+          expect(messages).toHaveLength(1);
+          expect(messages[0].content).toBe("Hello spawned agent!");
+        });
+
+        it("should use last running agent from history if available", async () => {
+          // Track if spawner was called
+          let spawnerCalled = false;
+          const spawnerMock = async () => {
+            spawnerCalled = true;
+            return { agent_id: "new_agent", session_id: "session_new" };
+          };
+
+          const sessionCheckerMock = (agentId: string) => agentId === "previous_agent";
+
+          const routerWithSpawner = createMessageRouter(eventStore, {
+            agentSpawner: spawnerMock,
+            agentSessionChecker: sessionCheckerMock,
+          });
+
+          createAgent("sender_1");
+          createAgent("previous_agent");
+          createTask("task_1", "sender_1");
+
+          // Add previous agent to history by assigning and then unassigning
+          assignTask("task_1", "previous_agent");
+          // Simulate unassign
+          eventStore.emit({
+            type: "task",
+            source: { agent_id: "previous_agent" },
+            payload: {
+              task_id: "task_1",
+              action: "unassigned",
+              details: { agent_id: "previous_agent" },
+            },
+          });
+
+          // Send message to unassigned task - should use previous agent
+          await routerWithSpawner.send({
+            from: { agent_id: "sender_1" },
+            to: { task_id: "task_1" },
+            content: "Hello previous agent!",
+          });
+
+          // Spawner should NOT have been called
+          expect(spawnerCalled).toBe(false);
+
+          // Message should be delivered to previous agent
+          const messages = routerWithSpawner.getMessages("previous_agent");
+          expect(messages).toHaveLength(1);
+          expect(messages[0].content).toBe("Hello previous agent!");
+        });
+
+        it("should spawn new agent when last agent is not running", async () => {
+          let spawnerCalled = false;
+          const spawnerMock = async (taskId: string, description: string) => {
+            spawnerCalled = true;
+            // Create new agent
+            eventStore.emit({
+              type: "spawn",
+              source: { agent_id: "system" },
+              payload: {
+                agent_id: "new_agent",
+                session_id: "session_new",
+                task: description,
+                task_id: taskId,
+                parent: null,
+              },
+            });
+            return { agent_id: "new_agent", session_id: "session_new" };
+          };
+
+          // Session checker says no agents are active
+          const sessionCheckerMock = () => false;
+
+          const routerWithSpawner = createMessageRouter(eventStore, {
+            agentSpawner: spawnerMock,
+            agentSessionChecker: sessionCheckerMock,
+          });
+
+          createAgent("sender_1");
+          createAgent("previous_agent");
+          createTask("task_1", "sender_1");
+
+          // Add previous agent to history
+          assignTask("task_1", "previous_agent");
+          eventStore.emit({
+            type: "task",
+            source: { agent_id: "previous_agent" },
+            payload: {
+              task_id: "task_1",
+              action: "unassigned",
+              details: { agent_id: "previous_agent" },
+            },
+          });
+
+          // Terminate previous agent
+          eventStore.emit({
+            type: "terminate",
+            source: { agent_id: "previous_agent" },
+            payload: {
+              agent_id: "previous_agent",
+              reason: "completed",
+            },
+          });
+
+          // Send message - should spawn new agent
+          await routerWithSpawner.send({
+            from: { agent_id: "sender_1" },
+            to: { task_id: "task_1" },
+            content: "Hello new agent!",
+          });
+
+          // Spawner should have been called
+          expect(spawnerCalled).toBe(true);
+
+          // Message should be delivered to new agent
+          const messages = routerWithSpawner.getMessages("new_agent");
+          expect(messages).toHaveLength(1);
+          expect(messages[0].content).toBe("Hello new agent!");
+        });
+
+        it("should throw SPAWN_FAILED error if spawner fails", async () => {
+          const spawnerMock = async () => {
+            throw new Error("Spawn failed: out of resources");
+          };
+
+          const routerWithSpawner = createMessageRouter(eventStore, {
+            agentSpawner: spawnerMock,
+          });
+
+          createAgent("sender_1");
+          createTask("task_1", "sender_1");
+
+          try {
+            await routerWithSpawner.send({
+              from: { agent_id: "sender_1" },
+              to: { task_id: "task_1" },
+              content: "Hello",
+            });
+            expect.fail("Expected RoutingError to be thrown");
+          } catch (error) {
+            expect(error).toBeInstanceOf(RoutingError);
+            expect((error as RoutingError).code).toBe("SPAWN_FAILED");
+          }
+        });
       });
     });
 
     describe("topic messaging", () => {
-      it("should route message to topic subscribers", () => {
+      it("should route message to topic subscribers", async () => {
         createAgent("sender_1");
         createAgent("agent_1");
         createAgent("agent_2");
@@ -187,7 +392,7 @@ describe("MessageRouter", () => {
         router.subscribe("agent_1", { type: "topic", target: "errors" });
         router.subscribe("agent_2", { type: "topic", target: "errors" });
 
-        router.send({
+        await router.send({
           from: { agent_id: "sender_1" },
           to: { topic: "errors" },
           content: "Error detected",
@@ -202,11 +407,11 @@ describe("MessageRouter", () => {
         expect(messages2[0].content).toBe("Error detected");
       });
 
-      it("should not fail if topic has no subscribers", () => {
+      it("should not fail if topic has no subscribers", async () => {
         createAgent("sender_1");
 
         // Should not throw
-        const result = router.send({
+        const result = await router.send({
           from: { agent_id: "sender_1" },
           to: { topic: "unused_topic" },
           content: "Hello",
@@ -216,16 +421,16 @@ describe("MessageRouter", () => {
       });
     });
 
-    it("should throw error if no target specified", () => {
+    it("should throw error if no target specified", async () => {
       createAgent("sender_1");
 
-      expect(() => {
+      await expect(
         router.send({
           from: { agent_id: "sender_1" },
           to: {},
           content: "Hello",
-        });
-      }).toThrow(RoutingError);
+        })
+      ).rejects.toThrow(RoutingError);
     });
   });
 
@@ -234,19 +439,19 @@ describe("MessageRouter", () => {
       createAgent("sender");
       createAgent("recipient");
 
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "First",
       });
       await new Promise((r) => setTimeout(r, 10));
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Second",
       });
       await new Promise((r) => setTimeout(r, 10));
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Third",
@@ -259,12 +464,12 @@ describe("MessageRouter", () => {
       expect(messages[2].content).toBe("Third");
     });
 
-    it("should respect limit option", () => {
+    it("should respect limit option", async () => {
       createAgent("sender");
       createAgent("recipient");
 
       for (let i = 0; i < 10; i++) {
-        router.send({
+        await router.send({
           from: { agent_id: "sender" },
           to: { agent_id: "recipient" },
           content: `Message ${i}`,
@@ -283,21 +488,21 @@ describe("MessageRouter", () => {
       expect(messages).toHaveLength(0);
     });
 
-    it("should exclude acknowledged messages by default", () => {
+    it("should exclude acknowledged messages by default", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 1",
       });
-      const msg2 = router.send({
+      const msg2 = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 2",
       });
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 3",
@@ -313,21 +518,21 @@ describe("MessageRouter", () => {
       ]);
     });
 
-    it("should include acknowledged messages when requested", () => {
+    it("should include acknowledged messages when requested", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 1",
       });
-      const msg2 = router.send({
+      const msg2 = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 2",
       });
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Message 3",
@@ -343,11 +548,11 @@ describe("MessageRouter", () => {
   });
 
   describe("getFullMessage()", () => {
-    it("should return full content of message", () => {
+    it("should return full content of message", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      const sent = router.send({
+      const sent = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Full message content here",
@@ -364,11 +569,11 @@ describe("MessageRouter", () => {
   });
 
   describe("acknowledgeMessage()", () => {
-    it("should mark message as acknowledged", () => {
+    it("should mark message as acknowledged", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      const sent = router.send({
+      const sent = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Hello",
@@ -383,21 +588,21 @@ describe("MessageRouter", () => {
   });
 
   describe("acknowledgeMessages()", () => {
-    it("should acknowledge multiple messages", () => {
+    it("should acknowledge multiple messages", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      const msg1 = router.send({
+      const msg1 = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "M1",
       });
-      const msg2 = router.send({
+      const msg2 = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "M2",
       });
-      const msg3 = router.send({
+      const msg3 = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "M3",
@@ -555,8 +760,9 @@ describe("MessageRouter", () => {
       });
 
       const events = eventStore.query({ type: "status" });
-      expect(events).toHaveLength(1);
-      expect(events[0].payload).toMatchObject({
+      // First event is the "started" status from createAgent, second is the checkpoint
+      expect(events).toHaveLength(2);
+      expect(events[1].payload).toMatchObject({
         status_type: "checkpoint",
         summary: "Progress update",
       });
@@ -622,7 +828,7 @@ describe("MessageRouter", () => {
   });
 
   describe("lineage routing", () => {
-    it("should route messages from ancestors to descendants", () => {
+    it("should route messages from ancestors to descendants", async () => {
       createAgent("grandparent");
       createAgent("parent_1", "grandparent");
       createAgent("child_1", "parent_1");
@@ -634,7 +840,7 @@ describe("MessageRouter", () => {
       });
 
       // Grandparent sends a message (should reach child via lineage)
-      router.send({
+      await router.send({
         from: { agent_id: "grandparent" },
         to: { agent_id: "parent_1" },
         content: "Message from grandparent",
@@ -650,13 +856,13 @@ describe("MessageRouter", () => {
   });
 
   describe("message truncation", () => {
-    it("should truncate large messages", () => {
+    it("should truncate large messages", async () => {
       createAgent("sender");
       createAgent("recipient");
 
       const largeContent = "x".repeat(2000); // Exceeds default 1000 char limit
 
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: largeContent,
@@ -667,11 +873,11 @@ describe("MessageRouter", () => {
       expect(messages[0].content.length).toBeLessThan(largeContent.length);
     });
 
-    it("should not truncate small messages", () => {
+    it("should not truncate small messages", async () => {
       createAgent("sender");
       createAgent("recipient");
 
-      router.send({
+      await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: "Short message",
@@ -682,13 +888,13 @@ describe("MessageRouter", () => {
       expect(messages[0].content).toBe("Short message");
     });
 
-    it("should retrieve full content via getFullMessage", () => {
+    it("should retrieve full content via getFullMessage", async () => {
       createAgent("sender");
       createAgent("recipient");
 
       const largeContent = "x".repeat(2000);
 
-      const sent = router.send({
+      const sent = await router.send({
         from: { agent_id: "sender" },
         to: { agent_id: "recipient" },
         content: largeContent,

@@ -309,7 +309,7 @@ describe("Message Routing Integration", () => {
     messageRouter = createMessageRouter(eventStore);
   });
 
-  it("should route messages between agents via subscriptions", () => {
+  it("should route messages between agents via subscriptions", async () => {
     // Create parent agent via spawn event
     eventStore.emit({
       type: "spawn",
@@ -347,7 +347,7 @@ describe("Message Routing Integration", () => {
     });
 
     // Parent sends message to child
-    messageRouter.send({
+    await messageRouter.send({
       from: { agent_id: "agent_parent" },
       to: { agent_id: "agent_child" },
       content: "Hello child",

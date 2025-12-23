@@ -51,6 +51,9 @@ export interface APIServerConfig {
 
   /** Enable CORS */
   cors?: boolean;
+
+  /** Grace period in milliseconds for in-flight work during shutdown (default: 5000) */
+  shutdownGracePeriodMs?: number;
 }
 
 export interface APIServices {
@@ -63,6 +66,11 @@ export interface APIServices {
 // ─────────────────────────────────────────────────────────────────
 // API Server Instance
 // ─────────────────────────────────────────────────────────────────
+
+export interface StopOptions {
+  /** Force immediate shutdown, skipping grace period */
+  force?: boolean;
+}
 
 export interface APIServer {
   /** Express app for testing */
@@ -77,11 +85,21 @@ export interface APIServer {
   /** Start the server */
   start(): Promise<void>;
 
-  /** Stop the server */
-  stop(): Promise<void>;
+  /**
+   * Stop the server gracefully.
+   * 1. Stop accepting new connections
+   * 2. Wait grace period for in-flight prompts
+   * 3. Close WebSocket connections with 1001 "going away"
+   * 4. Terminate running agents
+   * 5. Persist and close event store
+   */
+  stop(options?: StopOptions): Promise<void>;
 
   /** Get current status */
   getStatus(): SystemStatus;
+
+  /** Register signal handlers for graceful shutdown */
+  registerSignalHandlers(): void;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -98,6 +116,10 @@ interface ServerState {
     agent_id?: string;
     timestamp: number;
   }>;
+  /** Tracks in-flight prompt promises for graceful shutdown */
+  inFlightPrompts: Map<string, Promise<void>>;
+  /** Whether shutdown is in progress */
+  isShuttingDown: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -117,13 +139,15 @@ export function createAPIServer(
   services: APIServices,
   config: APIServerConfig = {}
 ): APIServer {
-  const { port = 3000, host = "localhost", cors = true } = config;
+  const { port = 3000, host = "localhost", cors = true, shutdownGracePeriodMs = 5000 } = config;
   const { eventStore, agentManager, taskManager } = services;
 
   // Server state
   const state: ServerState = {
     initialized: false,
     conversationHistory: [],
+    inFlightPrompts: new Map(),
+    isShuttingDown: false,
   };
 
   // WebSocket clients
@@ -296,6 +320,13 @@ export function createAPIServer(
 
   // POST /api/conversation/message - Send message to head manager
   app.post("/api/conversation/message", async (req: Request, res: Response) => {
+    // Reject new messages during shutdown
+    if (state.isShuttingDown) {
+      return sendError(res, 503, "SHUTTING_DOWN", "Server is shutting down");
+    }
+
+    const promptId = `prompt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
     try {
       if (!state.initialized || !state.headManagerId) {
         return sendError(res, 400, "NOT_INITIALIZED", "System not initialized");
@@ -323,15 +354,28 @@ export function createAPIServer(
         },
       });
 
+      // Track this prompt as in-flight
+      let resolvePrompt: () => void;
+      const promptPromise = new Promise<void>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      state.inFlightPrompts.set(promptId, promptPromise);
+
       // Send to head manager and collect response
       let responseContent = "";
-      for await (const update of agentManager.prompt(state.headManagerId, body.message)) {
-        if ("sessionUpdate" in update && update.sessionUpdate === "agent_message_chunk") {
-          const chunk = update as { content: { type: string; text?: string } };
-          if (chunk.content.type === "text" && chunk.content.text) {
-            responseContent += chunk.content.text;
+      try {
+        for await (const update of agentManager.prompt(state.headManagerId, body.message)) {
+          if ("sessionUpdate" in update && update.sessionUpdate === "agent_message_chunk") {
+            const chunk = update as { content: { type: string; text?: string } };
+            if (chunk.content.type === "text" && chunk.content.text) {
+              responseContent += chunk.content.text;
+            }
           }
         }
+      } finally {
+        // Mark prompt as complete
+        resolvePrompt!();
+        state.inFlightPrompts.delete(promptId);
       }
 
       // Add assistant response to history
@@ -359,6 +403,8 @@ export function createAPIServer(
         message_id: `msg_${Date.now()}`,
       });
     } catch (error) {
+      // Ensure we clean up the in-flight prompt on error
+      state.inFlightPrompts.delete(promptId);
       sendError(res, 500, "MESSAGE_FAILED", `Failed to process message: ${error}`);
     }
   });
@@ -606,20 +652,87 @@ export function createAPIServer(
     });
   }
 
-  async function stop(): Promise<void> {
-    // Close all WebSocket connections
+  /**
+   * Helper function to create a delay promise
+   */
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Get all in-flight prompt promises
+   */
+  function getInFlightPrompts(): Promise<void>[] {
+    return Array.from(state.inFlightPrompts.values());
+  }
+
+  async function stop(options?: StopOptions): Promise<void> {
+    // Prevent concurrent shutdown calls
+    if (state.isShuttingDown) {
+      return;
+    }
+    state.isShuttingDown = true;
+
+    const gracePeriod = options?.force ? 0 : shutdownGracePeriodMs;
+
+    // 1. Stop accepting new connections
+    server.close();
+
+    // 2. Wait grace period for in-flight work
+    if (gracePeriod > 0) {
+      const inFlight = getInFlightPrompts();
+      if (inFlight.length > 0) {
+        await Promise.race([
+          Promise.all(inFlight),
+          sleep(gracePeriod),
+        ]);
+      }
+    }
+
+    // 3. Close WebSocket connections with 1001 "going away"
     for (const client of wsClients) {
-      client.ws.close();
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.close(1001, "Server shutting down");
+      }
     }
     wsClients.clear();
 
-    // Close HTTP server
-    return new Promise((resolve, reject) => {
-      server.close((err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    // 4. Terminate running agents
+    await agentManager.close();
+
+    // 5-6. Persist and close event store
+    await eventStore.persist();
+    await eventStore.close();
+  }
+
+  /**
+   * Register signal handlers for graceful shutdown.
+   * Should be called after server.start() in production.
+   */
+  function registerSignalHandlers(): void {
+    let shutdownInProgress = false;
+
+    const handleSignal = async (signal: string) => {
+      if (shutdownInProgress) {
+        // Force exit on second signal
+        process.exit(1);
+      }
+      shutdownInProgress = true;
+
+      console.log(`\nReceived ${signal}, shutting down gracefully...`);
+
+      try {
+        await stop();
+        console.log("Server shutdown complete.");
+        process.exit(0);
+      } catch (error) {
+        console.error("Error during shutdown:", error);
+        process.exit(1);
+      }
+    };
+
+    process.on("SIGINT", () => handleSignal("SIGINT"));
+    process.on("SIGTERM", () => handleSignal("SIGTERM"));
   }
 
   return {
@@ -629,5 +742,6 @@ export function createAPIServer(
     start,
     stop,
     getStatus,
+    registerSignalHandlers,
   };
 }

@@ -133,7 +133,7 @@ function createMockTaskManager(): TaskManager {
 
 function createMockMessageRouter(): MessageRouter {
   return {
-    send: vi.fn((request) => ({
+    send: vi.fn(async (request) => ({
       id: "msg_test123",
       from: request.from,
       to: request.to,
@@ -286,10 +286,10 @@ describe("MCP Server", () => {
   });
 
   describe("send_message tool", () => {
-    it("should send message to agent", () => {
+    it("should send message to agent", async () => {
       createMCPServer(context, services);
 
-      messageRouter.send({
+      await messageRouter.send({
         from: { agent_id: context.agent_id, task_id: context.task_id },
         to: { agent_id: "agent_target123" },
         content: "Hello!",
@@ -302,10 +302,10 @@ describe("MCP Server", () => {
       });
     });
 
-    it("should send message to topic", () => {
+    it("should send message to topic", async () => {
       createMCPServer(context, services);
 
-      messageRouter.send({
+      await messageRouter.send({
         from: { agent_id: context.agent_id, task_id: context.task_id },
         to: { topic: "discoveries" },
         content: "Found something!",
@@ -318,10 +318,10 @@ describe("MCP Server", () => {
       });
     });
 
-    it("should include correlation_id for replies", () => {
+    it("should include correlation_id for replies", async () => {
       createMCPServer(context, services);
 
-      messageRouter.send({
+      await messageRouter.send({
         from: { agent_id: context.agent_id, task_id: context.task_id },
         to: { agent_id: "agent_sender123" },
         content: "Reply",
