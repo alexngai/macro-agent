@@ -235,17 +235,33 @@ export function createAgentManager(
         env: agentConfig?.env,
       });
 
-      // Create session
+      // Build MCP server configuration for the macro-agent MCP server
+      const macroAgentMcp = {
+        type: "stdio" as const,
+        name: "macro-agent",
+        command: "npx",
+        args: ["multiagent-mcp"],
+        env: [
+          { name: "MACRO_AGENT_ID", value: agentId },
+          { name: "MACRO_PARENT_ID", value: parent ?? "" },
+          { name: "MACRO_TASK_ID", value: taskId },
+        ],
+      };
+
+      // Combine with any user-provided MCP servers
+      const userMcpServers = agentConfig?.mcpServers?.map((s) => ({
+        type: "stdio" as const,
+        name: s.name,
+        command: s.command,
+        args: s.args ?? [],
+        env: s.env
+          ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
+          : [],
+      })) ?? [];
+
+      // Create session with MCP servers
       const session = await handle.createSession(cwd, {
-        mcpServers: agentConfig?.mcpServers?.map((s) => ({
-          type: "stdio" as const,
-          name: s.name,
-          command: s.command,
-          args: s.args ?? [],
-          env: s.env
-            ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
-            : [],
-        })),
+        mcpServers: [macroAgentMcp, ...userMcpServers],
       });
 
       // Emit spawn event to EventStore

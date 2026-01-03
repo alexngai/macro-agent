@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "multiagent": "./dist/cli/index.js"
+    "multiagent": "./dist/cli/index.js",
+    "multiagent-mcp": "./dist/cli/mcp.js"
   },
   "scripts": {
     "build": "tsc",
@@ -37,7 +38,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "acp-factory": "^0.0.1",
+    "acp-factory": "^0.0.2",
     "chalk": "^5.6.2",
     "commander": "^14.0.2",
     "express": "^5.2.1",
