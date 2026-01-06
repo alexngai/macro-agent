@@ -647,6 +647,102 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Command
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command("acp")
+  .description("Run as an ACP-compliant agent (for use with acp-factory)")
+  .option("--cwd <path>", "Working directory for agents")
+  .action(async (options) => {
+    // Import and run the ACP server
+    // We dynamically import to avoid loading ACP dependencies in other commands
+    const { Readable } = await import("node:stream");
+    const { AgentSideConnection, ndJsonStream } = await import(
+      "@agentclientprotocol/sdk"
+    );
+    const { MacroAgent } = await import("../acp/macro-agent.js");
+
+    const defaultCwd = options.cwd ?? process.cwd();
+
+    let eventStore: Awaited<ReturnType<typeof createEventStore>> | null = null;
+    let agentManager: ReturnType<typeof createAgentManager> | null = null;
+
+    try {
+      // Initialize services
+      eventStore = await createEventStore({ inMemory: false });
+      const messageRouter = createMessageRouter(eventStore);
+      agentManager = createAgentManager(eventStore, messageRouter);
+      const taskManager = createTaskManager(eventStore);
+
+      // Create stdio streams for ACP communication
+      const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
+      const output = new WritableStream<Uint8Array>({
+        write(chunk) {
+          return new Promise((resolve, reject) => {
+            const canContinue = process.stdout.write(chunk, (err) => {
+              if (err) reject(err);
+              else if (canContinue) resolve();
+            });
+            if (!canContinue) {
+              process.stdout.once("drain", resolve);
+            }
+          });
+        },
+      });
+
+      const stream = ndJsonStream(output, input);
+
+      // Create ACP connection with MacroAgent
+      const connection = new AgentSideConnection(
+        (conn) =>
+          new MacroAgent(conn, {
+            agentManager: agentManager!,
+            eventStore: eventStore!,
+            taskManager,
+            defaultCwd,
+          }),
+        stream
+      );
+
+      // Handle graceful shutdown
+      const cleanup = async () => {
+        if (agentManager) {
+          await agentManager.close();
+        }
+        if (eventStore) {
+          await eventStore.close();
+        }
+        process.exit(0);
+      };
+
+      process.on("SIGINT", cleanup);
+      process.on("SIGTERM", cleanup);
+
+      // Wait for connection to close
+      await connection.closed;
+      await cleanup();
+    } catch (error) {
+      console.error(`ACP server error: ${error}`);
+      if (agentManager) {
+        try {
+          await agentManager.close();
+        } catch {
+          // Ignore
+        }
+      }
+      if (eventStore) {
+        try {
+          await eventStore.close();
+        } catch {
+          // Ignore
+        }
+      }
+      process.exit(1);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
 // Parse and Run
 // ─────────────────────────────────────────────────────────────────
 

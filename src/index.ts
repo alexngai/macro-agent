@@ -182,3 +182,27 @@ export {
   type EventQueryParams,
   type APIError,
 } from './api/types.js';
+
+// ACP - Agent Communication Protocol support
+export {
+  SessionMapper,
+  MacroAgent,
+  ACPError,
+  type MacroAgentConfig,
+  type ACPSessionId,
+  type SessionMapping,
+  type SpawnAgentRequest as ACPSpawnAgentRequest,
+  type SpawnAgentResponse as ACPSpawnAgentResponse,
+  type GetHierarchyRequest as ACPGetHierarchyRequest,
+  type GetHierarchyResponse as ACPGetHierarchyResponse,
+  type GetTaskRequest as ACPGetTaskRequest,
+  type GetTaskResponse as ACPGetTaskResponse,
+  type MountAgentRequest,
+  type MountAgentResponse,
+  type ForkAgentRequest,
+  type ForkAgentResponse,
+  type ACPExtensionMethod,
+  type ACPExtensionRequests,
+  type ACPExtensionResponses,
+  type ACPErrorCode,
+} from './acp/index.js';

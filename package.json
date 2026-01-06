@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "multiagent": "./dist/cli/index.js",
-    "multiagent-mcp": "./dist/cli/mcp.js"
+    "multiagent-mcp": "./dist/cli/mcp.js",
+    "multiagent-acp": "./dist/cli/acp.js"
   },
   "scripts": {
     "build": "tsc",
