@@ -185,9 +185,14 @@ export {
 
 // ACP - Agent Communication Protocol support
 export {
+  // Registration helper
+  registerMacroAgent,
+  type RegisterOptions,
+  // Classes
   SessionMapper,
   MacroAgent,
   ACPError,
+  // Types
   type MacroAgentConfig,
   type ACPSessionId,
   type SessionMapping,

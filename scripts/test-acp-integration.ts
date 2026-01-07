@@ -28,6 +28,7 @@ import { AgentFactory, type AgentHandle, type Session } from "acp-factory";
 import type { ClientSideConnection } from "@agentclientprotocol/sdk";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import { registerMacroAgent } from "../src/acp/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -81,9 +82,9 @@ async function main() {
   console.log("║          Macro-Agent ACP Integration Tests                 ║");
   console.log("╚════════════════════════════════════════════════════════════╝\n");
 
-  // Register macro-agent with acp-factory
+  // Register macro-agent with acp-factory using the helper
   console.log("📦 Registering macro-agent with acp-factory...\n");
-  AgentFactory.register("macro-agent", {
+  registerMacroAgent({
     command: "node",
     args: [resolve(projectRoot, "dist/cli/acp.js")],
     env: {
