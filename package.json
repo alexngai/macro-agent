@@ -1,6 +1,6 @@
 {
   "name": "macro-agent",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Interact with multiple agents as if they were a single agent.",
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,11 @@
     "test:run": "vitest run",
     "test:e2e": "RUN_E2E_TESTS=true npx tsx scripts/test-acp-integration.ts",
     "dev": "tsc --watch",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "release:patch": "npm version patch && git push && git push --tags",
+    "release:minor": "npm version minor && git push && git push --tags",
+    "release:major": "npm version major && git push && git push --tags",
+    "publish:npm": "npm run build && npm publish"
   },
   "keywords": [
     "multi-agent",
