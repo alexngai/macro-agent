@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MacroAgent } from "../macro-agent.js";
 import { SessionMapper } from "../session-mapper.js";
 import { ACPError } from "../types.js";
+import type { MacroAgentInitConfig, SubAgentConfig } from "../types.js";
 import type { AgentSideConnection } from "@agentclientprotocol/sdk";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { EventStore } from "../../store/event-store.js";
@@ -151,6 +152,59 @@ describe("MacroAgent", () => {
       );
       expect(response.agentCapabilities?._meta?.agentType).toBe("macro-agent");
     });
+
+    it("should read macroConfig from _meta", async () => {
+      const initConfig: MacroAgentInitConfig = {
+        defaultCwd: "/custom/cwd",
+        defaultSubAgentConfig: {
+          model: "claude-opus-4-20250514",
+          permissionMode: "auto-approve",
+        },
+      };
+
+      const response = await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: { macroConfig: initConfig },
+      });
+
+      // Config should be echoed back in response
+      expect(response.agentCapabilities?._meta?.appliedConfig).toEqual(initConfig);
+
+      // Config should be stored
+      expect(macroAgent.getInitConfig()).toEqual(initConfig);
+    });
+
+    it("should apply defaultCwd from init config", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            defaultCwd: "/init/config/cwd",
+          },
+        },
+      });
+
+      // Now newSession should use the init config cwd
+      await macroAgent.newSession({});
+
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cwd: "/init/config/cwd",
+        })
+      );
+    });
+
+    it("should work without macroConfig", async () => {
+      const response = await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+
+      expect(macroAgent.getInitConfig()).toEqual({});
+      expect(response.agentCapabilities?._meta?.appliedConfig).toEqual({});
+    });
   });
 
   describe("newSession", () => {
@@ -160,19 +214,76 @@ describe("MacroAgent", () => {
       });
 
       expect(response.sessionId).toBeDefined();
-      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith({
-        cwd: "/test/project",
-        forceNew: true,
-      });
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cwd: "/test/project",
+          forceNew: true,
+        })
+      );
     });
 
     it("should use default cwd if not provided", async () => {
       await macroAgent.newSession({});
 
-      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith({
-        cwd: "/test/cwd",
-        forceNew: true,
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cwd: "/test/cwd",
+          forceNew: true,
+        })
+      );
+    });
+
+    it("should apply permissionMode from init config", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            defaultSubAgentConfig: {
+              permissionMode: "auto-approve",
+            },
+          },
+        },
       });
+
+      await macroAgent.newSession({});
+
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          permissionMode: "auto-approve",
+        })
+      );
+    });
+
+    it("should build system prompt from prefix and suffix", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            systemPromptPrefix: "You are a specialized agent.",
+            systemPromptSuffix: "Always be helpful.",
+          },
+        },
+      });
+
+      await macroAgent.newSession({});
+
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemPrompt: "You are a specialized agent.\n\nAlways be helpful.",
+        })
+      );
+    });
+
+    it("should not set systemPrompt if no prefix/suffix configured", async () => {
+      await macroAgent.newSession({});
+
+      expect(mockAgentManager.getOrCreateHeadManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemPrompt: undefined,
+        })
+      );
     });
   });
 
@@ -234,6 +345,136 @@ describe("MacroAgent", () => {
           cwd: "/custom/cwd",
           subscribeParent: false,
           topics: ["topic1"],
+        })
+      );
+    });
+
+    it("should apply default config from init", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            defaultSubAgentConfig: {
+              model: "claude-opus-4-20250514",
+              permissionMode: "auto-approve",
+              env: { DEBUG: "true" },
+            },
+          },
+        },
+      });
+
+      await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Test task",
+      });
+
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          permissionMode: "auto-approve",
+          config: expect.objectContaining({
+            model: "claude-opus-4-20250514",
+            env: { DEBUG: "true" },
+          }),
+        })
+      );
+    });
+
+    it("should merge per-spawn config with defaults", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            defaultSubAgentConfig: {
+              model: "claude-sonnet-4-20250514",
+              temperature: 0.7,
+              env: { DEBUG: "true", LOG_LEVEL: "info" },
+            },
+          },
+        },
+      });
+
+      await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Test task",
+        config: {
+          model: "claude-opus-4-20250514", // Override model
+          env: { LOG_LEVEL: "debug" }, // Override LOG_LEVEL, keep DEBUG
+        },
+      });
+
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            model: "claude-opus-4-20250514", // Overridden
+            temperature: 0.7, // From defaults
+            env: { DEBUG: "true", LOG_LEVEL: "debug" }, // Merged
+          }),
+        })
+      );
+    });
+
+    it("should concatenate MCP servers from defaults and override", async () => {
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: {
+          macroConfig: {
+            defaultSubAgentConfig: {
+              mcpServers: [
+                { name: "default-server", command: "npx", args: ["default"] },
+              ],
+            },
+          },
+        },
+      });
+
+      await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Test task",
+        config: {
+          mcpServers: [
+            { name: "custom-server", command: "npx", args: ["custom"] },
+          ],
+        },
+      });
+
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            mcpServers: [
+              { name: "default-server", command: "npx", args: ["default"] },
+              { name: "custom-server", command: "npx", args: ["custom"] },
+            ],
+          }),
+        })
+      );
+    });
+
+    it("should pass agentType from config", async () => {
+      await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Test task",
+        config: {
+          agentType: "custom-agent",
+        },
+      });
+
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentType: "custom-agent",
+        })
+      );
+    });
+
+    it("should work with no config at all", async () => {
+      await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Test task",
+      });
+
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task: "Test task",
+          config: undefined,
+          permissionMode: undefined,
+          agentType: undefined,
         })
       );
     });
@@ -425,6 +666,34 @@ describe("MacroAgent", () => {
 
       const agentId = macroAgent.getMappedAgentId(sessionId);
       expect(agentId).toBeDefined();
+    });
+  });
+
+  describe("getInitConfig", () => {
+    it("should return empty config by default", () => {
+      const config = macroAgent.getInitConfig();
+      expect(config).toEqual({});
+    });
+
+    it("should return stored config after initialize", async () => {
+      const initConfig: MacroAgentInitConfig = {
+        defaultCwd: "/custom/path",
+        systemPromptPrefix: "Test prefix",
+        defaultSubAgentConfig: {
+          model: "claude-opus-4-20250514",
+          permissionMode: "auto-approve",
+          mcpServers: [{ name: "test", command: "test-cmd" }],
+        },
+      };
+
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+        _meta: { macroConfig: initConfig },
+      });
+
+      const config = macroAgent.getInitConfig();
+      expect(config).toEqual(initConfig);
     });
   });
 });

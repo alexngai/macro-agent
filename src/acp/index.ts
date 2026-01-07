@@ -79,6 +79,11 @@ export function registerMacroAgent(options: RegisterOptions = {}): void {
 export type {
   ACPSessionId,
   SessionMapping,
+  // Initialization config
+  MacroAgentInitConfig,
+  SubAgentConfig,
+  MCPServerConfig as ACPMCPServerConfig,
+  ACPPermissionMode,
   // Extension request/response types
   SpawnAgentRequest,
   SpawnAgentResponse,

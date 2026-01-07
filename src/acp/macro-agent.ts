@@ -39,8 +39,11 @@ import type {
   MountAgentResponse,
   ForkAgentRequest,
   ForkAgentResponse,
+  MacroAgentInitConfig,
+  SubAgentConfig,
 } from "./types.js";
 import { ACPError } from "./types.js";
+import type { AgentConfig } from "../agent/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Protocol Constants
@@ -90,6 +93,9 @@ export class MacroAgent implements Agent {
   private sessionMapper: SessionMapper;
   private defaultCwd: string;
 
+  /** Configuration from ACP initialization */
+  private initConfig: MacroAgentInitConfig = {};
+
   /** Map of ACP session ID to cancellation abort controllers */
   private cancellationControllers: Map<ACPSessionId, AbortController> =
     new Map();
@@ -109,10 +115,24 @@ export class MacroAgent implements Agent {
 
   /**
    * Initialize the connection and advertise capabilities
+   *
+   * Reads configuration from `params._meta?.macroConfig` if provided.
+   * This allows each macro-agent instance to have different settings.
    */
   async initialize(
-    _params: InitializeRequest
+    params: InitializeRequest
   ): Promise<InitializeResponse> {
+    // Extract macro-agent config from _meta if provided
+    const meta = params._meta as Record<string, unknown> | undefined;
+    if (meta?.macroConfig) {
+      this.initConfig = meta.macroConfig as MacroAgentInitConfig;
+
+      // Apply defaultCwd from init config if provided
+      if (this.initConfig.defaultCwd) {
+        this.defaultCwd = this.initConfig.defaultCwd;
+      }
+    }
+
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -120,6 +140,8 @@ export class MacroAgent implements Agent {
         _meta: {
           extensions: SUPPORTED_EXTENSIONS,
           agentType: "macro-agent",
+          // Echo back the config so client knows what was applied
+          appliedConfig: this.initConfig,
         },
       },
     };
@@ -133,10 +155,15 @@ export class MacroAgent implements Agent {
   ): Promise<NewSessionResponse> {
     const cwd = params.cwd ?? this.defaultCwd;
 
+    // Build head manager options from init config
+    const defaultConfig = this.initConfig.defaultSubAgentConfig;
+
     // Spawn a new head manager for this session
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd,
       forceNew: true, // Always create new for newSession
+      permissionMode: defaultConfig?.permissionMode,
+      systemPrompt: this.buildSystemPrompt(),
     });
 
     // Create session mapping
@@ -343,13 +370,22 @@ export class MacroAgent implements Agent {
       }
     }
 
-    // Spawn the agent
+    // Merge default config with per-spawn override
+    const mergedConfig = this.mergeSubAgentConfig(
+      this.initConfig.defaultSubAgentConfig,
+      params.config
+    );
+
+    // Spawn the agent with merged config
     const spawned = await this.agentManager.spawn({
       task: params.task_description,
       parent: parentId ?? null,
       cwd: params.options?.cwd ?? this.defaultCwd,
       subscribeParent: params.options?.subscribeParent ?? true,
       topics: params.options?.topics,
+      permissionMode: mergedConfig?.permissionMode,
+      agentType: mergedConfig?.agentType,
+      config: this.toAgentConfig(mergedConfig),
     });
 
     return {
@@ -605,6 +641,92 @@ export class MacroAgent implements Agent {
     }
   }
 
+  /**
+   * Build system prompt with configured prefix/suffix
+   */
+  private buildSystemPrompt(): string | undefined {
+    const { systemPromptPrefix, systemPromptSuffix } = this.initConfig;
+
+    if (!systemPromptPrefix && !systemPromptSuffix) {
+      return undefined;
+    }
+
+    const parts: string[] = [];
+    if (systemPromptPrefix) {
+      parts.push(systemPromptPrefix);
+    }
+    if (systemPromptSuffix) {
+      parts.push(systemPromptSuffix);
+    }
+
+    return parts.join("\n\n");
+  }
+
+  /**
+   * Merge default sub-agent config with per-spawn override
+   *
+   * Override values take precedence over defaults.
+   * Arrays (like mcpServers) are concatenated, not replaced.
+   */
+  private mergeSubAgentConfig(
+    defaults?: SubAgentConfig,
+    override?: SubAgentConfig
+  ): SubAgentConfig | undefined {
+    if (!defaults && !override) {
+      return undefined;
+    }
+
+    if (!defaults) {
+      return override;
+    }
+
+    if (!override) {
+      return defaults;
+    }
+
+    // Deep merge with override taking precedence
+    return {
+      model: override.model ?? defaults.model,
+      maxTokens: override.maxTokens ?? defaults.maxTokens,
+      temperature: override.temperature ?? defaults.temperature,
+      permissionMode: override.permissionMode ?? defaults.permissionMode,
+      agentType: override.agentType ?? defaults.agentType,
+      // Merge env variables (override takes precedence for same keys)
+      env: defaults.env || override.env
+        ? { ...defaults.env, ...override.env }
+        : undefined,
+      // Concatenate MCP servers (both default and override)
+      mcpServers: [
+        ...(defaults.mcpServers ?? []),
+        ...(override.mcpServers ?? []),
+      ].length > 0
+        ? [...(defaults.mcpServers ?? []), ...(override.mcpServers ?? [])]
+        : undefined,
+    };
+  }
+
+  /**
+   * Convert SubAgentConfig to internal AgentConfig format
+   */
+  private toAgentConfig(config?: SubAgentConfig): AgentConfig | undefined {
+    if (!config) {
+      return undefined;
+    }
+
+    return {
+      model: config.model,
+      maxTokens: config.maxTokens,
+      temperature: config.temperature,
+      env: config.env,
+      mcpServers: config.mcpServers?.map((server) => ({
+        name: server.name,
+        command: server.command,
+        args: server.args,
+        env: server.env,
+      })),
+    };
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Accessors
   // ─────────────────────────────────────────────────────────────────
@@ -621,5 +743,12 @@ export class MacroAgent implements Agent {
    */
   getMappedAgentId(acpSessionId: ACPSessionId): AgentId | undefined {
     return this.sessionMapper.getAgentId(acpSessionId);
+  }
+
+  /**
+   * Get the applied initialization config
+   */
+  getInitConfig(): MacroAgentInitConfig {
+    return this.initConfig;
   }
 }

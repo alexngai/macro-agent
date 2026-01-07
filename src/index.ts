@@ -196,6 +196,12 @@ export {
   type MacroAgentConfig,
   type ACPSessionId,
   type SessionMapping,
+  // Initialization config types
+  type MacroAgentInitConfig,
+  type SubAgentConfig,
+  type ACPMCPServerConfig,
+  type ACPPermissionMode,
+  // Extension request/response types
   type SpawnAgentRequest as ACPSpawnAgentRequest,
   type SpawnAgentResponse as ACPSpawnAgentResponse,
   type GetHierarchyRequest as ACPGetHierarchyRequest,

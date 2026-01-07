@@ -46,6 +46,100 @@ export interface SessionMapping {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Initialization Config
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * MCP server configuration for agents
+ */
+export interface MCPServerConfig {
+  /** Server name (identifier) */
+  name: string;
+
+  /** Command to run */
+  command: string;
+
+  /** Command arguments */
+  args?: string[];
+
+  /** Environment variables for the server */
+  env?: Record<string, string>;
+}
+
+/**
+ * Permission mode for agent tool calls
+ * Matches acp-factory's PermissionMode type
+ */
+export type ACPPermissionMode =
+  | "auto-approve"
+  | "auto-deny"
+  | "callback"
+  | "interactive";
+
+/**
+ * Configuration for spawned sub-agents
+ *
+ * Used both as defaults during initialization and as overrides
+ * when spawning individual agents via _macro/spawnAgent.
+ */
+export interface SubAgentConfig {
+  /** Model to use (e.g., "claude-sonnet-4-20250514", "claude-opus-4-20250514") */
+  model?: string;
+
+  /** Maximum tokens per response */
+  maxTokens?: number;
+
+  /** Temperature for responses (0.0 - 1.0) */
+  temperature?: number;
+
+  /** Additional environment variables passed to agents */
+  env?: Record<string, string>;
+
+  /** MCP servers to connect to agents */
+  mcpServers?: MCPServerConfig[];
+
+  /** Permission mode for tool calls */
+  permissionMode?: ACPPermissionMode;
+
+  /** Agent type (defaults to "claude-code") */
+  agentType?: string;
+}
+
+/**
+ * Configuration passed during ACP initialization
+ *
+ * This allows each macro-agent instance to have different settings.
+ * Passed via the `_meta.macroConfig` field in InitializeRequest.
+ *
+ * @example
+ * ```typescript
+ * // Client-side initialization
+ * const handle = await AgentFactory.spawn("macro-agent", {
+ *   permissionMode: "auto-approve",
+ * });
+ *
+ * // The macro-agent reads config from initialize request:
+ * // request._meta?.macroConfig: MacroAgentInitConfig
+ * ```
+ */
+export interface MacroAgentInitConfig {
+  /** Default working directory for agents */
+  defaultCwd?: string;
+
+  /** Default configuration for all spawned sub-agents */
+  defaultSubAgentConfig?: SubAgentConfig;
+
+  /** System prompt prefix added to all agents */
+  systemPromptPrefix?: string;
+
+  /** System prompt suffix added to all agents */
+  systemPromptSuffix?: string;
+
+  /** Whether to auto-create head manager on first session */
+  autoCreateHeadManager?: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // ACP Extension: _macro/spawnAgent
 // ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +167,14 @@ export interface SpawnAgentRequest {
     /** Additional topics to subscribe to */
     topics?: string[];
   };
+
+  /**
+   * Agent configuration override
+   *
+   * Merges with defaultSubAgentConfig from initialization.
+   * Values here take precedence over defaults.
+   */
+  config?: SubAgentConfig;
 }
 
 /**
