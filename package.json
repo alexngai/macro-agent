@@ -27,8 +27,8 @@
     "claude",
     "orchestration"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Alex Ngai",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/macro-agent.git"
