@@ -328,7 +328,11 @@ describe("ACP Mode Integration", () => {
       expect(extensions).toContain("_macro/sendPeerRequest");
       expect(extensions).toContain("_macro/deliverPeerMessage");
       expect(extensions).toContain("_macro/deliverPeerRequest");
-      expect(extensions?.length).toBe(9);
+      expect(extensions).toContain("_macro/grantCapability");
+      expect(extensions).toContain("_macro/revokeCapability");
+      expect(extensions).toContain("_macro/getCapabilities");
+      expect(extensions).toContain("_macro/checkCapability");
+      expect(extensions?.length).toBe(13);
 
       expect(initResponse.agentCapabilities?._meta?.agentType).toBe(
         "macro-agent"

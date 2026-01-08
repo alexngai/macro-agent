@@ -428,6 +428,113 @@ export interface DeliverPeerRequestResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/grantCapability
+// ─────────────────────────────────────────────────────────────────
+
+import type {
+  CapabilityGrant,
+  CapabilityType,
+  PeerCapabilities,
+} from "../peer/types.js";
+
+/**
+ * Request for _macro/grantCapability extension
+ */
+export interface GrantCapabilityRequest {
+  /** Peer ID to grant capabilities to */
+  peerId: string;
+
+  /** Capabilities to grant */
+  grants: CapabilityGrant[];
+
+  /** Time until expiration in milliseconds (optional) */
+  expiresIn?: number;
+
+  /** Issuer identifier for audit trail (optional) */
+  issuedBy?: string;
+}
+
+/**
+ * Response for _macro/grantCapability extension
+ */
+export interface GrantCapabilityResponse {
+  /** Full capability set for the peer after grant */
+  capabilities: PeerCapabilities;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/revokeCapability
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/revokeCapability extension
+ */
+export interface RevokeCapabilityRequest {
+  /** Peer ID to revoke capabilities from */
+  peerId: string;
+
+  /** Specific capability types to revoke (optional, revokes all if not specified) */
+  grantTypes?: CapabilityType[];
+}
+
+/**
+ * Response for _macro/revokeCapability extension
+ */
+export interface RevokeCapabilityResponse {
+  /** Whether revocation was successful */
+  success: boolean;
+
+  /** Remaining capabilities for the peer (null if all revoked) */
+  remainingCapabilities: PeerCapabilities | null;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/getCapabilities
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/getCapabilities extension
+ */
+export interface GetCapabilitiesRequest {
+  /** Peer ID to get capabilities for (optional, lists all if not specified) */
+  peerId?: string;
+}
+
+/**
+ * Response for _macro/getCapabilities extension
+ */
+export interface GetCapabilitiesResponse {
+  /** Capabilities for the requested peer (if peerId specified) */
+  capabilities?: PeerCapabilities | null;
+
+  /** All authorized peers (if peerId not specified) */
+  authorizedPeers?: PeerCapabilities[];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/checkCapability
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/checkCapability extension
+ */
+export interface CheckCapabilityRequest {
+  /** Peer ID to check */
+  peerId: string;
+
+  /** Required capability to check */
+  required: CapabilityGrant;
+}
+
+/**
+ * Response for _macro/checkCapability extension
+ */
+export interface CheckCapabilityResponse {
+  /** Whether the peer has the required capability */
+  hasCapability: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Extension Method Types (Union)
 // ─────────────────────────────────────────────────────────────────
 
@@ -443,7 +550,11 @@ export type ACPExtensionMethod =
   | "_macro/sendPeerMessage"
   | "_macro/sendPeerRequest"
   | "_macro/deliverPeerMessage"
-  | "_macro/deliverPeerRequest";
+  | "_macro/deliverPeerRequest"
+  | "_macro/grantCapability"
+  | "_macro/revokeCapability"
+  | "_macro/getCapabilities"
+  | "_macro/checkCapability";
 
 /**
  * Map of extension methods to their request types
@@ -458,6 +569,10 @@ export interface ACPExtensionRequests {
   "_macro/sendPeerRequest": SendPeerRequestACPRequest;
   "_macro/deliverPeerMessage": DeliverPeerMessageRequest;
   "_macro/deliverPeerRequest": DeliverPeerRequestRequest;
+  "_macro/grantCapability": GrantCapabilityRequest;
+  "_macro/revokeCapability": RevokeCapabilityRequest;
+  "_macro/getCapabilities": GetCapabilitiesRequest;
+  "_macro/checkCapability": CheckCapabilityRequest;
 }
 
 /**
@@ -473,6 +588,10 @@ export interface ACPExtensionResponses {
   "_macro/sendPeerRequest": SendPeerRequestACPResponse;
   "_macro/deliverPeerMessage": DeliverPeerMessageResponse;
   "_macro/deliverPeerRequest": DeliverPeerRequestResponse;
+  "_macro/grantCapability": GrantCapabilityResponse;
+  "_macro/revokeCapability": RevokeCapabilityResponse;
+  "_macro/getCapabilities": GetCapabilitiesResponse;
+  "_macro/checkCapability": CheckCapabilityResponse;
 }
 
 // ─────────────────────────────────────────────────────────────────

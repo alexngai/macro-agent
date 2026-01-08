@@ -183,4 +183,149 @@ export type PeerErrorCode =
   | "AGENT_NOT_FOUND"
   | "REQUEST_TIMEOUT"
   | "REQUEST_NOT_FOUND"
-  | "TRANSPORT_ERROR";
+  | "TRANSPORT_ERROR"
+  | "CAPABILITY_DENIED";
+
+// ─────────────────────────────────────────────────────────────────
+// Capability Types
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Capability grant for task delegation pattern.
+ * Allows a peer to delegate discrete tasks.
+ */
+export interface TaskDelegationCapability {
+  type: "task-delegation";
+  /** Maximum concurrent tasks this peer can delegate (optional) */
+  maxConcurrentTasks?: number;
+}
+
+/**
+ * Capability grant for federated hierarchy pattern.
+ * Allows establishing parent-child relationships.
+ */
+export interface FederatedHierarchyCapability {
+  type: "federated-hierarchy";
+  /** Can query the agent hierarchy */
+  canQueryAgents: boolean;
+  /** Can mount remote agents locally */
+  canMount: boolean;
+  /** Can subscribe to status updates */
+  canSubscribeStatus: boolean;
+  /** Restrict to specific agent IDs (optional) */
+  allowedAgentIds?: string[];
+}
+
+/**
+ * Capability grant for transparent encapsulation pattern.
+ * Allows registering as encapsulated child or accepting encapsulated children.
+ */
+export interface EncapsulationCapability {
+  type: "encapsulation";
+  /** Can register as an encapsulated child */
+  canActAsChild: boolean;
+  /** Can accept encapsulated children */
+  canActAsParent: boolean;
+}
+
+/**
+ * Union of all capability grant types
+ */
+export type CapabilityGrant =
+  | TaskDelegationCapability
+  | FederatedHierarchyCapability
+  | EncapsulationCapability;
+
+/**
+ * Type helper to extract capability type string
+ */
+export type CapabilityType = CapabilityGrant["type"];
+
+/**
+ * Full capability set for a peer
+ */
+export interface PeerCapabilities {
+  /** Peer ID these capabilities apply to */
+  peerId: string;
+  /** Granted capabilities */
+  grants: CapabilityGrant[];
+  /** When capabilities were issued (ms since epoch) */
+  issuedAt: number;
+  /** When capabilities expire (ms since epoch, optional) */
+  expiresAt?: number;
+  /** Who issued these capabilities (for audit trail) */
+  issuedBy?: string;
+}
+
+/**
+ * Options for granting capabilities
+ */
+export interface GrantCapabilityOptions {
+  /** Time until expiration in milliseconds */
+  expiresIn?: number;
+  /** Issuer identifier for audit trail */
+  issuedBy?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Failure Configuration Types
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Disconnect behavior options for federation
+ */
+export type FederationDisconnectBehavior =
+  | "orphan"     // Continue operating independently
+  | "abort"      // Terminate active tasks, enter error state
+  | "reconnect"; // Wait for reconnection, buffer updates
+
+/**
+ * Configuration for federation failure handling
+ */
+export interface FederationConfig {
+  /** Behavior when parent disconnects (for child) */
+  onParentDisconnect: FederationDisconnectBehavior;
+  /** Behavior when child disconnects (for parent) */
+  onChildDisconnect: FederationDisconnectBehavior;
+  /** Timeout in ms before giving up on reconnection */
+  reconnectTimeout?: number;
+  /** Maximum reconnection attempts */
+  maxReconnectAttempts?: number;
+}
+
+/**
+ * Error detail level for encapsulation facade
+ */
+export type ErrorDetailLevel =
+  | "opaque"   // Only "failed" with generic message
+  | "summary"  // Error category and brief description
+  | "full";    // Complete error chain (trusted peers only)
+
+/**
+ * Configuration for encapsulation facade
+ */
+export interface FacadeConfig {
+  /** How much error detail to expose to parent */
+  errorDetail: ErrorDetailLevel;
+  /** Display name in parent's hierarchy */
+  name?: string;
+  /** Advertised capabilities */
+  capabilities?: string[];
+}
+
+/**
+ * Default federation configuration
+ */
+export const DEFAULT_FEDERATION_CONFIG: FederationConfig = {
+  onParentDisconnect: "orphan",
+  onChildDisconnect: "orphan",
+  reconnectTimeout: 30000,
+  maxReconnectAttempts: 3,
+};
+
+/**
+ * Default facade configuration
+ */
+export const DEFAULT_FACADE_CONFIG: FacadeConfig = {
+  errorDetail: "summary",
+};

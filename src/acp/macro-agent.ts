@@ -49,9 +49,18 @@ import type {
   DeliverPeerMessageResponse,
   DeliverPeerRequestRequest,
   DeliverPeerRequestResponse,
+  GrantCapabilityRequest,
+  GrantCapabilityResponse,
+  RevokeCapabilityRequest,
+  RevokeCapabilityResponse,
+  GetCapabilitiesRequest,
+  GetCapabilitiesResponse,
+  CheckCapabilityRequest,
+  CheckCapabilityResponse,
 } from "./types.js";
 import { ACPError } from "./types.js";
 import type { PeerManager } from "../peer/peer-manager.js";
+import type { CapabilityManager } from "../peer/capability-manager.js";
 import type { AgentConfig } from "../agent/types.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -70,6 +79,10 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/sendPeerRequest",
   "_macro/deliverPeerMessage",
   "_macro/deliverPeerRequest",
+  "_macro/grantCapability",
+  "_macro/revokeCapability",
+  "_macro/getCapabilities",
+  "_macro/checkCapability",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -89,6 +102,9 @@ export interface MacroAgentConfig {
   /** PeerManager for inter-macro-agent communication (optional) */
   peerManager?: PeerManager;
 
+  /** CapabilityManager for peer capability management (optional) */
+  capabilityManager?: CapabilityManager;
+
   /** Default working directory for new sessions */
   defaultCwd?: string;
 }
@@ -107,6 +123,7 @@ export class MacroAgent implements Agent {
   private eventStore: EventStore;
   private taskManager: TaskManager;
   private peerManager: PeerManager | undefined;
+  private capabilityManager: CapabilityManager | undefined;
   private sessionMapper: SessionMapper;
   private defaultCwd: string;
 
@@ -123,6 +140,7 @@ export class MacroAgent implements Agent {
     this.eventStore = config.eventStore;
     this.taskManager = config.taskManager;
     this.peerManager = config.peerManager;
+    this.capabilityManager = config.capabilityManager;
     this.sessionMapper = new SessionMapper();
     this.defaultCwd = config.defaultCwd ?? process.cwd();
   }
@@ -375,6 +393,26 @@ export class MacroAgent implements Agent {
       case "_macro/deliverPeerRequest":
         return this.handleDeliverPeerRequest(
           params as unknown as DeliverPeerRequestRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/grantCapability":
+        return this.handleGrantCapability(
+          params as unknown as GrantCapabilityRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/revokeCapability":
+        return this.handleRevokeCapability(
+          params as unknown as RevokeCapabilityRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/getCapabilities":
+        return this.handleGetCapabilities(
+          params as unknown as GetCapabilitiesRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/checkCapability":
+        return this.handleCheckCapability(
+          params as unknown as CheckCapabilityRequest
         ) as unknown as Record<string, unknown>;
 
       default:
@@ -763,6 +801,101 @@ export class MacroAgent implements Agent {
     );
 
     return response;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Capability Extension Handlers
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Grant capabilities to a peer
+   */
+  private async handleGrantCapability(
+    params: GrantCapabilityRequest
+  ): Promise<GrantCapabilityResponse> {
+    if (!this.capabilityManager) {
+      throw new ACPError(
+        "CapabilityManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    const capabilities = this.capabilityManager.grant(
+      params.peerId,
+      params.grants,
+      {
+        expiresIn: params.expiresIn,
+        issuedBy: params.issuedBy,
+      }
+    );
+
+    return { capabilities };
+  }
+
+  /**
+   * Revoke capabilities from a peer
+   */
+  private async handleRevokeCapability(
+    params: RevokeCapabilityRequest
+  ): Promise<RevokeCapabilityResponse> {
+    if (!this.capabilityManager) {
+      throw new ACPError(
+        "CapabilityManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    this.capabilityManager.revoke(params.peerId, params.grantTypes);
+
+    return {
+      success: true,
+      remainingCapabilities: this.capabilityManager.getCapabilities(params.peerId),
+    };
+  }
+
+  /**
+   * Get capabilities for a peer or list all authorized peers
+   */
+  private async handleGetCapabilities(
+    params: GetCapabilitiesRequest
+  ): Promise<GetCapabilitiesResponse> {
+    if (!this.capabilityManager) {
+      throw new ACPError(
+        "CapabilityManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    if (params.peerId) {
+      return {
+        capabilities: this.capabilityManager.getCapabilities(params.peerId),
+      };
+    }
+
+    return {
+      authorizedPeers: this.capabilityManager.listAuthorizedPeers(),
+    };
+  }
+
+  /**
+   * Check if a peer has a required capability
+   */
+  private async handleCheckCapability(
+    params: CheckCapabilityRequest
+  ): Promise<CheckCapabilityResponse> {
+    if (!this.capabilityManager) {
+      throw new ACPError(
+        "CapabilityManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    return {
+      hasCapability: this.capabilityManager.hasCapability(
+        params.peerId,
+        params.required
+      ),
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────
