@@ -647,6 +647,59 @@ describe("MacroAgent", () => {
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // Peer Communication Extension Tests
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("_macro/sendPeerMessage", () => {
+    it("should throw when no PeerManager configured", async () => {
+      // macroAgent doesn't have a PeerManager configured
+      await expect(
+        macroAgent.extMethod("macro/sendPeerMessage", {
+          to: "other-peer",
+          type: "greeting",
+          payload: { text: "hello" },
+        })
+      ).rejects.toThrow(ACPError);
+    });
+  });
+
+  describe("_macro/sendPeerRequest", () => {
+    it("should throw when no PeerManager configured", async () => {
+      await expect(
+        macroAgent.extMethod("macro/sendPeerRequest", {
+          to: "other-peer",
+          method: "calculate",
+          params: { x: 1 },
+        })
+      ).rejects.toThrow(ACPError);
+    });
+  });
+
+  describe("_macro/deliverPeerMessage", () => {
+    it("should throw when no PeerManager configured", async () => {
+      await expect(
+        macroAgent.extMethod("macro/deliverPeerMessage", {
+          from: "other-peer",
+          type: "notification",
+          payload: { data: "test" },
+        })
+      ).rejects.toThrow(ACPError);
+    });
+  });
+
+  describe("_macro/deliverPeerRequest", () => {
+    it("should throw when no PeerManager configured", async () => {
+      await expect(
+        macroAgent.extMethod("macro/deliverPeerRequest", {
+          from: "other-peer",
+          method: "compute",
+          params: {},
+        })
+      ).rejects.toThrow(ACPError);
+    });
+  });
+
   describe("getSessionMapper", () => {
     it("should return the session mapper", () => {
       const mapper = macroAgent.getSessionMapper();

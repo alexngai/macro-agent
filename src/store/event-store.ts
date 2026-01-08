@@ -803,6 +803,12 @@ function applyEventToViews(
     case 'task':
       applyTaskEvent(store, event, notifyTaskChange);
       break;
+    case 'peer_message':
+    case 'peer_request':
+      // Peer events are stored in the event log for audit trail
+      // but not materialized into views since PeerManager handles
+      // in-memory queues. Events can be queried via eventStore.query().
+      break;
   }
 }
 

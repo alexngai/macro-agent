@@ -14,7 +14,9 @@ export type EventType =
   | "status"
   | "message"
   | "task"
-  | "subscription";
+  | "subscription"
+  | "peer_message"
+  | "peer_request";
 
 // Status types for status events
 export type StatusType =
@@ -30,6 +32,8 @@ export interface EventSource {
   agent_id?: AgentId;
   task_id?: TaskId;
   lineage?: AgentId[];
+  /** Peer address for peer events (e.g., "peer-id" or "peer-id/agent-id") */
+  peer?: string;
 }
 
 // Event target

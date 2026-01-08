@@ -296,6 +296,138 @@ export interface ForkAgentResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/sendPeerMessage
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/sendPeerMessage extension
+ */
+export interface SendPeerMessageACPRequest {
+  /** Target peer address ("peerId" or "peerId/agentId") */
+  to: string;
+
+  /** Message type for routing */
+  type: string;
+
+  /** Message payload */
+  payload: unknown;
+
+  /** Optional correlation ID */
+  correlationId?: string;
+}
+
+/**
+ * Response for _macro/sendPeerMessage extension
+ */
+export interface SendPeerMessageACPResponse {
+  success: boolean;
+  timestamp: number;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/sendPeerRequest
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/sendPeerRequest extension
+ */
+export interface SendPeerRequestACPRequest {
+  /** Target peer address ("peerId" or "peerId/agentId") */
+  to: string;
+
+  /** Request method name */
+  method: string;
+
+  /** Request parameters */
+  params?: unknown;
+
+  /** Timeout in milliseconds */
+  timeout?: number;
+}
+
+/**
+ * Response for _macro/sendPeerRequest extension
+ */
+export interface SendPeerRequestACPResponse {
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/deliverPeerMessage
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/deliverPeerMessage extension
+ * Client calls this to route an inbound message to this macro-agent
+ */
+export interface DeliverPeerMessageRequest {
+  /** Source peer address */
+  from: string;
+
+  /** Message type */
+  type: string;
+
+  /** Message payload */
+  payload: unknown;
+
+  /** Optional correlation ID */
+  correlationId?: string;
+
+  /** Target agent ID within this macro-agent (optional, defaults to root) */
+  targetAgentId?: AgentId;
+}
+
+/**
+ * Response for _macro/deliverPeerMessage extension
+ */
+export interface DeliverPeerMessageResponse {
+  success: boolean;
+  messageId: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/deliverPeerRequest
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/deliverPeerRequest extension
+ * Client calls this to route an inbound request to this macro-agent
+ */
+export interface DeliverPeerRequestRequest {
+  /** Source peer address */
+  from: string;
+
+  /** Request method name */
+  method: string;
+
+  /** Request parameters */
+  params?: unknown;
+
+  /** Timeout for the request in milliseconds */
+  timeout?: number;
+
+  /** Target agent ID within this macro-agent (optional, defaults to root) */
+  targetAgentId?: AgentId;
+}
+
+/**
+ * Response for _macro/deliverPeerRequest extension
+ */
+export interface DeliverPeerRequestResponse {
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Extension Method Types (Union)
 // ─────────────────────────────────────────────────────────────────
 
@@ -307,7 +439,11 @@ export type ACPExtensionMethod =
   | "_macro/getHierarchy"
   | "_macro/getTask"
   | "_macro/mountAgent"
-  | "_macro/forkAgent";
+  | "_macro/forkAgent"
+  | "_macro/sendPeerMessage"
+  | "_macro/sendPeerRequest"
+  | "_macro/deliverPeerMessage"
+  | "_macro/deliverPeerRequest";
 
 /**
  * Map of extension methods to their request types
@@ -318,6 +454,10 @@ export interface ACPExtensionRequests {
   "_macro/getTask": GetTaskRequest;
   "_macro/mountAgent": MountAgentRequest;
   "_macro/forkAgent": ForkAgentRequest;
+  "_macro/sendPeerMessage": SendPeerMessageACPRequest;
+  "_macro/sendPeerRequest": SendPeerRequestACPRequest;
+  "_macro/deliverPeerMessage": DeliverPeerMessageRequest;
+  "_macro/deliverPeerRequest": DeliverPeerRequestRequest;
 }
 
 /**
@@ -329,6 +469,10 @@ export interface ACPExtensionResponses {
   "_macro/getTask": GetTaskResponse;
   "_macro/mountAgent": MountAgentResponse;
   "_macro/forkAgent": ForkAgentResponse;
+  "_macro/sendPeerMessage": SendPeerMessageACPResponse;
+  "_macro/sendPeerRequest": SendPeerRequestACPResponse;
+  "_macro/deliverPeerMessage": DeliverPeerMessageResponse;
+  "_macro/deliverPeerRequest": DeliverPeerRequestResponse;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -357,4 +501,6 @@ export type ACPErrorCode =
   | "FORK_FAILED"
   | "FORK_NOT_SUPPORTED"
   | "INVALID_EXTENSION"
-  | "PERMISSION_DENIED";
+  | "PERMISSION_DENIED"
+  | "NO_PEER_MANAGER"
+  | "PEER_SEND_FAILED";

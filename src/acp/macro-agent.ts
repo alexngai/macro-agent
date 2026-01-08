@@ -41,8 +41,17 @@ import type {
   ForkAgentResponse,
   MacroAgentInitConfig,
   SubAgentConfig,
+  SendPeerMessageACPRequest,
+  SendPeerMessageACPResponse,
+  SendPeerRequestACPRequest,
+  SendPeerRequestACPResponse,
+  DeliverPeerMessageRequest,
+  DeliverPeerMessageResponse,
+  DeliverPeerRequestRequest,
+  DeliverPeerRequestResponse,
 } from "./types.js";
 import { ACPError } from "./types.js";
+import type { PeerManager } from "../peer/peer-manager.js";
 import type { AgentConfig } from "../agent/types.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -57,6 +66,10 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/getTask",
   "_macro/mountAgent",
   "_macro/forkAgent",
+  "_macro/sendPeerMessage",
+  "_macro/sendPeerRequest",
+  "_macro/deliverPeerMessage",
+  "_macro/deliverPeerRequest",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -72,6 +85,9 @@ export interface MacroAgentConfig {
 
   /** TaskManager for task operations */
   taskManager: TaskManager;
+
+  /** PeerManager for inter-macro-agent communication (optional) */
+  peerManager?: PeerManager;
 
   /** Default working directory for new sessions */
   defaultCwd?: string;
@@ -90,6 +106,7 @@ export class MacroAgent implements Agent {
   private agentManager: AgentManager;
   private eventStore: EventStore;
   private taskManager: TaskManager;
+  private peerManager: PeerManager | undefined;
   private sessionMapper: SessionMapper;
   private defaultCwd: string;
 
@@ -105,6 +122,7 @@ export class MacroAgent implements Agent {
     this.agentManager = config.agentManager;
     this.eventStore = config.eventStore;
     this.taskManager = config.taskManager;
+    this.peerManager = config.peerManager;
     this.sessionMapper = new SessionMapper();
     this.defaultCwd = config.defaultCwd ?? process.cwd();
   }
@@ -339,6 +357,26 @@ export class MacroAgent implements Agent {
           params as unknown as ForkAgentRequest
         ) as unknown as Record<string, unknown>;
 
+      case "_macro/sendPeerMessage":
+        return this.handleSendPeerMessage(
+          params as unknown as SendPeerMessageACPRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/sendPeerRequest":
+        return this.handleSendPeerRequest(
+          params as unknown as SendPeerRequestACPRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/deliverPeerMessage":
+        return this.handleDeliverPeerMessage(
+          params as unknown as DeliverPeerMessageRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/deliverPeerRequest":
+        return this.handleDeliverPeerRequest(
+          params as unknown as DeliverPeerRequestRequest
+        ) as unknown as Record<string, unknown>;
+
       default:
         throw new ACPError(
           `Unknown extension method: ${method}`,
@@ -560,6 +598,171 @@ export class MacroAgent implements Agent {
       newSessionId: spawned.session_id,
       originalAgentId: agentId,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Peer Communication Extension Handlers
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Send a peer message (outbound, fire-and-forget)
+   *
+   * Called by external clients to have an agent send a message to a peer.
+   */
+  private async handleSendPeerMessage(
+    params: SendPeerMessageACPRequest
+  ): Promise<SendPeerMessageACPResponse> {
+    if (!this.peerManager) {
+      throw new ACPError(
+        "PeerManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    // Determine which agent is sending (use head manager by default)
+    const headManagers = this.agentManager.listHeadManagers();
+    if (headManagers.length === 0) {
+      throw new ACPError(
+        "No agents available to send peer message",
+        "AGENT_NOT_FOUND"
+      );
+    }
+    const sendingAgentId = headManagers[0].id;
+
+    try {
+      await this.peerManager.sendMessage(sendingAgentId, params.to, {
+        type: params.type,
+        payload: params.payload,
+        metadata: params.correlationId
+          ? { correlationId: params.correlationId }
+          : undefined,
+      });
+
+      return {
+        success: true,
+        timestamp: Date.now(),
+      };
+    } catch (error) {
+      throw new ACPError(
+        `Failed to send peer message: ${error instanceof Error ? error.message : String(error)}`,
+        "PEER_SEND_FAILED",
+        { to: params.to, error }
+      );
+    }
+  }
+
+  /**
+   * Send a peer request (outbound, request-response)
+   *
+   * Called by external clients to have an agent send a request to a peer
+   * and wait for a response.
+   */
+  private async handleSendPeerRequest(
+    params: SendPeerRequestACPRequest
+  ): Promise<SendPeerRequestACPResponse> {
+    if (!this.peerManager) {
+      throw new ACPError(
+        "PeerManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    // Determine which agent is sending (use head manager by default)
+    const headManagers = this.agentManager.listHeadManagers();
+    if (headManagers.length === 0) {
+      throw new ACPError(
+        "No agents available to send peer request",
+        "AGENT_NOT_FOUND"
+      );
+    }
+    const sendingAgentId = headManagers[0].id;
+
+    try {
+      const response = await this.peerManager.sendRequest(
+        sendingAgentId,
+        params.to,
+        {
+          method: params.method,
+          params: params.params,
+          timeout: params.timeout,
+        }
+      );
+
+      return response;
+    } catch (error) {
+      throw new ACPError(
+        `Failed to send peer request: ${error instanceof Error ? error.message : String(error)}`,
+        "PEER_SEND_FAILED",
+        { to: params.to, error }
+      );
+    }
+  }
+
+  /**
+   * Deliver a peer message (inbound, fire-and-forget)
+   *
+   * Called by external clients to route an inbound message from a peer
+   * to this macro-agent. The message is queued for the target agent.
+   */
+  private async handleDeliverPeerMessage(
+    params: DeliverPeerMessageRequest
+  ): Promise<DeliverPeerMessageResponse> {
+    if (!this.peerManager) {
+      throw new ACPError(
+        "PeerManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    // Use PeerManager's deliverMessage to queue the message
+    const messageId = this.peerManager.deliverMessage(
+      params.from,
+      {
+        type: params.type,
+        payload: params.payload,
+        metadata: params.correlationId
+          ? { correlationId: params.correlationId }
+          : undefined,
+      },
+      params.targetAgentId
+    );
+
+    return {
+      success: true,
+      messageId,
+    };
+  }
+
+  /**
+   * Deliver a peer request (inbound, request-response)
+   *
+   * Called by external clients to route an inbound request from a peer
+   * to this macro-agent. The request is queued and this waits for the
+   * internal agent to respond.
+   */
+  private async handleDeliverPeerRequest(
+    params: DeliverPeerRequestRequest
+  ): Promise<DeliverPeerRequestResponse> {
+    if (!this.peerManager) {
+      throw new ACPError(
+        "PeerManager not configured for this macro-agent",
+        "NO_PEER_MANAGER"
+      );
+    }
+
+    // Use PeerManager's deliverRequest which returns a promise
+    // that resolves when the internal agent responds
+    const response = await this.peerManager.deliverRequest(
+      params.from,
+      {
+        method: params.method,
+        params: params.params,
+        timeout: params.timeout,
+      },
+      params.targetAgentId
+    );
+
+    return response;
   }
 
   // ─────────────────────────────────────────────────────────────────

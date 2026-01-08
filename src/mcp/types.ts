@@ -338,4 +338,89 @@ export type MCPToolErrorCode =
   | "INVALID_INPUT"
   | "SPAWN_FAILED"
   | "ROUTING_FAILED"
-  | "NOT_IN_SUBTREE";
+  | "NOT_IN_SUBTREE"
+  | "NO_PEER_TRANSPORT"
+  | "PEER_REQUEST_NOT_FOUND";
+
+// ─────────────────────────────────────────────────────────────────
+// Peer Communication Tool Types
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * send_peer_message tool input
+ */
+export interface SendPeerMessageInput {
+  /** Target peer address ("peerId" or "peerId/agentId") */
+  to: string;
+
+  /** Message type for routing */
+  type: string;
+
+  /** Message payload */
+  payload: unknown;
+
+  /** Optional correlation ID for relating messages */
+  correlation_id?: string;
+}
+
+/**
+ * send_peer_message tool output
+ */
+export interface SendPeerMessageOutput {
+  success: boolean;
+  timestamp: number;
+}
+
+/**
+ * send_peer_request tool input
+ */
+export interface SendPeerRequestInput {
+  /** Target peer address ("peerId" or "peerId/agentId") */
+  to: string;
+
+  /** Request method name */
+  method: string;
+
+  /** Request parameters */
+  params?: unknown;
+
+  /** Timeout hint in milliseconds */
+  timeout?: number;
+}
+
+/**
+ * send_peer_request tool output
+ */
+export interface SendPeerRequestOutput {
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+/**
+ * respond_to_peer_request tool input
+ */
+export interface RespondToPeerRequestInput {
+  /** Request ID to respond to */
+  request_id: string;
+
+  /** Success result (mutually exclusive with error) */
+  result?: unknown;
+
+  /** Error response (mutually exclusive with result) */
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+/**
+ * respond_to_peer_request tool output
+ */
+export interface RespondToPeerRequestOutput {
+  success: boolean;
+}

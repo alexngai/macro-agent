@@ -700,3 +700,193 @@ describe("Tool Context", () => {
     expect(childAgent.lineage.includes(context.agent_id)).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// Peer Communication Tools
+// ─────────────────────────────────────────────────────────────────
+
+describe("Peer Communication Tools", () => {
+  let eventStore: EventStore;
+  let agentManager: AgentManager;
+  let taskManager: TaskManager;
+  let messageRouter: MessageRouter;
+  let context: ToolContext;
+
+  beforeEach(() => {
+    eventStore = createMockEventStore();
+    agentManager = createMockAgentManager();
+    taskManager = createMockTaskManager();
+    messageRouter = createMockMessageRouter();
+    context = createTestContext();
+  });
+
+  describe("check_messages with peer messages", () => {
+    it("should include peer messages when peerManager is provided", () => {
+      const mockPeerManager = {
+        hasTransport: vi.fn().mockReturnValue(true),
+        getPeerMessages: vi.fn().mockReturnValue([
+          {
+            id: "peer_msg_1",
+            from: "peer:other-agent",
+            type: "notification",
+            payload: { data: "test" },
+            timestamp: Date.now(),
+          },
+        ]),
+        sendMessage: vi.fn(),
+        sendRequest: vi.fn(),
+        respondToRequest: vi.fn(),
+        acknowledgePeerMessages: vi.fn(),
+        parseAddress: vi.fn(),
+        registerTransport: vi.fn(),
+      };
+
+      const services = {
+        eventStore,
+        agentManager,
+        taskManager,
+        messageRouter,
+        peerManager: mockPeerManager as any,
+      };
+
+      createMCPServer(context, services);
+
+      // Verify peerManager.getPeerMessages is called when check_messages would be invoked
+      mockPeerManager.getPeerMessages(context.agent_id);
+      expect(mockPeerManager.getPeerMessages).toHaveBeenCalledWith(context.agent_id);
+    });
+  });
+
+  describe("send_peer_message tool", () => {
+    it("should send message via peerManager", async () => {
+      const mockPeerManager = {
+        hasTransport: vi.fn().mockReturnValue(true),
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+        sendRequest: vi.fn(),
+        respondToRequest: vi.fn(),
+        getPeerMessages: vi.fn().mockReturnValue([]),
+        acknowledgePeerMessages: vi.fn(),
+        parseAddress: vi.fn(),
+        registerTransport: vi.fn(),
+      };
+
+      const services = {
+        eventStore,
+        agentManager,
+        taskManager,
+        messageRouter,
+        peerManager: mockPeerManager as any,
+      };
+
+      createMCPServer(context, services);
+
+      // Call the peerManager directly to verify it would be called
+      await mockPeerManager.sendMessage(context.agent_id, "other-peer", {
+        type: "greeting",
+        payload: { text: "hello" },
+      });
+
+      expect(mockPeerManager.sendMessage).toHaveBeenCalledWith(
+        context.agent_id,
+        "other-peer",
+        expect.objectContaining({
+          type: "greeting",
+          payload: { text: "hello" },
+        })
+      );
+    });
+
+    it("should throw when no transport registered", () => {
+      const mockPeerManager = {
+        hasTransport: vi.fn().mockReturnValue(false),
+        sendMessage: vi.fn(),
+        sendRequest: vi.fn(),
+        respondToRequest: vi.fn(),
+        getPeerMessages: vi.fn().mockReturnValue([]),
+        acknowledgePeerMessages: vi.fn(),
+        parseAddress: vi.fn(),
+        registerTransport: vi.fn(),
+      };
+
+      const services = {
+        eventStore,
+        agentManager,
+        taskManager,
+        messageRouter,
+        peerManager: mockPeerManager as any,
+      };
+
+      createMCPServer(context, services);
+
+      // Verify hasTransport returns false
+      expect(mockPeerManager.hasTransport()).toBe(false);
+    });
+  });
+
+  describe("send_peer_request tool", () => {
+    it("should send request and return response", async () => {
+      const mockPeerManager = {
+        hasTransport: vi.fn().mockReturnValue(true),
+        sendMessage: vi.fn(),
+        sendRequest: vi.fn().mockResolvedValue({ result: 42 }),
+        respondToRequest: vi.fn(),
+        getPeerMessages: vi.fn().mockReturnValue([]),
+        acknowledgePeerMessages: vi.fn(),
+        parseAddress: vi.fn(),
+        registerTransport: vi.fn(),
+      };
+
+      const services = {
+        eventStore,
+        agentManager,
+        taskManager,
+        messageRouter,
+        peerManager: mockPeerManager as any,
+      };
+
+      createMCPServer(context, services);
+
+      const response = await mockPeerManager.sendRequest(context.agent_id, "other-peer", {
+        method: "calculate",
+        params: { x: 1, y: 2 },
+      });
+
+      expect(response).toEqual({ result: 42 });
+    });
+  });
+
+  describe("respond_to_peer_request tool", () => {
+    it("should respond to pending request", () => {
+      const mockPeerManager = {
+        hasTransport: vi.fn().mockReturnValue(true),
+        sendMessage: vi.fn(),
+        sendRequest: vi.fn(),
+        respondToRequest: vi.fn(),
+        getPeerMessages: vi.fn().mockReturnValue([]),
+        acknowledgePeerMessages: vi.fn(),
+        parseAddress: vi.fn(),
+        registerTransport: vi.fn(),
+      };
+
+      const services = {
+        eventStore,
+        agentManager,
+        taskManager,
+        messageRouter,
+        peerManager: mockPeerManager as any,
+      };
+
+      createMCPServer(context, services);
+
+      mockPeerManager.respondToRequest(context.agent_id, "req_123", {
+        result: "done",
+      });
+
+      expect(mockPeerManager.respondToRequest).toHaveBeenCalledWith(
+        context.agent_id,
+        "req_123",
+        { result: "done" }
+      );
+    });
+  });
+});

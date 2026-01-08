@@ -143,6 +143,13 @@ export {
   type GetTaskOutput,
   MCPToolError,
   type MCPToolErrorCode,
+  // Peer communication tools
+  type SendPeerMessageInput,
+  type SendPeerMessageOutput,
+  type SendPeerRequestInput,
+  type SendPeerRequestOutput,
+  type RespondToPeerRequestInput,
+  type RespondToPeerRequestOutput,
 } from './mcp/types.js';
 
 // API server
@@ -217,3 +224,20 @@ export {
   type ACPExtensionResponses,
   type ACPErrorCode,
 } from './acp/index.js';
+
+// Peer communication
+export {
+  createPeerManager,
+  type PeerManager,
+  type PeerTransport,
+  type PeerHandler,
+  type PeerConfig,
+  type PeerMessage,
+  type PeerRequest,
+  type PeerResponse,
+  type PeerAddress,
+  type ParsedPeerAddress,
+  type PeerInboxMessage,
+  PeerError,
+  type PeerErrorCode,
+} from './peer/index.js';

@@ -237,9 +237,9 @@ describe("ACP Mode Integration", () => {
       expect(initResponse.protocolVersion).toBe(1);
       expect(initResponse.agentCapabilities).toBeDefined();
       expect(initResponse.agentCapabilities?.loadSession).toBe(true);
-      expect(
-        initResponse.agentCapabilities?._meta?.extensions
-      ).toContain("_macro/spawnAgent");
+      expect(initResponse.agentCapabilities?._meta?.extensions).toContain(
+        "_macro/spawnAgent"
+      );
 
       // Step 2: Create new session
       const sessionResponse = await macroAgent.newSession({
@@ -324,7 +324,11 @@ describe("ACP Mode Integration", () => {
       expect(extensions).toContain("_macro/getTask");
       expect(extensions).toContain("_macro/mountAgent");
       expect(extensions).toContain("_macro/forkAgent");
-      expect(extensions?.length).toBe(5);
+      expect(extensions).toContain("_macro/sendPeerMessage");
+      expect(extensions).toContain("_macro/sendPeerRequest");
+      expect(extensions).toContain("_macro/deliverPeerMessage");
+      expect(extensions).toContain("_macro/deliverPeerRequest");
+      expect(extensions?.length).toBe(9);
 
       expect(initResponse.agentCapabilities?._meta?.agentType).toBe(
         "macro-agent"
@@ -647,9 +651,9 @@ describe("ACP Mode Integration", () => {
 
   describe("Extension Error Handling", () => {
     it("should throw for unknown extension method", async () => {
-      await expect(
-        macroAgent.extMethod("unknown/method", {})
-      ).rejects.toThrow(ACPError);
+      await expect(macroAgent.extMethod("unknown/method", {})).rejects.toThrow(
+        ACPError
+      );
 
       try {
         await macroAgent.extMethod("unknown/method", {});
