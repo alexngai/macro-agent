@@ -24,6 +24,9 @@ export interface ToolContext {
 
   /** Agent's lineage (ancestors) for authorization checks */
   lineage: AgentId[];
+
+  /** Working directory for the agent */
+  cwd: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -49,6 +52,9 @@ export interface SpawnAgentInput {
     maxTokens?: number;
     temperature?: number;
   };
+
+  /** Working directory for the spawned agent (defaults to parent's cwd) */
+  cwd?: string;
 }
 
 /**

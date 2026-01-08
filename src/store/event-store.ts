@@ -821,6 +821,7 @@ function applySpawnEvent(
     task_id?: TaskId;
     parent?: AgentId | null;
     config?: Record<string, unknown>;
+    cwd?: string;
   };
 
   const agentId = payload.agent_id;
@@ -847,6 +848,7 @@ function applySpawnEvent(
     task: payload.task,
     task_id: payload.task_id ?? '',
     config: JSON.stringify(payload.config ?? {}),
+    cwd: payload.cwd ?? process.cwd(),
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
@@ -1126,6 +1128,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     task: row.task as string,
     task_id: (row.task_id as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
+    cwd: (row.cwd as string) || process.cwd(),
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,

@@ -77,6 +77,10 @@ const SpawnAgentSchema = {
     })
     .optional()
     .describe("Custom config for the child agent"),
+  cwd: z
+    .string()
+    .optional()
+    .describe("Working directory for the spawned agent (defaults to parent's cwd)"),
 };
 
 const EmitStatusSchema = {
@@ -205,6 +209,7 @@ export function createMCPServer(
         subscribeParent: args.subscribe_parent ?? true,
         topics: args.topics ?? [],
         config: args.config,
+        cwd: args.cwd ?? context.cwd,
       });
 
       return {

@@ -36,6 +36,8 @@ function createMockAgent(overrides: Partial<Agent> = {}): Agent {
     task_id: `task-${++taskCounter}`,
     parent: null,
     lineage: [],
+    config: {},
+    cwd: "/test/working/dir",
     created_at: Date.now(),
     started_at: Date.now(),
     ...overrides,

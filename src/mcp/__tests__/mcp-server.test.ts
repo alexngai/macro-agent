@@ -27,6 +27,7 @@ function createMockAgent(overrides: Partial<Agent> = {}): Agent {
     task: "Test task",
     task_id: "task_test123",
     config: {},
+    cwd: "/test/working/dir",
     created_at: Date.now(),
     started_at: Date.now(),
     ...overrides,
@@ -160,6 +161,7 @@ function createTestContext(overrides: Partial<ToolContext> = {}): ToolContext {
     session_id: "sess_caller123",
     task_id: "task_caller123",
     lineage: [],
+    cwd: "/test/working/dir",
     ...overrides,
   };
 }

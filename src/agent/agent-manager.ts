@@ -245,6 +245,7 @@ export function createAgentManager(
           { name: "MACRO_AGENT_ID", value: agentId },
           { name: "MACRO_PARENT_ID", value: parent ?? "" },
           { name: "MACRO_TASK_ID", value: taskId },
+          { name: "MACRO_AGENT_CWD", value: cwd },
         ],
       };
 
@@ -275,6 +276,7 @@ export function createAgentManager(
           task_id: taskId,
           parent: parent ?? null,
           config: agentConfig ?? {},
+          cwd,
         },
       });
 

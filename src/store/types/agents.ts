@@ -36,6 +36,7 @@ export interface Agent {
   task: string;
   task_id?: TaskId;
   config: AgentConfig;
+  cwd: string;
   created_at: Timestamp;
   started_at?: Timestamp;
   stopped_at?: Timestamp;

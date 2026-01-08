@@ -25,6 +25,7 @@ function createMockAgent(overrides: Partial<Agent> = {}): Agent {
     task: "Test task",
     task_id: "task_test123",
     config: {},
+    cwd: "/test/working/dir",
     created_at: Date.now(),
     started_at: Date.now(),
     ...overrides,

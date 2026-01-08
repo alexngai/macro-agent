@@ -17,6 +17,7 @@ async function main() {
   const agentId = process.env.MACRO_AGENT_ID;
   const parentId = process.env.MACRO_PARENT_ID || null;
   const taskId = process.env.MACRO_TASK_ID;
+  const agentCwd = process.env.MACRO_AGENT_CWD || process.cwd();
 
   if (!agentId) {
     console.error("Error: MACRO_AGENT_ID environment variable is required");
@@ -41,6 +42,7 @@ async function main() {
         session_id: agent?.session_id ?? "",
         task_id: taskId ?? undefined,
         lineage,
+        cwd: agentCwd,
       },
       {
         eventStore,
