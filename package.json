@@ -14,7 +14,7 @@
     "build": "tsc",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:e2e": "RUN_E2E_TESTS=true npx tsx scripts/test-acp-integration.ts",
+    "test:e2e": "RUN_E2E_TESTS=true npx tsx scripts/test-acp-integration.ts && RUN_E2E_TESTS=true vitest run src/acp/__tests__/websocket-full-e2e.test.ts",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "release:patch": "npm version patch && git push && git push --tags",

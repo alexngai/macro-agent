@@ -78,6 +78,42 @@ describe("parseArgs", () => {
     });
   });
 
+  describe("--ws option", () => {
+    it("should parse --ws flag", () => {
+      const result = parseArgs(["--ws"]);
+      expect(result.ws).toBe(true);
+    });
+
+    it("should not set ws if flag not provided", () => {
+      const result = parseArgs([]);
+      expect(result.ws).toBeUndefined();
+    });
+  });
+
+  describe("--ws-port option", () => {
+    it("should parse --ws-port option", () => {
+      const result = parseArgs(["--ws-port", "3001"]);
+      expect(result.wsPort).toBe(3001);
+    });
+
+    it("should not set wsPort if no value provided", () => {
+      const result = parseArgs(["--ws-port"]);
+      expect(result.wsPort).toBeUndefined();
+    });
+  });
+
+  describe("--ws-host option", () => {
+    it("should parse --ws-host option", () => {
+      const result = parseArgs(["--ws-host", "0.0.0.0"]);
+      expect(result.wsHost).toBe("0.0.0.0");
+    });
+
+    it("should not set wsHost if no value provided", () => {
+      const result = parseArgs(["--ws-host"]);
+      expect(result.wsHost).toBeUndefined();
+    });
+  });
+
   describe("combined options", () => {
     it("should parse all options together", () => {
       const result = parseArgs([
@@ -92,6 +128,28 @@ describe("parseArgs", () => {
         api: true,
         port: 9000,
         host: "127.0.0.1",
+      });
+    });
+
+    it("should parse all options including WebSocket", () => {
+      const result = parseArgs([
+        "--cwd", "/project",
+        "--api",
+        "--port", "9000",
+        "--host", "127.0.0.1",
+        "--ws",
+        "--ws-port", "3001",
+        "--ws-host", "localhost",
+      ]);
+
+      expect(result).toEqual({
+        cwd: "/project",
+        api: true,
+        port: 9000,
+        host: "127.0.0.1",
+        ws: true,
+        wsPort: 3001,
+        wsHost: "localhost",
       });
     });
 

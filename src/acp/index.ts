@@ -110,3 +110,19 @@ export { SessionMapper } from "./session-mapper.js";
 
 // MacroAgent - ACP-compliant agent implementation
 export { MacroAgent, type MacroAgentConfig } from "./macro-agent.js";
+
+// WebSocket stream adapter for ACP over WebSocket
+export {
+  webSocketStream,
+  isWebSocketOpen,
+  isWebSocketConnecting,
+  type Stream,
+} from "./websocket-stream.js";
+
+// WebSocket ACP server for multi-client support
+export {
+  createWebSocketACPServer,
+  type WebSocketACPServer,
+  type WebSocketACPServerConfig,
+  type ACPServices,
+} from "./websocket-server.js";
