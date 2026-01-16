@@ -535,6 +535,65 @@ export interface CheckCapabilityResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/respondToPermission
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/respondToPermission extension
+ *
+ * Used to respond to permission requests when running in interactive mode.
+ */
+export interface RespondToPermissionRequest {
+  /** ACP session ID that has the pending permission */
+  sessionId: ACPSessionId;
+
+  /** The permission request ID from the permission_request update */
+  requestId: string;
+
+  /** The selected option ID (e.g., 'allow_once', 'allow_always', 'reject_once') */
+  optionId: string;
+}
+
+/**
+ * Response for _macro/respondToPermission extension
+ */
+export interface RespondToPermissionResponse {
+  /** Whether the permission was found and responded to */
+  success: boolean;
+
+  /** Error message if success is false */
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/cancelPermission
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/cancelPermission extension
+ *
+ * Used to cancel a permission request, which typically aborts the tool call.
+ */
+export interface CancelPermissionRequest {
+  /** ACP session ID that has the pending permission */
+  sessionId: ACPSessionId;
+
+  /** The permission request ID from the permission_request update */
+  requestId: string;
+}
+
+/**
+ * Response for _macro/cancelPermission extension
+ */
+export interface CancelPermissionResponse {
+  /** Whether the permission was found and cancelled */
+  success: boolean;
+
+  /** Error message if success is false */
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Extension Method Types (Union)
 // ─────────────────────────────────────────────────────────────────
 
@@ -554,7 +613,9 @@ export type ACPExtensionMethod =
   | "_macro/grantCapability"
   | "_macro/revokeCapability"
   | "_macro/getCapabilities"
-  | "_macro/checkCapability";
+  | "_macro/checkCapability"
+  | "_macro/respondToPermission"
+  | "_macro/cancelPermission";
 
 /**
  * Map of extension methods to their request types
@@ -573,6 +634,8 @@ export interface ACPExtensionRequests {
   "_macro/revokeCapability": RevokeCapabilityRequest;
   "_macro/getCapabilities": GetCapabilitiesRequest;
   "_macro/checkCapability": CheckCapabilityRequest;
+  "_macro/respondToPermission": RespondToPermissionRequest;
+  "_macro/cancelPermission": CancelPermissionRequest;
 }
 
 /**
@@ -592,6 +655,8 @@ export interface ACPExtensionResponses {
   "_macro/revokeCapability": RevokeCapabilityResponse;
   "_macro/getCapabilities": GetCapabilitiesResponse;
   "_macro/checkCapability": CheckCapabilityResponse;
+  "_macro/respondToPermission": RespondToPermissionResponse;
+  "_macro/cancelPermission": CancelPermissionResponse;
 }
 
 // ─────────────────────────────────────────────────────────────────

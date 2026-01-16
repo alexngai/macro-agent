@@ -96,6 +96,8 @@ function createMockAgentManager(): AgentManager {
     getSession: vi.fn().mockReturnValue(null),
     onLifecycleEvent: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue(undefined),
+    respondToPermission: vi.fn().mockReturnValue(true),
+    cancelPermission: vi.fn().mockReturnValue(true),
   } as unknown as AgentManager;
 }
 
@@ -749,6 +751,122 @@ describe("MacroAgent", () => {
 
       const config = macroAgent.getInitConfig();
       expect(config).toEqual(initConfig);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Permission Extension Tests
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("_macro/respondToPermission", () => {
+    it("should respond to permission via AgentManager", async () => {
+      // Create a session first to map sessionId to agentId
+      await macroAgent.newSession({ cwd: "/test" });
+      const mapper = macroAgent.getSessionMapper();
+      const mappings = mapper.getAllMappings();
+      const sessionId = mappings[0]?.acpSessionId;
+
+      const response = await macroAgent.extMethod("macro/respondToPermission", {
+        sessionId,
+        requestId: "perm-req-123",
+        optionId: "allow_once",
+      });
+
+      expect(response).toEqual({ success: true });
+      expect(mockAgentManager.respondToPermission).toHaveBeenCalledWith(
+        expect.any(String), // agentId
+        "perm-req-123",
+        "allow_once"
+      );
+    });
+
+    it("should return error when no agent found for session", async () => {
+      const response = await macroAgent.extMethod("macro/respondToPermission", {
+        sessionId: "non-existent-session",
+        requestId: "perm-req-123",
+        optionId: "allow_once",
+      });
+
+      expect(response).toEqual({
+        success: false,
+        error: expect.stringContaining("No agent found for session"),
+      });
+    });
+
+    it("should return error when permission response fails", async () => {
+      // Create a session first
+      await macroAgent.newSession({ cwd: "/test" });
+      const mapper = macroAgent.getSessionMapper();
+      const mappings = mapper.getAllMappings();
+      const sessionId = mappings[0]?.acpSessionId;
+
+      // Make respondToPermission return false
+      vi.mocked(mockAgentManager.respondToPermission).mockReturnValue(false);
+
+      const response = await macroAgent.extMethod("macro/respondToPermission", {
+        sessionId,
+        requestId: "invalid-req",
+        optionId: "allow_once",
+      });
+
+      expect(response).toEqual({
+        success: false,
+        error: expect.stringContaining("Failed to respond to permission"),
+      });
+    });
+  });
+
+  describe("_macro/cancelPermission", () => {
+    it("should cancel permission via AgentManager", async () => {
+      // Create a session first to map sessionId to agentId
+      await macroAgent.newSession({ cwd: "/test" });
+      const mapper = macroAgent.getSessionMapper();
+      const mappings = mapper.getAllMappings();
+      const sessionId = mappings[0]?.acpSessionId;
+
+      const response = await macroAgent.extMethod("macro/cancelPermission", {
+        sessionId,
+        requestId: "perm-req-123",
+      });
+
+      expect(response).toEqual({ success: true });
+      expect(mockAgentManager.cancelPermission).toHaveBeenCalledWith(
+        expect.any(String), // agentId
+        "perm-req-123"
+      );
+    });
+
+    it("should return error when no agent found for session", async () => {
+      const response = await macroAgent.extMethod("macro/cancelPermission", {
+        sessionId: "non-existent-session",
+        requestId: "perm-req-123",
+      });
+
+      expect(response).toEqual({
+        success: false,
+        error: expect.stringContaining("No agent found for session"),
+      });
+    });
+
+    it("should return error when permission cancellation fails", async () => {
+      // Create a session first
+      await macroAgent.newSession({ cwd: "/test" });
+      const mapper = macroAgent.getSessionMapper();
+      const mappings = mapper.getAllMappings();
+      const sessionId = mappings[0]?.acpSessionId;
+
+      // Make cancelPermission return false
+      vi.mocked(mockAgentManager.cancelPermission).mockReturnValue(false);
+
+      const response = await macroAgent.extMethod("macro/cancelPermission", {
+        sessionId,
+        requestId: "invalid-req",
+      });
+
+      expect(response).toEqual({
+        success: false,
+        error: expect.stringContaining("Failed to cancel permission"),
+      });
     });
   });
 });

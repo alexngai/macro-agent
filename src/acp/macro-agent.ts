@@ -57,6 +57,10 @@ import type {
   GetCapabilitiesResponse,
   CheckCapabilityRequest,
   CheckCapabilityResponse,
+  RespondToPermissionRequest,
+  RespondToPermissionResponse,
+  CancelPermissionRequest,
+  CancelPermissionResponse,
 } from "./types.js";
 import { ACPError } from "./types.js";
 import type { PeerManager } from "../peer/peer-manager.js";
@@ -83,6 +87,8 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/revokeCapability",
   "_macro/getCapabilities",
   "_macro/checkCapability",
+  "_macro/respondToPermission",
+  "_macro/cancelPermission",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -413,6 +419,16 @@ export class MacroAgent implements Agent {
       case "_macro/checkCapability":
         return this.handleCheckCapability(
           params as unknown as CheckCapabilityRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/respondToPermission":
+        return this.handleRespondToPermission(
+          params as unknown as RespondToPermissionRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/cancelPermission":
+        return this.handleCancelPermission(
+          params as unknown as CancelPermissionRequest
         ) as unknown as Record<string, unknown>;
 
       default:
@@ -899,6 +915,86 @@ export class MacroAgent implements Agent {
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Permission Extension Handlers
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Respond to a permission request for a session
+   *
+   * Routes the response through the session mapper to find the agent,
+   * then calls the agent manager to resolve the pending permission.
+   */
+  private async handleRespondToPermission(
+    params: RespondToPermissionRequest
+  ): Promise<RespondToPermissionResponse> {
+    const { sessionId, requestId, optionId } = params;
+
+    // Get the agent ID from session mapper
+    const agentId = this.sessionMapper.getAgentId(sessionId);
+    if (!agentId) {
+      return {
+        success: false,
+        error: `No agent found for session: ${sessionId}`,
+      };
+    }
+
+    // Respond via agent manager
+    const success = this.agentManager.respondToPermission(
+      agentId,
+      requestId,
+      optionId
+    );
+
+    if (success) {
+      console.log(
+        `[MacroAgent] Responded to permission ${requestId} for session ${sessionId} with ${optionId}`
+      );
+      return { success: true };
+    } else {
+      return {
+        success: false,
+        error: `Failed to respond to permission ${requestId} for agent ${agentId}`,
+      };
+    }
+  }
+
+  /**
+   * Cancel a permission request for a session
+   *
+   * Routes the cancellation through the session mapper to find the agent,
+   * then calls the agent manager to cancel the pending permission.
+   */
+  private async handleCancelPermission(
+    params: CancelPermissionRequest
+  ): Promise<CancelPermissionResponse> {
+    const { sessionId, requestId } = params;
+
+    // Get the agent ID from session mapper
+    const agentId = this.sessionMapper.getAgentId(sessionId);
+    if (!agentId) {
+      return {
+        success: false,
+        error: `No agent found for session: ${sessionId}`,
+      };
+    }
+
+    // Cancel via agent manager
+    const success = this.agentManager.cancelPermission(agentId, requestId);
+
+    if (success) {
+      console.log(
+        `[MacroAgent] Cancelled permission ${requestId} for session ${sessionId}`
+      );
+      return { success: true };
+    } else {
+      return {
+        success: false,
+        error: `Failed to cancel permission ${requestId} for agent ${agentId}`,
+      };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Helper Methods
   // ─────────────────────────────────────────────────────────────────
 
@@ -926,54 +1022,98 @@ export class MacroAgent implements Agent {
 
   /**
    * Forward session updates from child agents to the ACP client
+   *
+   * acp-factory already sends updates in ACP SDK format, so we forward
+   * all updates directly. This handles all update types including:
+   * - agent_message_chunk: Text content from agent
+   * - agent_thought_chunk: Agent thinking/reasoning (if enabled)
+   * - user_message_chunk: Echo of user messages
+   * - tool_call: Tool invocation start
+   * - tool_call_update: Tool execution progress/completion
+   * - plan: Plan updates
+   * - available_commands_update: Available slash commands
+   * - current_mode_update: Mode changes (code/plan/etc)
+   * - config_option_update: Configuration changes
+   *
+   * Permission requests are handled separately via the requestPermission RPC.
    */
   private async forwardSessionUpdate(
     acpSessionId: ACPSessionId,
     update: unknown
   ): Promise<void> {
-    // Map internal session updates to ACP SessionNotification format
     const sessionUpdate = update as Record<string, unknown>;
 
-    // Handle different update types from acp-factory
-    if ("sessionUpdate" in sessionUpdate) {
-      const updateType = sessionUpdate.sessionUpdate as string;
+    // Check if this is a valid session update with the sessionUpdate discriminator
+    if (!("sessionUpdate" in sessionUpdate)) {
+      console.warn(
+        `[MacroAgent] Received update without sessionUpdate field:`,
+        JSON.stringify(update).substring(0, 200)
+      );
+      return;
+    }
 
-      switch (updateType) {
-        case "agent_message_chunk":
-          await this.connection.sessionUpdate({
-            sessionId: acpSessionId,
-            update: {
-              type: "agent_message_chunk",
-              textChunk: (sessionUpdate.textChunk as string) ?? "",
-            },
-          });
-          break;
+    const updateType = sessionUpdate.sessionUpdate as string;
 
-        case "tool_call":
-          await this.connection.sessionUpdate({
-            sessionId: acpSessionId,
-            update: {
-              type: "tool_call",
-              toolCallId: sessionUpdate.toolCallId as string,
-              title: sessionUpdate.title as string,
-              status: sessionUpdate.status as "pending",
-            },
-          });
-          break;
-
-        case "tool_call_update":
-          await this.connection.sessionUpdate({
-            sessionId: acpSessionId,
-            update: {
-              type: "tool_call_update",
-              toolCallId: sessionUpdate.toolCallId as string,
-              status: sessionUpdate.status as "in_progress" | "completed",
-            },
-          });
-          break;
-
-        // Add more update types as needed
+    // Log update details based on type (verbose logging for debugging)
+    switch (updateType) {
+      case "agent_message_chunk":
+      case "agent_thought_chunk":
+      case "user_message_chunk": {
+        const content = sessionUpdate.content as { type?: string; text?: string } | undefined;
+        const text = content?.text ?? "";
+        if (text) {
+          console.log(
+            `[MacroAgent] Forwarding ${updateType} (${text.length} chars): "${text.substring(0, 80)}${text.length > 80 ? "..." : ""}"`
+          );
+        }
+        break;
       }
+
+      case "tool_call": {
+        const toolCallId = sessionUpdate.toolCallId as string;
+        const title = sessionUpdate.title as string;
+        const status = sessionUpdate.status as string;
+        console.log(
+          `[MacroAgent] Forwarding tool_call: id=${toolCallId}, title="${title}", status=${status}`
+        );
+        break;
+      }
+
+      case "tool_call_update": {
+        const toolCallId = sessionUpdate.toolCallId as string;
+        const status = sessionUpdate.status as string;
+        console.log(
+          `[MacroAgent] Forwarding tool_call_update: id=${toolCallId}, status=${status}`
+        );
+        break;
+      }
+
+      case "permission_request": {
+        // This shouldn't come through here - permissions use requestPermission RPC
+        // But log it in case acp-factory sends it as a notification
+        console.warn(
+          `[MacroAgent] Received permission_request as session update (unexpected):`,
+          JSON.stringify(sessionUpdate).substring(0, 200)
+        );
+        break;
+      }
+
+      default:
+        // Log other update types at debug level
+        console.log(`[MacroAgent] Forwarding ${updateType}`);
+    }
+
+    // Forward ALL updates directly - acp-factory sends correct ACP SDK format
+    try {
+      await this.connection.sessionUpdate({
+        sessionId: acpSessionId,
+        update: sessionUpdate,
+      });
+    } catch (err) {
+      console.error(
+        `[MacroAgent] Failed to forward ${updateType}:`,
+        err instanceof Error ? err.message : err
+      );
     }
   }
 

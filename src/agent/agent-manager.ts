@@ -120,6 +120,32 @@ export interface AgentManager {
    */
   hasActiveSession(agentId: AgentId): boolean;
 
+  // ── Permission Handling ─────────────────────────────────────────
+
+  /**
+   * Respond to a permission request for an agent's session.
+   * Used when running in interactive permission mode.
+   *
+   * @param agentId - Agent ID whose session has the pending permission
+   * @param requestId - The permission request ID
+   * @param optionId - The selected option ID (e.g., 'allow_once')
+   * @returns true if permission was found and responded to
+   */
+  respondToPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId: string
+  ): boolean;
+
+  /**
+   * Cancel a permission request for an agent's session.
+   *
+   * @param agentId - Agent ID whose session has the pending permission
+   * @param requestId - The permission request ID
+   * @returns true if permission was found and cancelled
+   */
+  cancelPermission(agentId: AgentId, requestId: string): boolean;
+
   // ── Lifecycle Callbacks ────────────────────────────────────────
 
   /**
@@ -634,6 +660,62 @@ export function createAgentManager(
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Permission Handling
+  // ─────────────────────────────────────────────────────────────────
+
+  function respondToPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId: string
+  ): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      console.warn(
+        `[AgentManager] Cannot respond to permission: no active session for agent ${agentId}`
+      );
+      return false;
+    }
+
+    try {
+      activeSession.session.respondToPermission(requestId, optionId);
+      console.log(
+        `[AgentManager] Responded to permission ${requestId} for agent ${agentId} with ${optionId}`
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[AgentManager] Error responding to permission ${requestId}:`,
+        err
+      );
+      return false;
+    }
+  }
+
+  function cancelPermission(agentId: AgentId, requestId: string): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      console.warn(
+        `[AgentManager] Cannot cancel permission: no active session for agent ${agentId}`
+      );
+      return false;
+    }
+
+    try {
+      activeSession.session.cancelPermission(requestId);
+      console.log(
+        `[AgentManager] Cancelled permission ${requestId} for agent ${agentId}`
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[AgentManager] Error cancelling permission ${requestId}:`,
+        err
+      );
+      return false;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Lifecycle Callbacks
   // ─────────────────────────────────────────────────────────────────
 
@@ -689,6 +771,8 @@ export function createAgentManager(
     prompt,
     getSession,
     hasActiveSession,
+    respondToPermission,
+    cancelPermission,
     onLifecycleEvent,
     close,
   };

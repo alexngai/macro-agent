@@ -514,21 +514,23 @@ export function createAPIServer(
 
   // GET /api/agents/:id - Get agent details
   app.get("/api/agents/:id", (req: Request, res: Response) => {
-    const agent = agentManager.get(req.params.id);
+    const id = req.params.id as string;
+    const agent = agentManager.get(id);
     if (!agent) {
-      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${req.params.id}`);
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
     }
     res.json(agentToDetail(agent));
   });
 
   // GET /api/agents/:id/hierarchy - Get agent hierarchy
   app.get("/api/agents/:id/hierarchy", (req: Request, res: Response) => {
-    const agent = agentManager.get(req.params.id);
+    const id = req.params.id as string;
+    const agent = agentManager.get(id);
     if (!agent) {
-      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${req.params.id}`);
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
     }
 
-    const hierarchy = agentManager.getHierarchy(req.params.id);
+    const hierarchy = agentManager.getHierarchy(id);
     if (!hierarchy) {
       return sendError(res, 500, "HIERARCHY_ERROR", "Failed to build hierarchy");
     }
@@ -572,9 +574,10 @@ export function createAPIServer(
 
   // GET /api/tasks/:id - Get task details
   app.get("/api/tasks/:id", (req: Request, res: Response) => {
-    const task = taskManager.get(req.params.id);
+    const id = req.params.id as string;
+    const task = taskManager.get(id);
     if (!task) {
-      return sendError(res, 404, "TASK_NOT_FOUND", `Task not found: ${req.params.id}`);
+      return sendError(res, 404, "TASK_NOT_FOUND", `Task not found: ${id}`);
     }
     res.json(taskToDetail(task));
   });
@@ -1146,21 +1149,23 @@ export function createAPIApp(
 
   // GET /api/agents/:id - Get agent details
   app.get("/api/agents/:id", (req: Request, res: Response) => {
-    const agent = agentManager.get(req.params.id);
+    const id = req.params.id as string;
+    const agent = agentManager.get(id);
     if (!agent) {
-      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${req.params.id}`);
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
     }
     res.json(agentToDetail(agent));
   });
 
   // GET /api/agents/:id/hierarchy - Get agent hierarchy
   app.get("/api/agents/:id/hierarchy", (req: Request, res: Response) => {
-    const agent = agentManager.get(req.params.id);
+    const id = req.params.id as string;
+    const agent = agentManager.get(id);
     if (!agent) {
-      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${req.params.id}`);
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
     }
 
-    const hierarchy = agentManager.getHierarchy(req.params.id);
+    const hierarchy = agentManager.getHierarchy(id);
     if (!hierarchy) {
       return sendError(res, 500, "HIERARCHY_ERROR", "Failed to build hierarchy");
     }
@@ -1204,9 +1209,10 @@ export function createAPIApp(
 
   // GET /api/tasks/:id - Get task details
   app.get("/api/tasks/:id", (req: Request, res: Response) => {
-    const task = taskManager.get(req.params.id);
+    const id = req.params.id as string;
+    const task = taskManager.get(id);
     if (!task) {
-      return sendError(res, 404, "TASK_NOT_FOUND", `Task not found: ${req.params.id}`);
+      return sendError(res, 404, "TASK_NOT_FOUND", `Task not found: ${id}`);
     }
     res.json(taskToDetail(task));
   });
