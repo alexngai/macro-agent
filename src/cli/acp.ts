@@ -226,22 +226,6 @@ async function main() {
       console.error(`HTTP API server listening on http://${host}:${port}`);
     }
 
-    // Create stdio streams for ACP communication
-    const { input, output } = createStdioStreams();
-    const stream = ndJsonStream(output, input);
-
-    // Create ACP connection with MacroAgent
-    const connection = new AgentSideConnection(
-      (conn) =>
-        new MacroAgent(conn, {
-          agentManager,
-          eventStore,
-          taskManager,
-          defaultCwd,
-        }),
-      stream
-    );
-
     // Handle graceful shutdown
     process.on("SIGINT", async () => {
       await cleanup();
@@ -253,11 +237,42 @@ async function main() {
       process.exit(0);
     });
 
-    // Wait for connection to close
-    await connection.closed;
+    // Determine if we should run stdio ACP
+    // Skip stdio ACP if stdin is not a TTY and we have WebSocket enabled
+    // (this means we're likely being spawned as a managed subprocess)
+    const skipStdioAcp = options.ws && !process.stdin.isTTY;
 
-    // Clean up on normal close
-    await cleanup();
+    if (skipStdioAcp) {
+      // WebSocket-only mode: just keep the process alive until shutdown signal
+      console.error("[acp] Running in WebSocket-only mode (stdin not connected)");
+
+      // Keep process alive - will exit via SIGINT/SIGTERM handlers
+      await new Promise<void>(() => {
+        // Never resolves - process stays alive until signal
+      });
+    } else {
+      // Standard mode: set up stdio ACP connection
+      const { input, output } = createStdioStreams();
+      const stream = ndJsonStream(output, input);
+
+      // Create ACP connection with MacroAgent
+      const connection = new AgentSideConnection(
+        (conn) =>
+          new MacroAgent(conn, {
+            agentManager,
+            eventStore,
+            taskManager,
+            defaultCwd,
+          }),
+        stream
+      );
+
+      // Wait for connection to close
+      await connection.closed;
+
+      // Clean up on normal close
+      await cleanup();
+    }
   } catch (error) {
     // Log errors to stderr (not stdout, which is used for ACP)
     console.error(`ACP server error: ${error}`);
