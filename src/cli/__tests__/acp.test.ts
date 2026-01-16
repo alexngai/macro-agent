@@ -1,13 +1,12 @@
 /**
  * ACP CLI tests
  *
- * Tests for the ACP CLI entry point, including argument parsing,
- * port auto-discovery, and API server integration.
+ * Tests for the ACP CLI entry point, including argument parsing
+ * and combined server configuration.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createServer, type Server, type AddressInfo } from "node:net";
-import { parseArgs, findAvailablePort, type ACPServerOptions } from "../acp.js";
+import { describe, it, expect } from "vitest";
+import { parseArgs, type ACPServerOptions } from "../acp.js";
 
 // ─────────────────────────────────────────────────────────────────
 // parseArgs Tests
@@ -78,42 +77,6 @@ describe("parseArgs", () => {
     });
   });
 
-  describe("--ws option", () => {
-    it("should parse --ws flag", () => {
-      const result = parseArgs(["--ws"]);
-      expect(result.ws).toBe(true);
-    });
-
-    it("should not set ws if flag not provided", () => {
-      const result = parseArgs([]);
-      expect(result.ws).toBeUndefined();
-    });
-  });
-
-  describe("--ws-port option", () => {
-    it("should parse --ws-port option", () => {
-      const result = parseArgs(["--ws-port", "3001"]);
-      expect(result.wsPort).toBe(3001);
-    });
-
-    it("should not set wsPort if no value provided", () => {
-      const result = parseArgs(["--ws-port"]);
-      expect(result.wsPort).toBeUndefined();
-    });
-  });
-
-  describe("--ws-host option", () => {
-    it("should parse --ws-host option", () => {
-      const result = parseArgs(["--ws-host", "0.0.0.0"]);
-      expect(result.wsHost).toBe("0.0.0.0");
-    });
-
-    it("should not set wsHost if no value provided", () => {
-      const result = parseArgs(["--ws-host"]);
-      expect(result.wsHost).toBeUndefined();
-    });
-  });
-
   describe("combined options", () => {
     it("should parse all options together", () => {
       const result = parseArgs([
@@ -128,28 +91,6 @@ describe("parseArgs", () => {
         api: true,
         port: 9000,
         host: "127.0.0.1",
-      });
-    });
-
-    it("should parse all options including WebSocket", () => {
-      const result = parseArgs([
-        "--cwd", "/project",
-        "--api",
-        "--port", "9000",
-        "--host", "127.0.0.1",
-        "--ws",
-        "--ws-port", "3001",
-        "--ws-host", "localhost",
-      ]);
-
-      expect(result).toEqual({
-        cwd: "/project",
-        api: true,
-        port: 9000,
-        host: "127.0.0.1",
-        ws: true,
-        wsPort: 3001,
-        wsHost: "localhost",
       });
     });
 
@@ -218,76 +159,10 @@ describe("parseArgs", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// findAvailablePort Tests
+// API Server Integration Tests
 // ─────────────────────────────────────────────────────────────────
 
-describe("findAvailablePort", () => {
-  it("should return a valid port number", async () => {
-    const port = await findAvailablePort();
-
-    expect(typeof port).toBe("number");
-    expect(port).toBeGreaterThan(0);
-    expect(port).toBeLessThanOrEqual(65535);
-  });
-
-  it("should return different ports on consecutive calls", async () => {
-    // Get first port
-    const port1 = await findAvailablePort();
-
-    // Occupy that port
-    const server = createServer();
-    await new Promise<void>((resolve) => {
-      server.listen(port1, "localhost", () => resolve());
-    });
-
-    try {
-      // Get another port - should be different since port1 is occupied
-      const port2 = await findAvailablePort();
-      expect(port2).not.toBe(port1);
-    } finally {
-      // Clean up
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
-  it("should respect the host parameter", async () => {
-    const port = await findAvailablePort("127.0.0.1");
-
-    expect(typeof port).toBe("number");
-    expect(port).toBeGreaterThan(0);
-  });
-
-  it("should return a port that can actually be used", async () => {
-    const port = await findAvailablePort();
-
-    // Try to actually use the port
-    const server = createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.on("error", reject);
-      server.listen(port, "localhost", () => resolve());
-    });
-
-    // Verify server is listening on the expected port
-    const address = server.address() as AddressInfo;
-    expect(address.port).toBe(port);
-
-    // Clean up
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-
-  it("should work with 0.0.0.0 host", async () => {
-    const port = await findAvailablePort("0.0.0.0");
-
-    expect(typeof port).toBe("number");
-    expect(port).toBeGreaterThan(0);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────
-// Integration Tests (API Server with ACP)
-// ─────────────────────────────────────────────────────────────────
-
-describe("ACP with API Server Integration", () => {
+describe("API Server Configuration", () => {
   describe("option combinations", () => {
     it("should enable API server when --api flag is set", () => {
       const options = parseArgs(["--api"]);
@@ -306,32 +181,26 @@ describe("ACP with API Server Integration", () => {
       expect(options.host).toBe("0.0.0.0");
     });
 
-    it("should allow --port without --api (port is ignored without --api)", () => {
+    it("should allow --port without --api (port is stored but server not started)", () => {
       const options = parseArgs(["--port", "9000"]);
       expect(options.port).toBe(9000);
       expect(options.api).toBeUndefined();
     });
   });
 
-  describe("port auto-discovery integration", () => {
-    it("should be able to find port when no port specified", async () => {
+  describe("default values behavior", () => {
+    it("should use default port 3001 when not specified", () => {
       const options = parseArgs(["--api"]);
-
-      // Simulate what main() does when no port is specified
-      const host = options.host ?? "localhost";
-      const port = options.port ?? (await findAvailablePort(host));
-
-      expect(typeof port).toBe("number");
-      expect(port).toBeGreaterThan(0);
+      // Default is applied in main(), not parseArgs()
+      expect(options.port).toBeUndefined();
+      // The actual default (3001) is applied when creating the server
     });
 
-    it("should use specified port when provided", async () => {
-      const options = parseArgs(["--api", "--port", "8888"]);
-
-      const host = options.host ?? "localhost";
-      const port = options.port ?? (await findAvailablePort(host));
-
-      expect(port).toBe(8888);
+    it("should use default host localhost when not specified", () => {
+      const options = parseArgs(["--api"]);
+      // Default is applied in main(), not parseArgs()
+      expect(options.host).toBeUndefined();
+      // The actual default (localhost) is applied when creating the server
     });
   });
 });

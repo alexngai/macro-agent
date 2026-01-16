@@ -10,22 +10,24 @@
  *
  * Options:
  *   --cwd <path>       Working directory for agents
- *   --api              Enable HTTP API server alongside ACP
- *   --port <port>      Port for HTTP API server (auto-discovers if not specified)
- *   --host <host>      Host for HTTP API server (default: localhost)
- *   --ws               Enable WebSocket ACP server for multi-client support
- *   --ws-port <port>   Port for WebSocket ACP server (default: 3001)
- *   --ws-host <host>   Host for WebSocket ACP server (default: localhost)
+ *   --api              Enable API server (WebSocket ACP + REST API on same port)
+ *   --port <port>      Port for API server (default: 3001)
+ *   --host <host>      Host for API server (default: localhost)
  *
  * Examples:
- *   # Stdio ACP only (default)
+ *   # Stdio ACP only (default, for embedded use)
  *   multiagent-acp
  *
- *   # WebSocket ACP for multi-client support
- *   multiagent-acp --ws --ws-port 3001
+ *   # API server: WebSocket ACP + REST API
+ *   multiagent-acp --api
+ *   multiagent-acp --api --port 8080
+ *   multiagent-acp --api --host 0.0.0.0 --port 3001
  *
- *   # All transports: stdio + WebSocket ACP + HTTP API
- *   multiagent-acp --ws --ws-port 3001 --api --port 3000
+ * API server endpoints:
+ *   ws://host:port/acp      - ACP protocol (WebSocket)
+ *   ws://host:port/api/ws   - Real-time subscriptions (WebSocket)
+ *   http://host:port/api/*  - REST API endpoints
+ *   http://host:port/health - Health check
  *
  * Or register with acp-factory:
  *   AgentFactory.register('macro-agent', {
@@ -34,8 +36,7 @@
  *   });
  */
 
-import { Readable, Writable } from "node:stream";
-import { createServer } from "node:net";
+import { Readable } from "node:stream";
 import {
   AgentSideConnection,
   ndJsonStream,
@@ -45,11 +46,10 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { MacroAgent } from "../acp/macro-agent.js";
-import { createAPIServer, type APIServer } from "../api/server.js";
 import {
-  createWebSocketACPServer,
-  type WebSocketACPServer,
-} from "../acp/websocket-server.js";
+  createCombinedServer,
+  type CombinedServer,
+} from "../server/combined-server.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration
@@ -58,18 +58,12 @@ import {
 export interface ACPServerOptions {
   /** Working directory for agents */
   cwd?: string;
-  /** Enable HTTP API server */
+  /** Enable API server (WebSocket ACP + REST API) */
   api?: boolean;
-  /** Port for HTTP API server (auto-discovers if not specified) */
+  /** Port for API server (default: 3001) */
   port?: number;
-  /** Host for HTTP API server */
+  /** Host for API server (default: localhost) */
   host?: string;
-  /** Enable WebSocket ACP server for multi-client support */
-  ws?: boolean;
-  /** Port for WebSocket ACP server */
-  wsPort?: number;
-  /** Host for WebSocket ACP server */
-  wsHost?: string;
 }
 
 /**
@@ -92,42 +86,10 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
     } else if (args[i] === "--host" && args[i + 1]) {
       options.host = args[i + 1];
       i++;
-    } else if (args[i] === "--ws") {
-      options.ws = true;
-    } else if (args[i] === "--ws-port" && args[i + 1]) {
-      options.wsPort = parseInt(args[i + 1], 10);
-      i++;
-    } else if (args[i] === "--ws-host" && args[i + 1]) {
-      options.wsHost = args[i + 1];
-      i++;
     }
   }
 
   return options;
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Port Auto-Discovery
-// ─────────────────────────────────────────────────────────────────
-
-/**
- * Find an available port by letting the OS assign one.
- * Creates a temporary server, gets the assigned port, then closes it.
- */
-export async function findAvailablePort(host: string = "localhost"): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.listen(0, host, () => {
-      const address = server.address();
-      if (address && typeof address === "object") {
-        const port = address.port;
-        server.close(() => resolve(port));
-      } else {
-        server.close(() => reject(new Error("Failed to get port")));
-      }
-    });
-    server.on("error", reject);
-  });
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -175,55 +137,31 @@ async function main() {
   const agentManager = createAgentManager(eventStore, messageRouter);
   const taskManager = createTaskManager(eventStore);
 
-  // Optional servers
-  let apiServer: APIServer | undefined;
-  let wsAcpServer: WebSocketACPServer | undefined;
+  // Combined server (when --ws is enabled)
+  let combinedServer: CombinedServer | undefined;
 
   // Cleanup function
   const cleanup = async () => {
-    // Stop WebSocket ACP server first if running
-    if (wsAcpServer) {
-      await wsAcpServer.stop();
-    }
-    // Stop API server if running
-    if (apiServer) {
-      await apiServer.stop();
+    // Stop combined server if running
+    if (combinedServer) {
+      await combinedServer.stop();
     }
     await agentManager.close();
     await eventStore.close();
   };
 
   try {
-    // Start WebSocket ACP server if enabled
-    if (options.ws) {
-      const wsHost = options.wsHost ?? "localhost";
-      const wsPort = options.wsPort ?? 3001;
-
-      wsAcpServer = createWebSocketACPServer(
-        { eventStore, agentManager, taskManager },
-        { port: wsPort, host: wsHost, defaultCwd }
-      );
-
-      await wsAcpServer.start();
-
-      // Log to stderr (stdout is reserved for ACP protocol)
-      console.error(`WebSocket ACP server listening on ${wsAcpServer.getUrl()}`);
-    }
-
-    // Start HTTP API server if enabled
+    // Start combined server if --api is enabled
     if (options.api) {
       const host = options.host ?? "localhost";
-      const port = options.port ?? (await findAvailablePort(host));
+      const port = options.port ?? 3001;
 
-      apiServer = createAPIServer(
+      combinedServer = createCombinedServer(
         { eventStore, agentManager, taskManager, messageRouter },
-        { port, host }
+        { port, host, defaultCwd }
       );
 
-      await apiServer.start();
-
-      // Log port to stderr (stdout is reserved for ACP protocol)
-      console.error(`HTTP API server listening on http://${host}:${port}`);
+      await combinedServer.start();
     }
 
     // Handle graceful shutdown
@@ -238,13 +176,13 @@ async function main() {
     });
 
     // Determine if we should run stdio ACP
-    // Skip stdio ACP if stdin is not a TTY and we have WebSocket enabled
+    // Skip stdio ACP if stdin is not a TTY and we have API server enabled
     // (this means we're likely being spawned as a managed subprocess)
-    const skipStdioAcp = options.ws && !process.stdin.isTTY;
+    const skipStdioAcp = options.api && !process.stdin.isTTY;
 
     if (skipStdioAcp) {
       // WebSocket-only mode: just keep the process alive until shutdown signal
-      console.error("[acp] Running in WebSocket-only mode (stdin not connected)");
+      console.error("[acp] Running in server-only mode (stdin not connected)");
 
       // Keep process alive - will exit via SIGINT/SIGTERM handlers
       await new Promise<void>(() => {

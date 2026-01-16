@@ -3,6 +3,10 @@
  *
  * Manages multiple WebSocket connections, each representing an independent
  * ACP session that can mount to agents in the shared hierarchy.
+ *
+ * Can be used in two modes:
+ * 1. Standalone: createWebSocketACPServer() creates its own HTTP server
+ * 2. Shared: setupACPWebSocket() attaches to an existing WebSocketServer
  */
 
 import http from "http";
@@ -49,7 +53,7 @@ export interface WebSocketACPServerConfig {
 }
 
 /**
- * WebSocket ACP Server interface
+ * WebSocket ACP Server interface (standalone mode)
  */
 export interface WebSocketACPServer {
   /** Start the server */
@@ -71,6 +75,17 @@ export interface WebSocketACPServer {
   readonly wss: WebSocketServer;
 }
 
+/**
+ * WebSocket ACP handler interface (shared server mode)
+ */
+export interface ACPWebSocketHandler {
+  /** Get the number of active connections */
+  getConnectionCount(): number;
+
+  /** Close all connections gracefully */
+  closeAll(): void;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Connection Tracking
 // ─────────────────────────────────────────────────────────────────
@@ -83,7 +98,103 @@ interface TrackedConnection {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Server Implementation
+// Shared Server Mode (setupACPWebSocket)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Set up ACP WebSocket handling on an existing WebSocketServer.
+ *
+ * Use this when you want to share an HTTP server with other services.
+ * The WebSocketServer should be created with `noServer: true`.
+ *
+ * @param wss - WebSocketServer instance (noServer mode)
+ * @param services - Shared services (AgentManager, EventStore, etc.)
+ * @param config - Configuration options
+ * @returns Handler for managing connections
+ */
+export function setupACPWebSocket(
+  wss: WebSocketServer,
+  services: ACPServices,
+  config: { defaultCwd?: string } = {}
+): ACPWebSocketHandler {
+  const { defaultCwd = process.cwd() } = config;
+  const connections = new Set<TrackedConnection>();
+
+  // Handle new WebSocket connections
+  wss.on("connection", (ws: WebSocket, req) => {
+    console.error(
+      `[ws-acp] New connection from ${req.socket.remoteAddress}`
+    );
+
+    // Create the ACP stream adapter
+    const stream = webSocketStream(ws);
+
+    // Create the MacroAgent for this connection
+    let macroAgent: MacroAgent | null = null;
+
+    const acpConnection = new AgentSideConnection(
+      (conn) => {
+        macroAgent = new MacroAgent(conn, {
+          agentManager: services.agentManager,
+          eventStore: services.eventStore,
+          taskManager: services.taskManager,
+          peerManager: services.peerManager,
+          capabilityManager: services.capabilityManager,
+          defaultCwd,
+        });
+        return macroAgent;
+      },
+      stream
+    );
+
+    // Track this connection
+    const tracked: TrackedConnection = {
+      ws,
+      acpConnection,
+      macroAgent: macroAgent!,
+      createdAt: Date.now(),
+    };
+    connections.add(tracked);
+
+    // Handle connection close
+    ws.on("close", (code, reason) => {
+      console.error(
+        `[ws-acp] Connection closed: code=${code}, reason=${reason.toString()}`
+      );
+      connections.delete(tracked);
+    });
+
+    // Handle connection errors
+    ws.on("error", (err) => {
+      console.error(`[ws-acp] Connection error:`, err);
+      connections.delete(tracked);
+    });
+  });
+
+  // Handle server errors
+  wss.on("error", (err) => {
+    console.error(`[ws-acp] WebSocket server error:`, err);
+  });
+
+  return {
+    getConnectionCount(): number {
+      return connections.size;
+    },
+
+    closeAll(): void {
+      console.error(`[ws-acp] Closing ${connections.size} connections...`);
+      for (const tracked of connections) {
+        if (tracked.ws.readyState === WebSocket.OPEN) {
+          tracked.ws.close(1001, "Server shutting down");
+        }
+      }
+      connections.clear();
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Standalone Server Mode (createWebSocketACPServer)
 // ─────────────────────────────────────────────────────────────────
 
 /**
