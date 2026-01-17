@@ -176,9 +176,11 @@ async function main() {
     });
 
     // Determine if we should run stdio ACP
-    // Skip stdio ACP if stdin is not a TTY and we have API server enabled
-    // (this means we're likely being spawned as a managed subprocess)
-    const skipStdioAcp = options.api && !process.stdin.isTTY;
+    // Skip stdio ACP if:
+    // 1. MACRO_AGENT_SERVER_ONLY env var is set (spawned by MacroAgentServerManager)
+    // 2. Or stdin detection fails (fallback)
+    const serverOnlyEnv = process.env.MACRO_AGENT_SERVER_ONLY === "1";
+    const skipStdioAcp = options.api && serverOnlyEnv;
 
     if (skipStdioAcp) {
       // WebSocket-only mode: just keep the process alive until shutdown signal

@@ -161,9 +161,7 @@ export class MacroAgent implements Agent {
    * Reads configuration from `params._meta?.macroConfig` if provided.
    * This allows each macro-agent instance to have different settings.
    */
-  async initialize(
-    params: InitializeRequest
-  ): Promise<InitializeResponse> {
+  async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // Extract macro-agent config from _meta if provided
     const meta = params._meta as Record<string, unknown> | undefined;
     if (meta?.macroConfig) {
@@ -192,19 +190,18 @@ export class MacroAgent implements Agent {
   /**
    * Create a new session by spawning a head manager
    */
-  async newSession(
-    params: NewSessionRequest
-  ): Promise<NewSessionResponse> {
+  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const cwd = params.cwd ?? this.defaultCwd;
 
     // Build head manager options from init config
     const defaultConfig = this.initConfig.defaultSubAgentConfig;
+    const permissionModeToUse = defaultConfig?.permissionMode;
 
     // Spawn a new head manager for this session
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd,
       forceNew: true, // Always create new for newSession
-      permissionMode: defaultConfig?.permissionMode,
+      permissionMode: permissionModeToUse,
       systemPrompt: this.buildSystemPrompt(),
     });
 
@@ -223,9 +220,7 @@ export class MacroAgent implements Agent {
   /**
    * Load an existing session from EventStore
    */
-  async loadSession(
-    params: LoadSessionRequest
-  ): Promise<LoadSessionResponse> {
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const acpSessionId = params.sessionId;
     const cwd = params.cwd ?? this.defaultCwd;
 
@@ -516,11 +511,9 @@ export class MacroAgent implements Agent {
     const hierarchy = this.agentManager.getHierarchy(rootAgentId);
 
     if (!hierarchy) {
-      throw new ACPError(
-        `Agent not found: ${rootAgentId}`,
-        "AGENT_NOT_FOUND",
-        { agentId: rootAgentId }
-      );
+      throw new ACPError(`Agent not found: ${rootAgentId}`, "AGENT_NOT_FOUND", {
+        agentId: rootAgentId,
+      });
     }
 
     return {
@@ -539,11 +532,9 @@ export class MacroAgent implements Agent {
     const task = this.taskManager.get(params.taskId);
 
     if (!task) {
-      throw new ACPError(
-        `Task not found: ${params.taskId}`,
-        "TASK_NOT_FOUND",
-        { taskId: params.taskId }
-      );
+      throw new ACPError(`Task not found: ${params.taskId}`, "TASK_NOT_FOUND", {
+        taskId: params.taskId,
+      });
     }
 
     return {
@@ -565,11 +556,9 @@ export class MacroAgent implements Agent {
     // Verify the target agent exists
     const agent = this.agentManager.get(agentId);
     if (!agent) {
-      throw new ACPError(
-        `Agent not found: ${agentId}`,
-        "AGENT_NOT_FOUND",
-        { agentId }
-      );
+      throw new ACPError(`Agent not found: ${agentId}`, "AGENT_NOT_FOUND", {
+        agentId,
+      });
     }
 
     // Verify the session exists in our mapper
@@ -609,11 +598,9 @@ export class MacroAgent implements Agent {
     // Get the original agent
     const originalAgent = this.agentManager.get(agentId);
     if (!originalAgent) {
-      throw new ACPError(
-        `Agent not found: ${agentId}`,
-        "AGENT_NOT_FOUND",
-        { agentId }
-      );
+      throw new ACPError(`Agent not found: ${agentId}`, "AGENT_NOT_FOUND", {
+        agentId,
+      });
     }
 
     // Check if the agent has an active session we can fork from
@@ -865,7 +852,9 @@ export class MacroAgent implements Agent {
 
     return {
       success: true,
-      remainingCapabilities: this.capabilityManager.getCapabilities(params.peerId),
+      remainingCapabilities: this.capabilityManager.getCapabilities(
+        params.peerId
+      ),
     };
   }
 
@@ -1001,9 +990,7 @@ export class MacroAgent implements Agent {
   /**
    * Extract text content from prompt content blocks
    */
-  private extractMessageContent(
-    prompt: PromptRequest["prompt"]
-  ): string {
+  private extractMessageContent(prompt: PromptRequest["prompt"]): string {
     // Handle content blocks array
     if (Array.isArray(prompt)) {
       return prompt
@@ -1059,7 +1046,9 @@ export class MacroAgent implements Agent {
       case "agent_message_chunk":
       case "agent_thought_chunk":
       case "user_message_chunk": {
-        const content = sessionUpdate.content as { type?: string; text?: string } | undefined;
+        const content = sessionUpdate.content as
+          | { type?: string; text?: string }
+          | undefined;
         const text = content?.text ?? "";
         if (text) {
           console.log(
@@ -1089,13 +1078,91 @@ export class MacroAgent implements Agent {
       }
 
       case "permission_request": {
-        // This shouldn't come through here - permissions use requestPermission RPC
-        // But log it in case acp-factory sends it as a notification
-        console.warn(
-          `[MacroAgent] Received permission_request as session update (unexpected):`,
-          JSON.stringify(sessionUpdate).substring(0, 200)
-        );
-        break;
+        // Handle permission_request specially - ACP SDK doesn't recognize it as a session update
+        // We need to call requestPermission on the connection to forward to sudocode
+
+        // Extract permission request data
+        const permReq = sessionUpdate as {
+          requestId: string;
+          sessionId: string;
+          toolCall: {
+            toolCallId: string;
+            title: string;
+            status?: string;
+            rawInput?: unknown;
+          };
+          options: Array<{
+            kind: string;
+            name: string;
+            optionId: string;
+          }>;
+        };
+
+        // Get the agent ID for this session to forward the response back
+        const agentId = this.sessionMapper.getAgentId(permReq.sessionId);
+        if (!agentId) {
+          console.warn(
+            `[MacroAgent] No agent found for session ${permReq.sessionId}, cannot forward permission request`
+          );
+          return;
+        }
+
+        // Forward to sudocode via requestPermission RPC
+        // This will trigger sudocode's WebSocketClientHandler which will show the prompt
+        try {
+          const response = await this.connection.requestPermission({
+            sessionId: acpSessionId,
+            toolCall: {
+              toolCallId: permReq.toolCall.toolCallId,
+              title: permReq.toolCall.title,
+              status: permReq.toolCall.status,
+              rawInput: permReq.toolCall.rawInput,
+            },
+            options: permReq.options,
+          });
+
+          // Forward the response back to the sub-agent via agentManager
+          if (response.outcome) {
+            if (
+              response.outcome.outcome === "selected" &&
+              response.outcome.optionId
+            ) {
+              const success = this.agentManager.respondToPermission(
+                agentId,
+                permReq.requestId,
+                response.outcome.optionId
+              );
+              if (!success) {
+                console.warn(
+                  `[MacroAgent] Failed to forward permission response to agent ${agentId}`
+                );
+              }
+            } else if (response.outcome.outcome === "cancelled") {
+              const success = this.agentManager.cancelPermission(
+                agentId,
+                permReq.requestId
+              );
+              if (!success) {
+                console.warn(
+                  `[MacroAgent] Failed to cancel permission for agent ${agentId}`
+                );
+              }
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[MacroAgent] Failed to forward permission_request:`,
+            err instanceof Error ? err.message : err
+          );
+          // Cancel the permission request on error
+          try {
+            this.agentManager.cancelPermission(agentId, permReq.requestId);
+          } catch {
+            // Ignore cancel errors
+          }
+        }
+        // Don't forward via sessionUpdate - we handled it via requestPermission
+        return;
       }
 
       default:
@@ -1103,7 +1170,7 @@ export class MacroAgent implements Agent {
         console.log(`[MacroAgent] Forwarding ${updateType}`);
     }
 
-    // Forward ALL updates directly - acp-factory sends correct ACP SDK format
+    // Forward updates via sessionUpdate (except permission_request which is handled above)
     try {
       await this.connection.sessionUpdate({
         sessionId: acpSessionId,
@@ -1168,16 +1235,16 @@ export class MacroAgent implements Agent {
       permissionMode: override.permissionMode ?? defaults.permissionMode,
       agentType: override.agentType ?? defaults.agentType,
       // Merge env variables (override takes precedence for same keys)
-      env: defaults.env || override.env
-        ? { ...defaults.env, ...override.env }
-        : undefined,
+      env:
+        defaults.env || override.env
+          ? { ...defaults.env, ...override.env }
+          : undefined,
       // Concatenate MCP servers (both default and override)
-      mcpServers: [
-        ...(defaults.mcpServers ?? []),
-        ...(override.mcpServers ?? []),
-      ].length > 0
-        ? [...(defaults.mcpServers ?? []), ...(override.mcpServers ?? [])]
-        : undefined,
+      mcpServers:
+        [...(defaults.mcpServers ?? []), ...(override.mcpServers ?? [])]
+          .length > 0
+          ? [...(defaults.mcpServers ?? []), ...(override.mcpServers ?? [])]
+          : undefined,
     };
   }
 

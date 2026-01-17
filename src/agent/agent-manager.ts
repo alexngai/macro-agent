@@ -85,7 +85,10 @@ export interface AgentManager {
    * Get full hierarchy tree starting from an agent.
    * @param options.depth - Maximum depth to traverse (undefined = full tree)
    */
-  getHierarchy(agentId: AgentId, options?: HierarchyOptions): AgentHierarchy | null;
+  getHierarchy(
+    agentId: AgentId,
+    options?: HierarchyOptions
+  ): AgentHierarchy | null;
 
   // ── Head Manager ───────────────────────────────────────────────
 
@@ -276,15 +279,16 @@ export function createAgentManager(
       };
 
       // Combine with any user-provided MCP servers
-      const userMcpServers = agentConfig?.mcpServers?.map((s) => ({
-        type: "stdio" as const,
-        name: s.name,
-        command: s.command,
-        args: s.args ?? [],
-        env: s.env
-          ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
-          : [],
-      })) ?? [];
+      const userMcpServers =
+        agentConfig?.mcpServers?.map((s) => ({
+          type: "stdio" as const,
+          name: s.name,
+          command: s.command,
+          args: s.args ?? [],
+          env: s.env
+            ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
+            : [],
+        })) ?? [];
 
       // Create session with MCP servers
       const session = await handle.createSession(cwd, {
@@ -396,8 +400,8 @@ export function createAgentManager(
         reason === "completed"
           ? "completed"
           : reason === "failed"
-          ? "failed"
-          : "pending";
+            ? "failed"
+            : "pending";
 
       eventStore.emit({
         type: "task",
