@@ -229,7 +229,23 @@ export class MacroAgent implements Agent {
     const existing = headManagers.find((hm) => hm.session_id === acpSessionId);
 
     if (existing) {
-      // Resume the existing session
+      // Check if the agent already has an active session
+      if (this.agentManager.hasActiveSession(existing.id)) {
+        console.log(
+          `[MacroAgent] loadSession: Agent ${existing.id} already has active session, reusing`
+        );
+        // Reuse the existing active session - just update mappings
+        this.sessionMapper.createMapping(acpSessionId, existing.id);
+        if (!this.cancellationControllers.has(acpSessionId)) {
+          this.cancellationControllers.set(acpSessionId, new AbortController());
+        }
+        return {};
+      }
+
+      // Agent exists but no active session - resume it
+      console.log(
+        `[MacroAgent] loadSession: Resuming stopped agent ${existing.id}`
+      );
       const spawned = await this.agentManager.resume(existing.id);
 
       // Create session mapping
@@ -239,7 +255,10 @@ export class MacroAgent implements Agent {
       return {};
     }
 
-    // Try to get or create with the specific session ID
+    // No existing agent found - try to get or create with the specific session ID
+    console.log(
+      `[MacroAgent] loadSession: No existing agent for session ${acpSessionId}, creating new`
+    );
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd,
       sessionId: acpSessionId,
