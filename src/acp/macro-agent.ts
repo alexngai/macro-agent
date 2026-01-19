@@ -352,7 +352,28 @@ export class MacroAgent implements Agent {
       controller.abort();
     }
 
-    // TODO: Propagate cancellation to child agents if needed
+    // Get the mapped agent ID for this session
+    const agentId = this.sessionMapper.getAgentId(acpSessionId);
+    if (!agentId) {
+      // No agent mapped - just clean up the controller
+      this.cancellationControllers.delete(acpSessionId);
+      return;
+    }
+
+    // Terminate the agent (which kills the subprocess)
+    try {
+      await this.agentManager.terminate(agentId, "cancelled");
+    } catch (error) {
+      // Agent may already be stopped - log but don't throw
+      console.warn(
+        `[MacroAgent] Error terminating agent ${agentId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    // Clean up resources
+    this.cancellationControllers.delete(acpSessionId);
+    this.sessionMapper.removeMapping(acpSessionId);
   }
 
   // ─────────────────────────────────────────────────────────────────

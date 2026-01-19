@@ -275,6 +275,7 @@ export function createAgentManager(
           { name: "MACRO_PARENT_ID", value: parent ?? "" },
           { name: "MACRO_TASK_ID", value: taskId },
           { name: "MACRO_AGENT_CWD", value: cwd },
+          { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
         ],
       };
 
@@ -319,6 +320,10 @@ export function createAgentManager(
           summary: "Agent session started",
         },
       });
+
+      // Persist events to SQLite so the MCP server can read them
+      // (MCP server runs as a separate process with its own EventStore instance)
+      await eventStore.persist();
 
       // Set up default subscriptions via MessageRouter
       messageRouter.setupDefaultSubscriptions({
@@ -413,6 +418,9 @@ export function createAgentManager(
         },
       });
     }
+
+    // Persist events to SQLite for cross-process visibility
+    await eventStore.persist();
 
     // Notify lifecycle listeners
     const updatedAgent = eventStore.getAgent(agentId)!;

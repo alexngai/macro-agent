@@ -463,6 +463,74 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
         }),
       ).rejects.toThrow("Parent agent not found");
     });
+
+    it("should configure MCP server with MACRO_INSTANCE_ID", async () => {
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Verify createSession was called with MCP server config
+      expect(mockHandle.createSession).toHaveBeenCalled();
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+
+      // Find the macro-agent MCP server in the config
+      const mcpServers = sessionOptions?.mcpServers;
+      expect(mcpServers).toBeDefined();
+
+      const macroAgentMcp = mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+      expect(macroAgentMcp).toBeDefined();
+
+      // Verify MACRO_INSTANCE_ID is in the env vars
+      const instanceIdEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "MACRO_INSTANCE_ID"
+      );
+      expect(instanceIdEnv).toBeDefined();
+      expect(instanceIdEnv.value).toBe(eventStore.instanceId);
+    });
+
+    it("should include all required env vars for MCP server", async () => {
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/test/cwd",
+      });
+
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+      const macroAgentMcp = sessionOptions.mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+
+      // Verify all required env vars are present
+      const envNames = macroAgentMcp.env.map((e: any) => e.name);
+      expect(envNames).toContain("MACRO_AGENT_ID");
+      expect(envNames).toContain("MACRO_PARENT_ID");
+      expect(envNames).toContain("MACRO_TASK_ID");
+      expect(envNames).toContain("MACRO_AGENT_CWD");
+      expect(envNames).toContain("MACRO_INSTANCE_ID");
+
+      // Verify cwd is passed correctly
+      const cwdEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "MACRO_AGENT_CWD"
+      );
+      expect(cwdEnv.value).toBe("/test/cwd");
+    });
+
+    it("should persist events after spawning for cross-process visibility", async () => {
+      // Spy on eventStore.persist
+      const persistSpy = vi.spyOn(eventStore, "persist");
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Verify persist was called after spawn
+      expect(persistSpy).toHaveBeenCalled();
+    });
   });
 
   describe("terminate()", () => {
@@ -495,6 +563,19 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       await expect(
         agentManager.terminate("nonexistent", "completed"),
       ).rejects.toThrow("Agent not found");
+    });
+
+    it("should persist events after terminating for cross-process visibility", async () => {
+      const spawned = await agentManager.spawn({ task: "Test" });
+
+      // Clear previous calls and spy on persist
+      const persistSpy = vi.spyOn(eventStore, "persist");
+      persistSpy.mockClear();
+
+      await agentManager.terminate(spawned.id, "completed");
+
+      // Verify persist was called after terminate
+      expect(persistSpy).toHaveBeenCalled();
     });
   });
 

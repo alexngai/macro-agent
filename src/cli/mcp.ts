@@ -18,15 +18,21 @@ async function main() {
   const parentId = process.env.MACRO_PARENT_ID || null;
   const taskId = process.env.MACRO_TASK_ID;
   const agentCwd = process.env.MACRO_AGENT_CWD || process.cwd();
+  const instanceId = process.env.MACRO_INSTANCE_ID;
 
   if (!agentId) {
     console.error("Error: MACRO_AGENT_ID environment variable is required");
     process.exit(1);
   }
 
+  if (!instanceId) {
+    console.error("Error: MACRO_INSTANCE_ID environment variable is required");
+    process.exit(1);
+  }
+
   try {
-    // Initialize services with shared file-based storage
-    const eventStore = await createEventStore({ inMemory: false });
+    // Initialize services with shared file-based storage using the same instanceId as the main process
+    const eventStore = await createEventStore({ inMemory: false, instanceId });
     const messageRouter = createMessageRouter(eventStore);
     const agentManager = createAgentManager(eventStore, messageRouter);
     const taskManager = createTaskManager(eventStore);
