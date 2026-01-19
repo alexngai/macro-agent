@@ -10,7 +10,7 @@
 
 import { createStore, Store } from 'tinybase';
 import { createFilePersister } from 'tinybase/persisters/persister-file';
-import { createSqlite3Persister } from 'tinybase/persisters/persister-sqlite3';
+import { createCustomPersister } from 'tinybase/persisters';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import * as path from 'path';
@@ -51,6 +51,42 @@ import {
 } from './instance.js';
 import type { StorageBackend, ExportedEvent } from './backends/types.js';
 import { createTinyBaseBackend } from './backends/tinybase-backend.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom better-sqlite3 Persister
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Creates a custom TinyBase persister for better-sqlite3.
+ * TinyBase's built-in createSqlite3Persister expects node-sqlite3 (async/callback API),
+ * but we use better-sqlite3 (sync API). This custom persister bridges the gap.
+ */
+function createBetterSqlite3Persister(
+  store: Store,
+  db: ReturnType<typeof Database>,
+  tableName: string = 'tinybase_store'
+) {
+  // Create table if not exists
+  db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (_id TEXT PRIMARY KEY, store TEXT)`);
+
+  return createCustomPersister(
+    store,
+    // getPersisted - load from SQLite
+    async () => {
+      const row = db.prepare(`SELECT store FROM ${tableName} WHERE _id = '_'`).get() as { store: string } | undefined;
+      return row ? JSON.parse(row.store) : undefined;
+    },
+    // setPersisted - save to SQLite
+    async (getContent) => {
+      const json = JSON.stringify(getContent());
+      db.prepare(`INSERT OR REPLACE INTO ${tableName} (_id, store) VALUES ('_', ?)`).run(json);
+    },
+    // addPersisterListener - poll for external changes (cross-process)
+    (listener) => setInterval(listener, 1000),
+    // delPersisterListener - cleanup polling
+    (interval: ReturnType<typeof setInterval>) => clearInterval(interval),
+  );
+}
 
 // View change callback types
 export type AgentChangeCallback = (agentId: AgentId, agent: Agent | null) => void;
@@ -133,6 +169,7 @@ export interface EventStore {
 
   // Lifecycle
   persist(): Promise<void>;
+  reload(): Promise<void>;
   close(): Promise<void>;
 
   // Archival
@@ -197,7 +234,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   if (isLegacy) {
     console.warn(
       '[macro-agent] DEPRECATION WARNING: The `path` option is deprecated and will be removed in a future version. ' +
-        'Use `instanceId` and `baseDir` instead for per-instance isolation with SQLite storage. ' +
+        'Use `instanceId` and `baseDir` instead for per-instance isolation. ' +
         'See documentation for migration guide.'
     );
   }
@@ -205,7 +242,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   const store = createStore();
 
   // Set up persister based on backend type
-  let persister: ReturnType<typeof createFilePersister> | ReturnType<typeof createSqlite3Persister> | null = null;
+  let persister: ReturnType<typeof createFilePersister> | ReturnType<typeof createBetterSqlite3Persister> | null = null;
   let db: ReturnType<typeof Database> | null = null;
 
   if (!config.inMemory) {
@@ -217,16 +254,13 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       }
       persister = createFilePersister(store, instancePath);
     } else {
-      // New instances: Use SQLite persister (default)
+      // New instances: Use SQLite with custom better-sqlite3 persister
       ensureInstanceDir(instancePath);
       const dbPath = path.join(instancePath, 'store.sqlite');
       db = new Database(dbPath);
       db.pragma('journal_mode = WAL');
       db.pragma('busy_timeout = 5000');
-      persister = createSqlite3Persister(store, db, {
-        mode: 'tabular',
-        autoLoadIntervalSeconds: 0, // Disable auto-reload
-      });
+      persister = createBetterSqlite3Persister(store, db);
     }
     await persister.load();
   }
@@ -595,6 +629,17 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   }
 
   /**
+   * Reload store from disk (refresh data from SQLite)
+   */
+  async function reload(): Promise<void> {
+    if (persister) {
+      await persister.load();
+      // Rebuild materialized views from freshly loaded events
+      rebuildViews(store);
+    }
+  }
+
+  /**
    * Close the store
    */
   async function close(): Promise<void> {
@@ -897,6 +942,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
 
     // Lifecycle
     persist,
+    reload,
     close,
 
     // Archival

@@ -899,4 +899,49 @@ describe('Event Archival', () => {
       await memStore.close();
     });
   });
+
+  describe('reload', () => {
+    it('should reload data from SQLite and see changes from another process', async () => {
+      // Create a store with SQLite backend
+      const store1 = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'reload-test',
+      });
+
+      // Emit an event and persist
+      store1.emit({
+        type: 'spawn',
+        source: { agent_id: 'system' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+      await store1.persist();
+
+      // Create a second store instance (simulating another process)
+      const store2 = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'reload-test',
+      });
+
+      // Store2 should see the agent
+      expect(store2.getAgent('agent_1')).toBeDefined();
+
+      // Now store1 emits another event and persists
+      store1.emit({
+        type: 'spawn',
+        source: { agent_id: 'system' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+      await store1.persist();
+
+      // Store2 doesn't see it yet (in-memory cache)
+      expect(store2.getAgent('agent_2')).toBeNull();
+
+      // After reload, store2 should see the new agent
+      await store2.reload();
+      expect(store2.getAgent('agent_2')).toBeDefined();
+
+      await store1.close();
+      await store2.close();
+    });
+  });
 });

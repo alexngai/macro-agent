@@ -415,7 +415,8 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       });
 
       expect(result.id).toMatch(/^agent_/);
-      expect(result.session_id).toMatch(/^mock_session_/);
+      // Session ID is now pre-generated before createSession (for race condition fix)
+      expect(result.session_id).toMatch(/^session_/);
       expect(result.session).toBeDefined();
 
       // Verify agent in EventStore
@@ -530,6 +531,51 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
 
       // Verify persist was called after spawn
       expect(persistSpy).toHaveBeenCalled();
+    });
+
+    it("should persist spawn event BEFORE creating session (race condition fix)", async () => {
+      // Track the order of persist() calls relative to createSession()
+      const callOrder: string[] = [];
+
+      const persistSpy = vi.spyOn(eventStore, "persist").mockImplementation(async () => {
+        callOrder.push("persist");
+      });
+
+      mockHandle.createSession = vi.fn().mockImplementation(async () => {
+        callOrder.push("createSession");
+        return { id: "test_session" };
+      });
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // persist should be called BEFORE createSession
+      // (This ensures MCP server subprocess can find the agent when it starts)
+      const persistIndex = callOrder.indexOf("persist");
+      const createSessionIndex = callOrder.indexOf("createSession");
+
+      expect(persistIndex).toBeLessThan(createSessionIndex);
+      expect(callOrder).toEqual(["persist", "createSession", "persist"]);
+    });
+
+    it("should clean up spawn event if createSession fails", async () => {
+      // Make createSession fail
+      mockHandle.createSession = vi.fn().mockRejectedValue(new Error("Session creation failed"));
+
+      await expect(
+        agentManager.spawn({
+          task: "Test task",
+          cwd: "/tmp",
+        })
+      ).rejects.toThrow("Failed to spawn agent");
+
+      // The agent should be marked as terminated (cleanup)
+      const agents = agentManager.list();
+      const testAgent = agents.find(a => a.task === "Test task");
+      expect(testAgent?.state).toBe("stopped");
+      expect(testAgent?.stop_reason).toBe("failed");
     });
   });
 

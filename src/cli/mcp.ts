@@ -6,11 +6,23 @@
  * Agent context is passed via environment variables.
  */
 
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { createEventStore } from "../store/event-store.js";
 import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { createMCPServer } from "../mcp/mcp-server.js";
+
+// Debug logging to file (since stderr doesn't show up from MCP subprocess)
+const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
+function debugLog(message: string) {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] ${message}\n`;
+  fs.appendFileSync(debugLogPath, line);
+  console.error(message); // Also log to stderr in case it's visible
+}
 
 async function main() {
   // Get agent context from environment variables
@@ -30,15 +42,54 @@ async function main() {
     process.exit(1);
   }
 
+  debugLog(`[MCP] Starting MCP server for agent ${agentId} with instanceId ${instanceId}`);
+  debugLog(`[MCP] Debug log file: ${debugLogPath}`);
+
   try {
     // Initialize services with shared file-based storage using the same instanceId as the main process
     const eventStore = await createEventStore({ inMemory: false, instanceId });
+    debugLog(`[MCP] EventStore created, path: ${eventStore.instancePath}`);
     const messageRouter = createMessageRouter(eventStore);
     const agentManager = createAgentManager(eventStore, messageRouter);
     const taskManager = createTaskManager(eventStore);
 
     // Get agent lineage for authorization checks
-    const agent = eventStore.getAgent(agentId);
+    // Note: The agent may not be in the store yet if the MCP server starts before
+    // the spawn event is persisted. This is a race condition - we retry a few times.
+    let agent = eventStore.getAgent(agentId);
+    const allAgentsInitial = eventStore.listAgents();
+    debugLog(`[MCP] Initial check: agent found = ${!!agent}, total agents in store = ${allAgentsInitial.length}`);
+    if (allAgentsInitial.length > 0) {
+      debugLog(`[MCP] Agents in store: ${allAgentsInitial.map(a => a.id).join(', ')}`);
+    }
+
+    if (!agent) {
+      // Retry a few times with small delays to handle race condition
+      // where MCP server starts before spawn event is persisted
+      for (let i = 0; i < 10; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // Reload from SQLite to get fresh data
+        await eventStore.reload();
+        agent = eventStore.getAgent(agentId);
+        const allAgentsRetry = eventStore.listAgents();
+        debugLog(`[MCP] Retry ${i + 1}: agent found = ${!!agent}, total agents = ${allAgentsRetry.length}`);
+        if (agent) {
+          debugLog(`[MCP] Found agent ${agentId} after ${i + 1} retries`);
+          break;
+        }
+      }
+    } else {
+      debugLog(`[MCP] Agent ${agentId} found immediately (no retry needed)`);
+    }
+
+    if (!agent) {
+      debugLog(`[MCP] Warning: Agent ${agentId} not found in store after retries. ` +
+        `Continuing with limited context. This may affect authorization checks.`);
+      // List all events to help debug
+      const events = eventStore.query({ limit: 50 });
+      debugLog(`[MCP] Events in store (${events.length}): ${events.map(e => `${e.type}:${e.payload?.agent_id || e.source?.agent_id}`).join(', ')}`);
+    }
+
     const lineage = agent?.lineage ?? [];
 
     // Create MCP server with agent context

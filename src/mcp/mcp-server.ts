@@ -5,6 +5,9 @@
  * Each agent gets its own MCP server with tools that know the calling agent's identity.
  */
 
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -16,6 +19,15 @@ import type { PeerManager } from "../peer/peer-manager.js";
 import type { ToolContext, HierarchyNode } from "./types.js";
 import { MCPToolError } from "./types.js";
 import type { Agent, AgentId } from "../store/types/index.js";
+
+// Debug logging to file (since stderr doesn't show up from MCP subprocess)
+const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
+function debugLog(message: string) {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] ${message}\n`;
+  fs.appendFileSync(debugLogPath, line);
+  console.error(message); // Also log to stderr in case it's visible
+}
 
 // ─────────────────────────────────────────────────────────────────
 // MCP Server Configuration
@@ -237,6 +249,20 @@ export function createMCPServer(
     inputSchema: SpawnAgentSchema,
   }, async (args) => {
     try {
+      // Diagnostic logging to help debug parent-not-found issues
+      // First, reload from SQLite to ensure we have the latest data
+      await eventStore.reload();
+
+      const parentAgent = eventStore.getAgent(context.agent_id);
+      const allAgents = eventStore.listAgents();
+      debugLog(`[MCP spawn_agent] Called by agent ${context.agent_id}`);
+      debugLog(`[MCP spawn_agent] Parent exists in eventStore (after reload): ${!!parentAgent}`);
+      debugLog(`[MCP spawn_agent] Total agents in eventStore: ${allAgents.length}`);
+      debugLog(`[MCP spawn_agent] instancePath: ${eventStore.instancePath}`);
+      if (allAgents.length > 0) {
+        debugLog(`[MCP spawn_agent] Agent IDs: ${allAgents.map(a => a.id).join(', ')}`);
+      }
+
       const spawned = await agentManager.spawn({
         task: args.task,
         parent: context.agent_id,
@@ -259,6 +285,10 @@ export function createMCPServer(
         ],
       };
     } catch (error) {
+      // Log more details on failure
+      debugLog(`[MCP spawn_agent] FAILED: ${error}`);
+      const allAgentsOnError = eventStore.listAgents();
+      debugLog(`[MCP spawn_agent] Agents at time of error: ${allAgentsOnError.map(a => a.id).join(', ')}`);
       throw new MCPToolError(
         `Failed to spawn agent: ${error}`,
         "SPAWN_FAILED"

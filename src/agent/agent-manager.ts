@@ -217,9 +217,10 @@ export function createAgentManager(
       agentType = defaultAgentType,
     } = options;
 
-    // Generate IDs
+    // Generate IDs upfront (including session_id so we can persist before starting MCP)
     const agentId = `agent_${nanoid(12)}`;
     const taskId = task_id ?? `task_${nanoid(12)}`;
+    const sessionId = `session_${nanoid(12)}`;
 
     // Validate parent exists if specified
     if (parent) {
@@ -257,6 +258,33 @@ export function createAgentManager(
 
     const systemPrompt = generateSystemPrompt(promptContext);
 
+    eventStore.emit({
+      type: "spawn",
+      source: { agent_id: parent ?? "system" },
+      payload: {
+        agent_id: agentId,
+        session_id: sessionId,
+        task,
+        task_id: taskId,
+        parent: parent ?? null,
+        config: agentConfig ?? {},
+        cwd,
+      },
+    });
+
+    // Persist immediately so MCP server subprocess can read the agent
+    await eventStore.persist();
+
+    // Verify the agent is now in the store
+    const verifyAgent = eventStore.getAgent(agentId);
+    const allAgents = eventStore.listAgents();
+    console.error(
+      `[AgentManager] After persist: agent ${agentId} exists = ${!!verifyAgent}, total agents = ${allAgents.length}, instancePath = ${eventStore.instancePath}`
+    );
+    console.error(
+      `[AgentManager] All agent IDs: ${allAgents.map((a) => a.id).join(", ")}`
+    );
+
     try {
       // Spawn agent process via acp-factory
       const handle = await AgentFactory.spawn(agentType, {
@@ -292,23 +320,10 @@ export function createAgentManager(
         })) ?? [];
 
       // Create session with MCP servers
+      // Note: The MCP server subprocess will start here and look for the agent
+      // in EventStore. We already persisted the spawn event above.
       const session = await handle.createSession(cwd, {
         mcpServers: [macroAgentMcp, ...userMcpServers],
-      });
-
-      // Emit spawn event to EventStore
-      eventStore.emit({
-        type: "spawn",
-        source: { agent_id: parent ?? "system" },
-        payload: {
-          agent_id: agentId,
-          session_id: session.id,
-          task,
-          task_id: taskId,
-          parent: parent ?? null,
-          config: agentConfig ?? {},
-          cwd,
-        },
       });
 
       // Emit started status (session is ready)
@@ -321,8 +336,7 @@ export function createAgentManager(
         },
       });
 
-      // Persist events to SQLite so the MCP server can read them
-      // (MCP server runs as a separate process with its own EventStore instance)
+      // Persist the status event
       await eventStore.persist();
 
       // Set up default subscriptions via MessageRouter
@@ -353,11 +367,21 @@ export function createAgentManager(
 
       return {
         id: agentId,
-        session_id: session.id,
+        session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
         agent,
         session,
       };
     } catch (error) {
+      // Clean up the spawn event we already emitted
+      eventStore.emit({
+        type: "terminate",
+        source: { agent_id: agentId },
+        payload: {
+          reason: "failed",
+        },
+      });
+      await eventStore.persist();
+
       throw new AgentManagerError(
         `Failed to spawn agent: ${error}`,
         "SPAWN_FAILED",
