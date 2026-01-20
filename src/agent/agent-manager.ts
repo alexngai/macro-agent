@@ -419,6 +419,7 @@ export function createAgentManager(
       type: "terminate",
       source: { agent_id: agentId },
       payload: {
+        agent_id: agentId,
         reason,
       },
     });
@@ -450,13 +451,11 @@ export function createAgentManager(
     const updatedAgent = eventStore.getAgent(agentId)!;
     notifyLifecycle({ type: "stopped", agent: updatedAgent, reason });
 
-    // Terminate child agents if parent stopped
-    if (reason !== "parent_stopped") {
-      const children = getChildren(agentId);
-      for (const child of children) {
-        if (child.state === "running" || child.state === "spawning") {
-          await terminate(child.id, "parent_stopped");
-        }
+    // Terminate child agents when parent stops (always cascade)
+    const children = getChildren(agentId);
+    for (const child of children) {
+      if (child.state === "running" || child.state === "spawning") {
+        await terminate(child.id, "parent_stopped");
       }
     }
   }
