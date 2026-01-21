@@ -10,6 +10,8 @@
 
 import { createStore, Store } from 'tinybase';
 import { createFilePersister } from 'tinybase/persisters/persister-file';
+import { createCustomPersister } from 'tinybase/persisters';
+import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import * as path from 'path';
 import * as os from 'os';
@@ -26,7 +28,6 @@ import type {
   QueuedMessage,
   Subscription,
   SubscriptionType,
-  StoreConfig,
   AgentId,
   TaskId,
   EventId,
@@ -34,6 +35,58 @@ import type {
 } from './types/index.js';
 import { CURRENT_EVENT_VERSION } from './types/events.js';
 import { migrateEvent } from './migrations.js';
+import {
+  type StoreConfig,
+  type PeerVisibilityConfig,
+  resolveInstancePath,
+  ensureInstanceDir,
+  createInstanceMeta,
+  writeInstanceMeta,
+  readInstanceMeta,
+  touchInstance,
+  registerInstance,
+  DEFAULT_NAMESPACE,
+  DEFAULT_PEER_VISIBILITY,
+  filterEventsForPeer,
+} from './instance.js';
+import type { StorageBackend, ExportedEvent } from './backends/types.js';
+import { createTinyBaseBackend } from './backends/tinybase-backend.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom better-sqlite3 Persister
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Creates a custom TinyBase persister for better-sqlite3.
+ * TinyBase's built-in createSqlite3Persister expects node-sqlite3 (async/callback API),
+ * but we use better-sqlite3 (sync API). This custom persister bridges the gap.
+ */
+function createBetterSqlite3Persister(
+  store: Store,
+  db: ReturnType<typeof Database>,
+  tableName: string = 'tinybase_store'
+) {
+  // Create table if not exists
+  db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (_id TEXT PRIMARY KEY, store TEXT)`);
+
+  return createCustomPersister(
+    store,
+    // getPersisted - load from SQLite
+    async () => {
+      const row = db.prepare(`SELECT store FROM ${tableName} WHERE _id = '_'`).get() as { store: string } | undefined;
+      return row ? JSON.parse(row.store) : undefined;
+    },
+    // setPersisted - save to SQLite
+    async (getContent) => {
+      const json = JSON.stringify(getContent());
+      db.prepare(`INSERT OR REPLACE INTO ${tableName} (_id, store) VALUES ('_', ?)`).run(json);
+    },
+    // addPersisterListener - poll for external changes (cross-process)
+    (listener) => setInterval(listener, 1000),
+    // delPersisterListener - cleanup polling
+    (interval: ReturnType<typeof setInterval>) => clearInterval(interval),
+  );
+}
 
 // View change callback types
 export type AgentChangeCallback = (agentId: AgentId, agent: Agent | null) => void;
@@ -74,6 +127,18 @@ interface LoadArchiveOptions {
  * Event Store interface
  */
 export interface EventStore {
+  // ─── Instance Info ───
+  /** Instance identifier */
+  readonly instanceId: string;
+  /** Namespace for discovery */
+  readonly namespace: string;
+  /** Path to instance directory (or ':memory:') */
+  readonly instancePath: string;
+  /** Backend type being used */
+  readonly backendType: string;
+  /** Peer visibility configuration */
+  readonly peerVisibility: import('./instance.js').PeerVisibilityConfig;
+
   // Event operations
   emit(event: EventInput): Event;
   query(filter?: EventFilter): Event[];
@@ -104,12 +169,31 @@ export interface EventStore {
 
   // Lifecycle
   persist(): Promise<void>;
+  reload(): Promise<void>;
   close(): Promise<void>;
 
   // Archival
   archive(options?: ArchiveOptions): Promise<ArchiveResult>;
   loadArchive(options?: LoadArchiveOptions): Promise<Event[]>;
   getArchiveInfo(): Promise<ArchiveInfo>;
+
+  // ─── Export/Import (for sync) ───
+  /**
+   * Export events for peer sync.
+   * @param filter Optional event filter
+   * @param options Export options
+   * @param options.forPeer If true, filter by peerVisibility config
+   */
+  exportEvents(filter?: EventFilter, options?: { forPeer?: boolean }): ExportedEvent[];
+  /** Import events from peer */
+  importEvents(events: ExportedEvent[]): void;
+
+  // ─── Advanced ───
+  /**
+   * Get underlying storage backend (for advanced use).
+   * Returns a StorageBackend wrapper around the internal TinyBase store.
+   */
+  getBackend(): import('./backends/types.js').StorageBackend;
 }
 
 /**
@@ -138,24 +222,65 @@ export function parseDuration(duration: string): number {
  * Create an Event Store instance
  */
 export async function createEventStore(config: StoreConfig = {}): Promise<EventStore> {
-  const store = createStore();
+  // Resolve instance configuration
+  const resolved = resolveInstancePath(config);
+  const { instanceId, instancePath, namespace, isNew, isLegacy, backendType } = resolved;
 
-  // Determine storage path
-  const storagePath = config.path ?? path.join(os.homedir(), '.multiagent', 'store.json');
+  // Get peer visibility config (default is restrictive)
+  const peerVisibility: PeerVisibilityConfig =
+    config.peerVisibility ?? DEFAULT_PEER_VISIBILITY;
 
-  // Ensure directory exists
-  if (!config.inMemory) {
-    const dir = path.dirname(storagePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+  // Emit deprecation warning for legacy path option
+  if (isLegacy) {
+    console.warn(
+      '[macro-agent] DEPRECATION WARNING: The `path` option is deprecated and will be removed in a future version. ' +
+        'Use `instanceId` and `baseDir` instead for per-instance isolation. ' +
+        'See documentation for migration guide.'
+    );
   }
 
-  // Set up persister for file-based storage
-  let persister: ReturnType<typeof createFilePersister> | null = null;
+  const store = createStore();
+
+  // Set up persister based on backend type
+  let persister: ReturnType<typeof createFilePersister> | ReturnType<typeof createBetterSqlite3Persister> | null = null;
+  let db: ReturnType<typeof Database> | null = null;
+
   if (!config.inMemory) {
-    persister = createFilePersister(store, storagePath);
+    if (isLegacy) {
+      // Legacy mode: Use JSON file persister at the specified path
+      const dir = path.dirname(instancePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      persister = createFilePersister(store, instancePath);
+    } else {
+      // New instances: Use SQLite with custom better-sqlite3 persister
+      ensureInstanceDir(instancePath);
+      const dbPath = path.join(instancePath, 'store.sqlite');
+      db = new Database(dbPath);
+      db.pragma('journal_mode = WAL');
+      db.pragma('busy_timeout = 5000');
+      persister = createBetterSqlite3Persister(store, db);
+    }
     await persister.load();
+  }
+
+  // Initialize/update instance metadata
+  if (!config.inMemory && !isLegacy) {
+    if (isNew) {
+      const meta = createInstanceMeta(resolved, config);
+      writeInstanceMeta(instancePath, meta);
+    } else {
+      touchInstance(instancePath);
+    }
+
+    // Register in namespace for discovery
+    registerInstance(
+      config.baseDir ?? path.join(os.homedir(), '.multiagent'),
+      namespace,
+      instanceId,
+      { label: config.label }
+    );
   }
 
   // Initialize tables if they don't exist
@@ -504,6 +629,17 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   }
 
   /**
+   * Reload store from disk (refresh data from SQLite)
+   */
+  async function reload(): Promise<void> {
+    if (persister) {
+      await persister.load();
+      // Rebuild materialized views from freshly loaded events
+      rebuildViews(store);
+    }
+  }
+
+  /**
    * Close the store
    */
   async function close(): Promise<void> {
@@ -511,13 +647,21 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       await persister.save();
       persister.destroy();
     }
+    if (db) {
+      db.close();
+    }
   }
 
   /**
    * Get archives directory path
    */
   function getArchivesDir(): string {
-    return path.join(path.dirname(storagePath), 'archives');
+    // For legacy mode, use parent of the file path
+    // For new mode, use the instance directory
+    if (isLegacy) {
+      return path.join(path.dirname(instancePath), 'archives');
+    }
+    return path.join(instancePath, 'archives');
   }
 
   /**
@@ -694,27 +838,124 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     };
   }
 
+  /**
+   * Export events for peer sync
+   * @param filter Optional event filter
+   * @param options Export options
+   * @param options.forPeer If true, filter by peerVisibility config
+   */
+  function exportEvents(
+    filter?: EventFilter,
+    options?: { forPeer?: boolean }
+  ): ExportedEvent[] {
+    let events = query(filter);
+
+    // If exporting for peer, apply visibility filter
+    if (options?.forPeer) {
+      events = filterEventsForPeer(events, peerVisibility);
+    }
+
+    return events.map((event) => ({
+      ...event,
+      sourceInstance: instanceId,
+    }));
+  }
+
+  /**
+   * Import events from peer
+   */
+  function importEvents(events: ExportedEvent[]): void {
+    for (const event of events) {
+      // Skip if event already exists
+      const existing = store.getRow('events', event.id);
+      if (existing.id) continue;
+
+      // Store the event
+      store.setRow('events', event.id, {
+        id: event.id,
+        version: event.version,
+        timestamp: event.timestamp,
+        type: event.type,
+        source: JSON.stringify(event.source),
+        target: event.target ? JSON.stringify(event.target) : '',
+        payload: JSON.stringify(event.payload),
+        metadata: event.metadata ? JSON.stringify(event.metadata) : '',
+      });
+
+      // Update materialized views
+      applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange);
+    }
+  }
+
+  /**
+   * Get underlying storage backend (for advanced use)
+   */
+  function getBackend(): StorageBackend {
+    return createTinyBaseBackend(store, {
+      onFlush: async () => {
+        if (persister) {
+          await persister.save();
+        }
+      },
+      onClose: async () => {
+        if (persister) {
+          await persister.save();
+          persister.destroy();
+        }
+        if (db) {
+          db.close();
+        }
+      },
+    });
+  }
+
   return {
+    // Instance info
+    instanceId,
+    namespace,
+    instancePath,
+    backendType,
+    peerVisibility,
+
+    // Event operations
     emit,
     query,
+
+    // Views
     getAgent,
     listAgents,
     getTask,
     listTasks,
     getMessages,
     getFullMessage,
+
+    // Subscriptions
     addSubscription,
     removeSubscription,
     getSubscriptions,
     getSubscribers,
+
+    // Reactive updates
     onAgentChange,
     onTaskChange,
     onMessageChange,
+
+    // Lifecycle
     persist,
+    reload,
     close,
+
+    // Archival
     archive,
     loadArchive,
     getArchiveInfo,
+
+    // Export/Import
+    exportEvents,
+    importEvents,
+
+    // Advanced
+    getBackend,
   };
 }
 
@@ -803,6 +1044,12 @@ function applyEventToViews(
     case 'task':
       applyTaskEvent(store, event, notifyTaskChange);
       break;
+    case 'peer_message':
+    case 'peer_request':
+      // Peer events are stored in the event log for audit trail
+      // but not materialized into views since PeerManager handles
+      // in-memory queues. Events can be queried via eventStore.query().
+      break;
   }
 }
 
@@ -821,6 +1068,7 @@ function applySpawnEvent(
     task_id?: TaskId;
     parent?: AgentId | null;
     config?: Record<string, unknown>;
+    cwd?: string;
   };
 
   const agentId = payload.agent_id;
@@ -847,6 +1095,7 @@ function applySpawnEvent(
     task: payload.task,
     task_id: payload.task_id ?? '',
     config: JSON.stringify(payload.config ?? {}),
+    cwd: payload.cwd ?? process.cwd(),
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
@@ -1126,6 +1375,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     task: row.task as string,
     task_id: (row.task_id as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
+    cwd: (row.cwd as string) || process.cwd(),
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,

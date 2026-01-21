@@ -415,7 +415,8 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       });
 
       expect(result.id).toMatch(/^agent_/);
-      expect(result.session_id).toMatch(/^mock_session_/);
+      // Session ID is now pre-generated before createSession (for race condition fix)
+      expect(result.session_id).toMatch(/^session_/);
       expect(result.session).toBeDefined();
 
       // Verify agent in EventStore
@@ -463,6 +464,119 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
         }),
       ).rejects.toThrow("Parent agent not found");
     });
+
+    it("should configure MCP server with MACRO_INSTANCE_ID", async () => {
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Verify createSession was called with MCP server config
+      expect(mockHandle.createSession).toHaveBeenCalled();
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+
+      // Find the macro-agent MCP server in the config
+      const mcpServers = sessionOptions?.mcpServers;
+      expect(mcpServers).toBeDefined();
+
+      const macroAgentMcp = mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+      expect(macroAgentMcp).toBeDefined();
+
+      // Verify MACRO_INSTANCE_ID is in the env vars
+      const instanceIdEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "MACRO_INSTANCE_ID"
+      );
+      expect(instanceIdEnv).toBeDefined();
+      expect(instanceIdEnv.value).toBe(eventStore.instanceId);
+    });
+
+    it("should include all required env vars for MCP server", async () => {
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/test/cwd",
+      });
+
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+      const macroAgentMcp = sessionOptions.mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+
+      // Verify all required env vars are present
+      const envNames = macroAgentMcp.env.map((e: any) => e.name);
+      expect(envNames).toContain("MACRO_AGENT_ID");
+      expect(envNames).toContain("MACRO_PARENT_ID");
+      expect(envNames).toContain("MACRO_TASK_ID");
+      expect(envNames).toContain("MACRO_AGENT_CWD");
+      expect(envNames).toContain("MACRO_INSTANCE_ID");
+
+      // Verify cwd is passed correctly
+      const cwdEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "MACRO_AGENT_CWD"
+      );
+      expect(cwdEnv.value).toBe("/test/cwd");
+    });
+
+    it("should persist events after spawning for cross-process visibility", async () => {
+      // Spy on eventStore.persist
+      const persistSpy = vi.spyOn(eventStore, "persist");
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Verify persist was called after spawn
+      expect(persistSpy).toHaveBeenCalled();
+    });
+
+    it("should persist spawn event BEFORE creating session (race condition fix)", async () => {
+      // Track the order of persist() calls relative to createSession()
+      const callOrder: string[] = [];
+
+      const persistSpy = vi.spyOn(eventStore, "persist").mockImplementation(async () => {
+        callOrder.push("persist");
+      });
+
+      mockHandle.createSession = vi.fn().mockImplementation(async () => {
+        callOrder.push("createSession");
+        return { id: "test_session" };
+      });
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // persist should be called BEFORE createSession
+      // (This ensures MCP server subprocess can find the agent when it starts)
+      const persistIndex = callOrder.indexOf("persist");
+      const createSessionIndex = callOrder.indexOf("createSession");
+
+      expect(persistIndex).toBeLessThan(createSessionIndex);
+      expect(callOrder).toEqual(["persist", "createSession", "persist"]);
+    });
+
+    it("should clean up spawn event if createSession fails", async () => {
+      // Make createSession fail
+      mockHandle.createSession = vi.fn().mockRejectedValue(new Error("Session creation failed"));
+
+      await expect(
+        agentManager.spawn({
+          task: "Test task",
+          cwd: "/tmp",
+        })
+      ).rejects.toThrow("Failed to spawn agent");
+
+      // The agent should be marked as terminated (cleanup)
+      const agents = agentManager.list();
+      const testAgent = agents.find(a => a.task === "Test task");
+      expect(testAgent?.state).toBe("stopped");
+      expect(testAgent?.stop_reason).toBe("failed");
+    });
   });
 
   describe("terminate()", () => {
@@ -495,6 +609,19 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       await expect(
         agentManager.terminate("nonexistent", "completed"),
       ).rejects.toThrow("Agent not found");
+    });
+
+    it("should persist events after terminating for cross-process visibility", async () => {
+      const spawned = await agentManager.spawn({ task: "Test" });
+
+      // Clear previous calls and spy on persist
+      const persistSpy = vi.spyOn(eventStore, "persist");
+      persistSpy.mockClear();
+
+      await agentManager.terminate(spawned.id, "completed");
+
+      // Verify persist was called after terminate
+      expect(persistSpy).toHaveBeenCalled();
     });
   });
 
@@ -630,6 +757,138 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
           // Should not reach here
         }
       }).rejects.toThrow("No active session");
+    });
+  });
+
+  describe("respondToPermission()", () => {
+    it("should call session.respondToPermission with correct params", async () => {
+      // Spawn an agent to create a session
+      const spawned = await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Add respondToPermission to the mock session
+      mockSession.respondToPermission = vi.fn();
+
+      // Call respondToPermission
+      const result = agentManager.respondToPermission(
+        spawned.id,
+        "perm-req-123",
+        "allow_once"
+      );
+
+      expect(result).toBe(true);
+      expect(mockSession.respondToPermission).toHaveBeenCalledWith(
+        "perm-req-123",
+        "allow_once"
+      );
+    });
+
+    it("should return false when no active session exists", async () => {
+      // Create agent directly without spawning (no session)
+      eventStore.emit({
+        type: "spawn",
+        source: { agent_id: "system" },
+        payload: {
+          agent_id: "agent_no_session",
+          session_id: "session_1",
+          task: "Test",
+          parent: null,
+        },
+      });
+
+      const result = agentManager.respondToPermission(
+        "agent_no_session",
+        "perm-req-123",
+        "allow_once"
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it("should return false when session.respondToPermission throws", async () => {
+      // Spawn an agent to create a session
+      const spawned = await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Make respondToPermission throw
+      mockSession.respondToPermission = vi.fn().mockImplementation(() => {
+        throw new Error("Permission not found");
+      });
+
+      const result = agentManager.respondToPermission(
+        spawned.id,
+        "invalid-req",
+        "allow_once"
+      );
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("cancelPermission()", () => {
+    it("should call session.cancelPermission with correct params", async () => {
+      // Spawn an agent to create a session
+      const spawned = await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Add cancelPermission to the mock session
+      mockSession.cancelPermission = vi.fn();
+
+      // Call cancelPermission
+      const result = agentManager.cancelPermission(
+        spawned.id,
+        "perm-req-123"
+      );
+
+      expect(result).toBe(true);
+      expect(mockSession.cancelPermission).toHaveBeenCalledWith("perm-req-123");
+    });
+
+    it("should return false when no active session exists", async () => {
+      // Create agent directly without spawning (no session)
+      eventStore.emit({
+        type: "spawn",
+        source: { agent_id: "system" },
+        payload: {
+          agent_id: "agent_no_session",
+          session_id: "session_1",
+          task: "Test",
+          parent: null,
+        },
+      });
+
+      const result = agentManager.cancelPermission(
+        "agent_no_session",
+        "perm-req-123"
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it("should return false when session.cancelPermission throws", async () => {
+      // Spawn an agent to create a session
+      const spawned = await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      // Make cancelPermission throw
+      mockSession.cancelPermission = vi.fn().mockImplementation(() => {
+        throw new Error("Permission not found");
+      });
+
+      const result = agentManager.cancelPermission(
+        spawned.id,
+        "invalid-req"
+      );
+
+      expect(result).toBe(false);
     });
   });
 });

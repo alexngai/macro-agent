@@ -143,6 +143,13 @@ export {
   type GetTaskOutput,
   MCPToolError,
   type MCPToolErrorCode,
+  // Peer communication tools
+  type SendPeerMessageInput,
+  type SendPeerMessageOutput,
+  type SendPeerRequestInput,
+  type SendPeerRequestOutput,
+  type RespondToPeerRequestInput,
+  type RespondToPeerRequestOutput,
 } from './mcp/types.js';
 
 // API server
@@ -182,3 +189,55 @@ export {
   type EventQueryParams,
   type APIError,
 } from './api/types.js';
+
+// ACP - Agent Communication Protocol support
+export {
+  // Registration helper
+  registerMacroAgent,
+  type RegisterOptions,
+  // Classes
+  SessionMapper,
+  MacroAgent,
+  ACPError,
+  // Types
+  type MacroAgentConfig,
+  type ACPSessionId,
+  type SessionMapping,
+  // Initialization config types
+  type MacroAgentInitConfig,
+  type SubAgentConfig,
+  type ACPMCPServerConfig,
+  type ACPPermissionMode,
+  // Extension request/response types
+  type SpawnAgentRequest as ACPSpawnAgentRequest,
+  type SpawnAgentResponse as ACPSpawnAgentResponse,
+  type GetHierarchyRequest as ACPGetHierarchyRequest,
+  type GetHierarchyResponse as ACPGetHierarchyResponse,
+  type GetTaskRequest as ACPGetTaskRequest,
+  type GetTaskResponse as ACPGetTaskResponse,
+  type MountAgentRequest,
+  type MountAgentResponse,
+  type ForkAgentRequest,
+  type ForkAgentResponse,
+  type ACPExtensionMethod,
+  type ACPExtensionRequests,
+  type ACPExtensionResponses,
+  type ACPErrorCode,
+} from './acp/index.js';
+
+// Peer communication
+export {
+  createPeerManager,
+  type PeerManager,
+  type PeerTransport,
+  type PeerHandler,
+  type PeerConfig,
+  type PeerMessage,
+  type PeerRequest,
+  type PeerResponse,
+  type PeerAddress,
+  type ParsedPeerAddress,
+  type PeerInboxMessage,
+  PeerError,
+  type PeerErrorCode,
+} from './peer/index.js';

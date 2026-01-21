@@ -4,7 +4,7 @@
  * Tests for event emission, querying, and materialized view projections
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createEventStore, EventStore, parseDuration } from '../event-store.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -752,6 +752,196 @@ describe('Event Archival', () => {
       // Load and verify all events are there
       const events = await store.loadArchive();
       expect(events.length).toBe(2);
+    });
+  });
+
+  describe('Peer Visibility Export', () => {
+    let testDir: string;
+    let permissiveStore: EventStore;
+    let restrictiveStore: EventStore;
+
+    beforeEach(async () => {
+      testDir = path.join(
+        os.tmpdir(),
+        `macro-agent-visibility-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
+      fs.mkdirSync(testDir, { recursive: true });
+
+      // Store with permissive visibility (allows spawn events from agent-1)
+      permissiveStore = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'permissive-instance',
+        peerVisibility: {
+          exportEvents: true,
+          visibleEventTypes: ['spawn'],
+          visibleAgents: ['agent-1'],
+        },
+      });
+
+      // Store with default (restrictive) visibility
+      restrictiveStore = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'restrictive-instance',
+      });
+
+      // Add events to both stores
+      permissiveStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent-1' },
+        payload: { agent_id: 'child-1', session_id: 'sess-1', task: 'work' },
+      });
+      permissiveStore.emit({
+        type: 'message',
+        source: { agent_id: 'agent-1' },
+        target: { agent_id: 'agent-2' },
+        payload: { content: 'hello' },
+      });
+      permissiveStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent-2' },
+        payload: { agent_id: 'child-2', session_id: 'sess-2', task: 'work' },
+      });
+
+      restrictiveStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent-1' },
+        payload: { agent_id: 'child-1', session_id: 'sess-1', task: 'work' },
+      });
+    });
+
+    afterEach(async () => {
+      await permissiveStore.close();
+      await restrictiveStore.close();
+      if (fs.existsSync(testDir)) {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should export all events when forPeer is false', () => {
+      const exported = permissiveStore.exportEvents();
+      expect(exported).toHaveLength(3);
+    });
+
+    it('should filter events based on peerVisibility when forPeer is true', () => {
+      const exported = permissiveStore.exportEvents(undefined, { forPeer: true });
+      // Should only include spawn events from agent-1
+      expect(exported).toHaveLength(1);
+      expect(exported[0].type).toBe('spawn');
+      expect(exported[0].source.agent_id).toBe('agent-1');
+    });
+
+    it('should return empty array when visibility is restrictive and forPeer is true', () => {
+      const exported = restrictiveStore.exportEvents(undefined, { forPeer: true });
+      expect(exported).toHaveLength(0);
+    });
+
+    it('should export all events from restrictive store when forPeer is false', () => {
+      const exported = restrictiveStore.exportEvents();
+      expect(exported).toHaveLength(1);
+    });
+
+    it('should include sourceInstance in exported events', () => {
+      const exported = permissiveStore.exportEvents(undefined, { forPeer: true });
+      expect(exported[0].sourceInstance).toBe('permissive-instance');
+    });
+  });
+
+  describe('Deprecation Warnings', () => {
+    let testDir: string;
+    let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      testDir = path.join(
+        os.tmpdir(),
+        `macro-agent-deprecation-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
+      fs.mkdirSync(testDir, { recursive: true });
+      consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleWarnSpy.mockRestore();
+      if (fs.existsSync(testDir)) {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should emit deprecation warning when using legacy path option', async () => {
+      const legacyPath = path.join(testDir, 'legacy-store.json');
+      const legacyStore = await createEventStore({ path: legacyPath });
+
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('DEPRECATION WARNING')
+      );
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('path` option is deprecated')
+      );
+
+      await legacyStore.close();
+    });
+
+    it('should not emit deprecation warning for new-style configuration', async () => {
+      const newStore = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'test-new-instance',
+      });
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+      await newStore.close();
+    });
+
+    it('should not emit deprecation warning for in-memory stores', async () => {
+      const memStore = await createEventStore({ inMemory: true });
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+      await memStore.close();
+    });
+  });
+
+  describe('reload', () => {
+    it('should reload data from SQLite and see changes from another process', async () => {
+      // Create a store with SQLite backend
+      const store1 = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'reload-test',
+      });
+
+      // Emit an event and persist
+      store1.emit({
+        type: 'spawn',
+        source: { agent_id: 'system' },
+        payload: { agent_id: 'agent_1', session_id: 'sess_1', task: 'work 1' },
+      });
+      await store1.persist();
+
+      // Create a second store instance (simulating another process)
+      const store2 = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'reload-test',
+      });
+
+      // Store2 should see the agent
+      expect(store2.getAgent('agent_1')).toBeDefined();
+
+      // Now store1 emits another event and persists
+      store1.emit({
+        type: 'spawn',
+        source: { agent_id: 'system' },
+        payload: { agent_id: 'agent_2', session_id: 'sess_2', task: 'work 2' },
+      });
+      await store1.persist();
+
+      // Store2 doesn't see it yet (in-memory cache)
+      expect(store2.getAgent('agent_2')).toBeNull();
+
+      // After reload, store2 should see the new agent
+      await store2.reload();
+      expect(store2.getAgent('agent_2')).toBeDefined();
+
+      await store1.close();
+      await store2.close();
     });
   });
 });

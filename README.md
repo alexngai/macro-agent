@@ -152,6 +152,98 @@ server.listen(3000);
 | `create_task` | Create a new task |
 | `get_task` | Get task details |
 
+## ACP Mode (Agent Communication Protocol)
+
+macro-agent can run as an ACP-compliant agent, enabling external systems to spawn and control it programmatically.
+
+### Stdio ACP (Single Client)
+
+```bash
+# Run as stdio ACP server (for spawning via acp-factory)
+npx multiagent-acp --cwd /path/to/project
+```
+
+### WebSocket ACP (Multi-Client)
+
+For scenarios where multiple clients need to connect to the same agent hierarchy simultaneously:
+
+```bash
+# WebSocket ACP server
+npx multiagent-acp --ws --ws-port 3001
+
+# WebSocket + HTTP API together
+npx multiagent-acp --ws --ws-port 3001 --api --port 3000
+
+# All transports: stdio + WebSocket + HTTP API
+npx multiagent-acp --ws --ws-port 3001 --api --port 3000
+```
+
+### ACP Options
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Working directory for agents |
+| `--ws` | Enable WebSocket ACP server |
+| `--ws-port <port>` | WebSocket port (default: 3001) |
+| `--ws-host <host>` | WebSocket host (default: localhost) |
+| `--api` | Enable HTTP API server |
+| `--port <port>` | HTTP API port (auto-discovers if not specified) |
+| `--host <host>` | HTTP API host (default: localhost) |
+
+### Multi-Client Architecture
+
+When using WebSocket ACP, each client gets its own ACP session but all sessions share the same agent hierarchy:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   External Clients                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│  │ Client A │  │ Client B │  │ Client C │                  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘                  │
+│       │             │             │                         │
+│       └─────────────┼─────────────┘                         │
+│                     │ WebSocket ACP (JSON-RPC 2.0)          │
+│                     ▼                                       │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │              WebSocket ACP Server                     │  │
+│  │    (Each connection = independent ACP session)        │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                     │                                       │
+│                     ▼                                       │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │           Shared Agent Manager                        │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐   │  │
+│  │  │Head Manager │──│ Child Agent │──│ Child Agent  │   │  │
+│  │  └─────────────┘  └─────────────┘  └──────────────┘   │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Each client can:
+- Create independent sessions via `newSession()`
+- Mount to different agents in the hierarchy
+- Send prompts to their mounted agents
+- See agents spawned by other clients
+
+### Programmatic ACP Registration
+
+```typescript
+import { registerMacroAgent } from 'macro-agent';
+import { AgentFactory } from 'acp-factory';
+
+// Register macro-agent with acp-factory
+registerMacroAgent();
+
+// Spawn via ACP
+const handle = await AgentFactory.spawn('macro-agent', {
+  permissionMode: 'auto-approve',
+});
+
+// Or connect to WebSocket ACP
+const ws = new WebSocket('ws://localhost:3001/acp');
+// Send JSON-RPC 2.0 messages for ACP methods
+```
+
 ## CLI Commands
 
 ```
@@ -173,6 +265,15 @@ multiagent hierarchy [root]   Show agent hierarchy tree
 multiagent stop [agentId]     Stop agent(s)
 
 multiagent clear              Reset the system
+
+multiagent-acp [options]      Run as ACP server
+  --cwd <path>                Working directory
+  --ws                        Enable WebSocket ACP
+  --ws-port <port>            WebSocket port (default: 3001)
+  --ws-host <host>            WebSocket host (default: localhost)
+  --api                       Enable HTTP API server
+  --port <port>               HTTP API port (auto-discovers)
+  --host <host>               HTTP API host (default: localhost)
 ```
 
 ## Development

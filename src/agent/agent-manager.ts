@@ -85,7 +85,10 @@ export interface AgentManager {
    * Get full hierarchy tree starting from an agent.
    * @param options.depth - Maximum depth to traverse (undefined = full tree)
    */
-  getHierarchy(agentId: AgentId, options?: HierarchyOptions): AgentHierarchy | null;
+  getHierarchy(
+    agentId: AgentId,
+    options?: HierarchyOptions
+  ): AgentHierarchy | null;
 
   // ── Head Manager ───────────────────────────────────────────────
 
@@ -119,6 +122,32 @@ export interface AgentManager {
    * Check if an agent has an active session.
    */
   hasActiveSession(agentId: AgentId): boolean;
+
+  // ── Permission Handling ─────────────────────────────────────────
+
+  /**
+   * Respond to a permission request for an agent's session.
+   * Used when running in interactive permission mode.
+   *
+   * @param agentId - Agent ID whose session has the pending permission
+   * @param requestId - The permission request ID
+   * @param optionId - The selected option ID (e.g., 'allow_once')
+   * @returns true if permission was found and responded to
+   */
+  respondToPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId: string
+  ): boolean;
+
+  /**
+   * Cancel a permission request for an agent's session.
+   *
+   * @param agentId - Agent ID whose session has the pending permission
+   * @param requestId - The permission request ID
+   * @returns true if permission was found and cancelled
+   */
+  cancelPermission(agentId: AgentId, requestId: string): boolean;
 
   // ── Lifecycle Callbacks ────────────────────────────────────────
 
@@ -188,9 +217,10 @@ export function createAgentManager(
       agentType = defaultAgentType,
     } = options;
 
-    // Generate IDs
+    // Generate IDs upfront (including session_id so we can persist before starting MCP)
     const agentId = `agent_${nanoid(12)}`;
     const taskId = task_id ?? `task_${nanoid(12)}`;
+    const sessionId = `session_${nanoid(12)}`;
 
     // Validate parent exists if specified
     if (parent) {
@@ -228,6 +258,33 @@ export function createAgentManager(
 
     const systemPrompt = generateSystemPrompt(promptContext);
 
+    eventStore.emit({
+      type: "spawn",
+      source: { agent_id: parent ?? "system" },
+      payload: {
+        agent_id: agentId,
+        session_id: sessionId,
+        task,
+        task_id: taskId,
+        parent: parent ?? null,
+        config: agentConfig ?? {},
+        cwd,
+      },
+    });
+
+    // Persist immediately so MCP server subprocess can read the agent
+    await eventStore.persist();
+
+    // Verify the agent is now in the store
+    const verifyAgent = eventStore.getAgent(agentId);
+    const allAgents = eventStore.listAgents();
+    console.error(
+      `[AgentManager] After persist: agent ${agentId} exists = ${!!verifyAgent}, total agents = ${allAgents.length}, instancePath = ${eventStore.instancePath}`
+    );
+    console.error(
+      `[AgentManager] All agent IDs: ${allAgents.map((a) => a.id).join(", ")}`
+    );
+
     try {
       // Spawn agent process via acp-factory
       const handle = await AgentFactory.spawn(agentType, {
@@ -245,37 +302,28 @@ export function createAgentManager(
           { name: "MACRO_AGENT_ID", value: agentId },
           { name: "MACRO_PARENT_ID", value: parent ?? "" },
           { name: "MACRO_TASK_ID", value: taskId },
+          { name: "MACRO_AGENT_CWD", value: cwd },
+          { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
         ],
       };
 
       // Combine with any user-provided MCP servers
-      const userMcpServers = agentConfig?.mcpServers?.map((s) => ({
-        type: "stdio" as const,
-        name: s.name,
-        command: s.command,
-        args: s.args ?? [],
-        env: s.env
-          ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
-          : [],
-      })) ?? [];
+      const userMcpServers =
+        agentConfig?.mcpServers?.map((s) => ({
+          type: "stdio" as const,
+          name: s.name,
+          command: s.command,
+          args: s.args ?? [],
+          env: s.env
+            ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
+            : [],
+        })) ?? [];
 
       // Create session with MCP servers
+      // Note: The MCP server subprocess will start here and look for the agent
+      // in EventStore. We already persisted the spawn event above.
       const session = await handle.createSession(cwd, {
         mcpServers: [macroAgentMcp, ...userMcpServers],
-      });
-
-      // Emit spawn event to EventStore
-      eventStore.emit({
-        type: "spawn",
-        source: { agent_id: parent ?? "system" },
-        payload: {
-          agent_id: agentId,
-          session_id: session.id,
-          task,
-          task_id: taskId,
-          parent: parent ?? null,
-          config: agentConfig ?? {},
-        },
       });
 
       // Emit started status (session is ready)
@@ -287,6 +335,9 @@ export function createAgentManager(
           summary: "Agent session started",
         },
       });
+
+      // Persist the status event
+      await eventStore.persist();
 
       // Set up default subscriptions via MessageRouter
       messageRouter.setupDefaultSubscriptions({
@@ -316,11 +367,21 @@ export function createAgentManager(
 
       return {
         id: agentId,
-        session_id: session.id,
+        session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
         agent,
         session,
       };
     } catch (error) {
+      // Clean up the spawn event we already emitted
+      eventStore.emit({
+        type: "terminate",
+        source: { agent_id: agentId },
+        payload: {
+          reason: "failed",
+        },
+      });
+      await eventStore.persist();
+
       throw new AgentManagerError(
         `Failed to spawn agent: ${error}`,
         "SPAWN_FAILED",
@@ -358,6 +419,7 @@ export function createAgentManager(
       type: "terminate",
       source: { agent_id: agentId },
       payload: {
+        agent_id: agentId,
         reason,
       },
     });
@@ -368,8 +430,8 @@ export function createAgentManager(
         reason === "completed"
           ? "completed"
           : reason === "failed"
-          ? "failed"
-          : "pending";
+            ? "failed"
+            : "pending";
 
       eventStore.emit({
         type: "task",
@@ -382,17 +444,18 @@ export function createAgentManager(
       });
     }
 
+    // Persist events to SQLite for cross-process visibility
+    await eventStore.persist();
+
     // Notify lifecycle listeners
     const updatedAgent = eventStore.getAgent(agentId)!;
     notifyLifecycle({ type: "stopped", agent: updatedAgent, reason });
 
-    // Terminate child agents if parent stopped
-    if (reason !== "parent_stopped") {
-      const children = getChildren(agentId);
-      for (const child of children) {
-        if (child.state === "running" || child.state === "spawning") {
-          await terminate(child.id, "parent_stopped");
-        }
+    // Terminate child agents when parent stops (always cascade)
+    const children = getChildren(agentId);
+    for (const child of children) {
+      if (child.state === "running" || child.state === "spawning") {
+        await terminate(child.id, "parent_stopped");
       }
     }
   }
@@ -632,6 +695,62 @@ export function createAgentManager(
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Permission Handling
+  // ─────────────────────────────────────────────────────────────────
+
+  function respondToPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId: string
+  ): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      console.warn(
+        `[AgentManager] Cannot respond to permission: no active session for agent ${agentId}`
+      );
+      return false;
+    }
+
+    try {
+      activeSession.session.respondToPermission(requestId, optionId);
+      console.log(
+        `[AgentManager] Responded to permission ${requestId} for agent ${agentId} with ${optionId}`
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[AgentManager] Error responding to permission ${requestId}:`,
+        err
+      );
+      return false;
+    }
+  }
+
+  function cancelPermission(agentId: AgentId, requestId: string): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      console.warn(
+        `[AgentManager] Cannot cancel permission: no active session for agent ${agentId}`
+      );
+      return false;
+    }
+
+    try {
+      activeSession.session.cancelPermission(requestId);
+      console.log(
+        `[AgentManager] Cancelled permission ${requestId} for agent ${agentId}`
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[AgentManager] Error cancelling permission ${requestId}:`,
+        err
+      );
+      return false;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Lifecycle Callbacks
   // ─────────────────────────────────────────────────────────────────
 
@@ -687,6 +806,8 @@ export function createAgentManager(
     prompt,
     getSession,
     hasActiveSession,
+    respondToPermission,
+    cancelPermission,
     onLifecycleEvent,
     close,
   };

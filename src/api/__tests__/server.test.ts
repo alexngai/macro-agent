@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import request from "supertest";
-import { createAPIServer, type APIServices } from "../server.js";
+import { createAPIServer, type APIServer, type APIServices } from "../server.js";
 import type { EventStore } from "../../store/event-store.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { TaskManager } from "../../task/task-manager.js";
@@ -25,6 +25,7 @@ function createMockAgent(overrides: Partial<Agent> = {}): Agent {
     task: "Test task",
     task_id: "task_test123",
     config: {},
+    cwd: "/test/working/dir",
     created_at: Date.now(),
     started_at: Date.now(),
     ...overrides,
@@ -161,17 +162,53 @@ describe("API Server", () => {
   let messageRouter: MessageRouter;
   let services: APIServices;
 
+  // Track servers created during tests for cleanup
+  let createdServers: APIServer[] = [];
+
+  // Helper to create and track servers
+  function createTrackedServer(svc: APIServices = services, config?: Parameters<typeof createAPIServer>[1]): APIServer {
+    const server = createAPIServer(svc, config);
+    createdServers.push(server);
+    return server;
+  }
+
   beforeEach(() => {
     eventStore = createMockEventStore();
     agentManager = createMockAgentManager();
     taskManager = createMockTaskManager();
     messageRouter = createMockMessageRouter();
     services = { eventStore, agentManager, taskManager, messageRouter };
+    createdServers = [];
+  });
+
+  afterEach(async () => {
+    // Close all servers created during the test
+    // We close the HTTP server and WebSocket connections directly rather than
+    // calling stop() to avoid interacting with mock services in cleanup
+    for (const server of createdServers) {
+      try {
+        // Close WebSocket connections
+        for (const client of server.wss.clients) {
+          client.terminate();
+        }
+        server.wss.close();
+
+        // Close HTTP server
+        await new Promise<void>((resolve) => {
+          server.server.close(() => resolve());
+          // Force resolve if server wasn't listening
+          setTimeout(resolve, 100);
+        });
+      } catch {
+        // Ignore errors during cleanup
+      }
+    }
+    createdServers = [];
   });
 
   describe("createAPIServer", () => {
     it("should create a server instance", () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       expect(server).toBeDefined();
       expect(server.app).toBeDefined();
       expect(server.server).toBeDefined();
@@ -190,7 +227,7 @@ describe("API Server", () => {
         createMockTask({ id: "task_2", status: "completed" }),
       ]);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/status");
 
       expect(res.status).toBe(200);
@@ -212,7 +249,7 @@ describe("API Server", () => {
 
   describe("POST /api/init", () => {
     it("should initialize the system", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app)
         .post("/api/init")
         .send({ cwd: "/tmp" });
@@ -227,7 +264,7 @@ describe("API Server", () => {
     });
 
     it("should reject double initialization", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
 
       // First init
       await request(server.app).post("/api/init").send({});
@@ -249,7 +286,7 @@ describe("API Server", () => {
       (agentManager.list as ReturnType<typeof vi.fn>).mockReturnValue(agents);
       (agentManager.getChildren as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/agents");
 
       expect(res.status).toBe(200);
@@ -265,7 +302,7 @@ describe("API Server", () => {
       (agentManager.list as ReturnType<typeof vi.fn>).mockReturnValue(agents);
       (agentManager.getChildren as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/agents?state=running");
 
       expect(res.status).toBe(200);
@@ -280,7 +317,7 @@ describe("API Server", () => {
       (agentManager.get as ReturnType<typeof vi.fn>).mockReturnValue(agent);
       (agentManager.getChildren as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/agents/agent_detail123");
 
       expect(res.status).toBe(200);
@@ -290,7 +327,7 @@ describe("API Server", () => {
     it("should return 404 for non-existent agent", async () => {
       (agentManager.get as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/agents/nonexistent");
 
       expect(res.status).toBe(404);
@@ -309,7 +346,7 @@ describe("API Server", () => {
       });
       (agentManager.getChildren as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/agents/agent_root/hierarchy");
 
       expect(res.status).toBe(200);
@@ -327,7 +364,7 @@ describe("API Server", () => {
       ];
       (taskManager.list as ReturnType<typeof vi.fn>).mockReturnValue(tasks);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/tasks");
 
       expect(res.status).toBe(200);
@@ -342,7 +379,7 @@ describe("API Server", () => {
       ];
       (taskManager.list as ReturnType<typeof vi.fn>).mockReturnValue(tasks);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/tasks?status=completed");
 
       expect(res.status).toBe(200);
@@ -356,7 +393,7 @@ describe("API Server", () => {
       const task = createMockTask({ id: "task_detail123" });
       (taskManager.get as ReturnType<typeof vi.fn>).mockReturnValue(task);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/tasks/task_detail123");
 
       expect(res.status).toBe(200);
@@ -366,7 +403,7 @@ describe("API Server", () => {
     it("should return 404 for non-existent task", async () => {
       (taskManager.get as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/tasks/nonexistent");
 
       expect(res.status).toBe(404);
@@ -382,7 +419,7 @@ describe("API Server", () => {
       ];
       (eventStore.query as ReturnType<typeof vi.fn>).mockReturnValue(events);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/events");
 
       expect(res.status).toBe(200);
@@ -396,7 +433,7 @@ describe("API Server", () => {
       );
       (eventStore.query as ReturnType<typeof vi.fn>).mockReturnValue(events);
 
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/events");
 
       expect(res.status).toBe(200);
@@ -407,7 +444,7 @@ describe("API Server", () => {
 
   describe("POST /api/conversation/message", () => {
     it("should require initialization", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app)
         .post("/api/conversation/message")
         .send({ message: "Hello" });
@@ -417,7 +454,7 @@ describe("API Server", () => {
     });
 
     it("should require message field", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
 
       // Initialize first
       await request(server.app).post("/api/init").send({});
@@ -434,7 +471,7 @@ describe("API Server", () => {
 
   describe("GET /api/conversation/history", () => {
     it("should return empty history initially", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       const res = await request(server.app).get("/api/conversation/history");
 
       expect(res.status).toBe(200);
@@ -445,7 +482,7 @@ describe("API Server", () => {
 
   describe("Graceful Shutdown", () => {
     it("should call eventStore.persist and close on graceful shutdown", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       await server.start();
       await server.stop();
 
@@ -455,7 +492,7 @@ describe("API Server", () => {
     });
 
     it("should skip grace period on force shutdown", async () => {
-      const server = createAPIServer(services, { shutdownGracePeriodMs: 5000 });
+      const server = createTrackedServer(services, { shutdownGracePeriodMs: 5000 });
       await server.start();
 
       const startTime = Date.now();
@@ -469,7 +506,7 @@ describe("API Server", () => {
     });
 
     it("should reject new messages during shutdown", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       await server.start();
 
       // Initialize first
@@ -490,12 +527,12 @@ describe("API Server", () => {
     });
 
     it("should have registerSignalHandlers method", () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       expect(typeof server.registerSignalHandlers).toBe("function");
     });
 
     it("should only shutdown once on multiple stop calls", async () => {
-      const server = createAPIServer(services);
+      const server = createTrackedServer();
       await server.start();
 
       // Call stop twice concurrently
@@ -508,7 +545,7 @@ describe("API Server", () => {
 
     it("should use custom shutdown grace period", async () => {
       const customGracePeriod = 100;
-      const server = createAPIServer(services, {
+      const server = createTrackedServer(services, {
         shutdownGracePeriodMs: customGracePeriod,
       });
       await server.start();

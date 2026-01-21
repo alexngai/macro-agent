@@ -5,6 +5,9 @@
  * Each agent gets its own MCP server with tools that know the calling agent's identity.
  */
 
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -12,9 +15,19 @@ import type { EventStore } from "../store/event-store.js";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { TaskManager } from "../task/task-manager.js";
 import type { MessageRouter } from "../router/message-router.js";
+import type { PeerManager } from "../peer/peer-manager.js";
 import type { ToolContext, HierarchyNode } from "./types.js";
 import { MCPToolError } from "./types.js";
 import type { Agent, AgentId } from "../store/types/index.js";
+
+// Debug logging to file (since stderr doesn't show up from MCP subprocess)
+const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
+function debugLog(message: string) {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] ${message}\n`;
+  fs.appendFileSync(debugLogPath, line);
+  console.error(message); // Also log to stderr in case it's visible
+}
 
 // ─────────────────────────────────────────────────────────────────
 // MCP Server Configuration
@@ -37,6 +50,8 @@ export interface MCPServices {
   agentManager: AgentManager;
   taskManager: TaskManager;
   messageRouter: MessageRouter;
+  /** Optional peer manager for inter-macro-agent communication */
+  peerManager?: PeerManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -77,6 +92,10 @@ const SpawnAgentSchema = {
     })
     .optional()
     .describe("Custom config for the child agent"),
+  cwd: z
+    .string()
+    .optional()
+    .describe("Working directory for the spawned agent (defaults to parent's cwd)"),
 };
 
 const EmitStatusSchema = {
@@ -165,6 +184,37 @@ const GetTaskSchema = {
 };
 
 // ─────────────────────────────────────────────────────────────────
+// Peer Communication Schemas
+// ─────────────────────────────────────────────────────────────────
+
+const SendPeerMessageSchema = {
+  to: z.string().describe("Target peer address ('peerId' or 'peerId/agentId')"),
+  type: z.string().describe("Message type for routing/handling"),
+  payload: z.unknown().describe("Message payload"),
+  correlation_id: z.string().optional().describe("Optional correlation ID for relating messages"),
+};
+
+const SendPeerRequestSchema = {
+  to: z.string().describe("Target peer address ('peerId' or 'peerId/agentId')"),
+  method: z.string().describe("Request method name"),
+  params: z.unknown().optional().describe("Request parameters"),
+  timeout: z.number().optional().describe("Timeout hint in milliseconds"),
+};
+
+const RespondToPeerRequestSchema = {
+  request_id: z.string().describe("ID of the request to respond to"),
+  result: z.unknown().optional().describe("Success result (mutually exclusive with error)"),
+  error: z
+    .object({
+      code: z.number(),
+      message: z.string(),
+      data: z.unknown().optional(),
+    })
+    .optional()
+    .describe("Error response (mutually exclusive with result)"),
+};
+
+// ─────────────────────────────────────────────────────────────────
 // Factory Function
 // ─────────────────────────────────────────────────────────────────
 
@@ -178,7 +228,7 @@ export function createMCPServer(
   config: MCPServerConfig = {}
 ): MCPServerInstance {
   const { name = "macro-agent-mcp", version = "1.0.0" } = config;
-  const { eventStore, agentManager, taskManager, messageRouter } = services;
+  const { eventStore, agentManager, taskManager, messageRouter, peerManager } = services;
 
   // Create MCP server
   const server = new McpServer(
@@ -199,12 +249,27 @@ export function createMCPServer(
     inputSchema: SpawnAgentSchema,
   }, async (args) => {
     try {
+      // Diagnostic logging to help debug parent-not-found issues
+      // First, reload from SQLite to ensure we have the latest data
+      await eventStore.reload();
+
+      const parentAgent = eventStore.getAgent(context.agent_id);
+      const allAgents = eventStore.listAgents();
+      debugLog(`[MCP spawn_agent] Called by agent ${context.agent_id}`);
+      debugLog(`[MCP spawn_agent] Parent exists in eventStore (after reload): ${!!parentAgent}`);
+      debugLog(`[MCP spawn_agent] Total agents in eventStore: ${allAgents.length}`);
+      debugLog(`[MCP spawn_agent] instancePath: ${eventStore.instancePath}`);
+      if (allAgents.length > 0) {
+        debugLog(`[MCP spawn_agent] Agent IDs: ${allAgents.map(a => a.id).join(', ')}`);
+      }
+
       const spawned = await agentManager.spawn({
         task: args.task,
         parent: context.agent_id,
         subscribeParent: args.subscribe_parent ?? true,
         topics: args.topics ?? [],
         config: args.config,
+        cwd: args.cwd ?? context.cwd,
       });
 
       return {
@@ -220,6 +285,10 @@ export function createMCPServer(
         ],
       };
     } catch (error) {
+      // Log more details on failure
+      debugLog(`[MCP spawn_agent] FAILED: ${error}`);
+      const allAgentsOnError = eventStore.listAgents();
+      debugLog(`[MCP spawn_agent] Agents at time of error: ${allAgentsOnError.map(a => a.id).join(', ')}`);
       throw new MCPToolError(
         `Failed to spawn agent: ${error}`,
         "SPAWN_FAILED"
@@ -321,36 +390,73 @@ export function createMCPServer(
   // ─────────────────────────────────────────────────────────────────
 
   server.registerTool("check_messages", {
-    description: "Check pending messages in your inbox",
+    description: "Check pending messages in your inbox (includes both internal and peer messages)",
     inputSchema: CheckMessagesSchema,
   }, async (args) => {
-    const messages = messageRouter.getMessages(context.agent_id, {
-      limit: args.limit ?? 10,
+    const limit = args.limit ?? 10;
+
+    // Get internal messages
+    const internalMessages = messageRouter.getMessages(context.agent_id, {
+      limit: limit,
       includeAcknowledged: args.include_acknowledged ?? false,
     });
 
-    const formattedMessages = messages.map((msg) => ({
+    const formattedInternalMessages = internalMessages.map((msg) => ({
       id: msg.id,
-      from: msg.from.agent_id,
+      from: `agent:${msg.from.agent_id}`,
       content: msg.content.length > 500 ? msg.content.substring(0, 500) : msg.content,
       timestamp: msg.timestamp,
       truncated: msg.truncated || msg.content.length > 500,
       correlation_id: msg.correlation_id,
     }));
 
-    // Get total pending count
-    const allMessages = messageRouter.getMessages(context.agent_id, {
+    // Get peer messages if peerManager is available
+    let formattedPeerMessages: Array<{
+      id: string;
+      from: string;
+      content: string;
+      timestamp: number;
+      truncated: boolean;
+      correlation_id?: string;
+      is_request?: boolean;
+      request_id?: string;
+    }> = [];
+
+    if (peerManager) {
+      const peerMessages = peerManager.getPeerMessages(context.agent_id);
+      formattedPeerMessages = peerMessages.map((msg) => ({
+        id: msg.id,
+        from: msg.from, // Already prefixed with "peer:"
+        content: typeof msg.payload === "string"
+          ? msg.payload.length > 500 ? msg.payload.substring(0, 500) : msg.payload
+          : JSON.stringify(msg.payload).substring(0, 500),
+        timestamp: msg.timestamp,
+        truncated: typeof msg.payload === "string" ? msg.payload.length > 500 : false,
+        correlation_id: msg.correlationId,
+        is_request: msg.isRequest,
+        request_id: msg.requestId,
+      }));
+    }
+
+    // Combine and sort by timestamp
+    const allFormattedMessages = [...formattedInternalMessages, ...formattedPeerMessages]
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(0, limit);
+
+    // Get total pending counts
+    const allInternalMessages = messageRouter.getMessages(context.agent_id, {
       limit: 1000,
       includeAcknowledged: false,
     });
+    const allPeerMessages = peerManager ? peerManager.getPeerMessages(context.agent_id) : [];
 
     return {
       content: [
         {
           type: "text" as const,
           text: JSON.stringify({
-            messages: formattedMessages,
-            total_pending: allMessages.length,
+            messages: allFormattedMessages,
+            total_pending: allInternalMessages.length + allPeerMessages.length,
           }),
         },
       ],
@@ -698,6 +804,131 @@ export function createMCPServer(
         },
       ],
     };
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: send_peer_message
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool("send_peer_message", {
+    description: "Send a fire-and-forget message to another macro-agent (peer)",
+    inputSchema: SendPeerMessageSchema,
+  }, async (args) => {
+    if (!peerManager || !peerManager.hasTransport()) {
+      throw new MCPToolError(
+        "Peer communication not available - no transport registered",
+        "NO_PEER_TRANSPORT"
+      );
+    }
+
+    try {
+      await peerManager.sendMessage(context.agent_id, args.to, {
+        type: args.type,
+        payload: args.payload,
+        metadata: args.correlation_id ? { correlationId: args.correlation_id } : undefined,
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              success: true,
+              timestamp: Date.now(),
+            }),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new MCPToolError(
+        `Failed to send peer message: ${error}`,
+        "ROUTING_FAILED"
+      );
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: send_peer_request
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool("send_peer_request", {
+    description: "Send a request to another macro-agent (peer) and wait for response",
+    inputSchema: SendPeerRequestSchema,
+  }, async (args) => {
+    if (!peerManager || !peerManager.hasTransport()) {
+      throw new MCPToolError(
+        "Peer communication not available - no transport registered",
+        "NO_PEER_TRANSPORT"
+      );
+    }
+
+    try {
+      const response = await peerManager.sendRequest(context.agent_id, args.to, {
+        method: args.method,
+        params: args.params,
+        timeout: args.timeout,
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(response),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new MCPToolError(
+        `Failed to send peer request: ${error}`,
+        "ROUTING_FAILED"
+      );
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: respond_to_peer_request
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool("respond_to_peer_request", {
+    description: "Respond to an incoming peer request",
+    inputSchema: RespondToPeerRequestSchema,
+  }, async (args) => {
+    if (!peerManager) {
+      throw new MCPToolError(
+        "Peer communication not available - no transport registered",
+        "NO_PEER_TRANSPORT"
+      );
+    }
+
+    try {
+      peerManager.respondToRequest(context.agent_id, args.request_id, {
+        result: args.result,
+        error: args.error,
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              success: true,
+            }),
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("not found")) {
+        throw new MCPToolError(
+          `Request not found: ${args.request_id}`,
+          "PEER_REQUEST_NOT_FOUND"
+        );
+      }
+      throw new MCPToolError(
+        `Failed to respond to peer request: ${error}`,
+        "INVALID_INPUT"
+      );
+    }
   });
 
   // ─────────────────────────────────────────────────────────────────

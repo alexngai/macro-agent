@@ -1,33 +1,40 @@
 {
   "name": "macro-agent",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "description": "Interact with multiple agents as if they were a single agent.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "multiagent": "./dist/cli/index.js",
-    "multiagent-mcp": "./dist/cli/mcp.js"
+    "multiagent-mcp": "./dist/cli/mcp.js",
+    "multiagent-acp": "./dist/cli/acp.js"
   },
   "scripts": {
     "build": "tsc",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:e2e": "RUN_E2E_TESTS=true npx tsx scripts/test-acp-integration.ts && RUN_E2E_TESTS=true vitest run src/acp/__tests__/websocket-full-e2e.test.ts",
     "dev": "tsc --watch",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "release:patch": "npm version patch && git push && git push --tags",
+    "release:minor": "npm version minor && git push && git push --tags",
+    "release:major": "npm version major && git push && git push --tags",
+    "publish:npm": "npm run build && npm publish"
   },
   "keywords": [
     "multi-agent",
     "claude",
     "orchestration"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Alex Ngai",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/macro-agent.git"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.6",
     "@types/node": "^20.10.0",
     "@types/supertest": "^6.0.3",
