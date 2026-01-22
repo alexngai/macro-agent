@@ -160,6 +160,110 @@ describe("handlers", () => {
       // Should emit termination signal for each descendant
       expect(deps.messageRouter.emitStatus).toHaveBeenCalledTimes(3); // WORKER_DONE + 2 descendants
     });
+
+    it("should create checkpoints when dataplane is provided", async () => {
+      const mockDataplane = {
+        createCheckpointsForTask: vi.fn().mockReturnValue([
+          { id: "cp-1", streamId: "stream-1", commitSha: "abc123" },
+          { id: "cp-2", streamId: "stream-1", commitSha: "def456" },
+        ]),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        dataplane: mockDataplane,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockDataplane.createCheckpointsForTask).toHaveBeenCalledWith(
+        "task-1",
+        "worker-1"
+      );
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("checkpoint")])
+      );
+    });
+
+    it("should not create checkpoints when dataplane is not provided", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should not have checkpoint-related cleanup actions
+      const hasCheckpointAction = result.cleanupActions?.some(
+        (action) => action.toLowerCase().includes("checkpoint")
+      );
+      expect(hasCheckpointAction).toBeFalsy();
+    });
+
+    it("should not create checkpoints when taskId is not provided", async () => {
+      const mockDataplane = {
+        createCheckpointsForTask: vi.fn(),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        dataplane: mockDataplane,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        // No taskId
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockDataplane.createCheckpointsForTask).not.toHaveBeenCalled();
+    });
+
+    it("should handle checkpoint creation errors gracefully", async () => {
+      const mockDataplane = {
+        createCheckpointsForTask: vi.fn().mockImplementation(() => {
+          throw new Error("Checkpoint creation failed");
+        }),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        dataplane: mockDataplane,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should complete without throwing, with warning
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("checkpoint")])
+      );
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────

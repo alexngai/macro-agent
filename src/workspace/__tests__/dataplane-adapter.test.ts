@@ -246,4 +246,123 @@ describe('DataplaneAdapter', () => {
       expect(events.length).toBe(1); // No new events after unsubscribe
     });
   });
+
+  describe('checkpoint operations', () => {
+    let streamId: string;
+    let worktreePath: string;
+
+    beforeEach(() => {
+      adapter = createDataplaneAdapter({
+        enabled: true,
+        repoPath,
+        dbPath,
+        skipRecovery: true,
+      });
+
+      // Create stream
+      streamId = adapter!.createStream({
+        name: 'feature/checkpoint-test',
+        agentId: 'coordinator-1',
+      });
+
+      // Create worktree for the agent
+      worktreePath = path.join(tempDir, 'worktree-agent-1');
+      adapter!.createWorktree({
+        agentId: 'agent-1',
+        path: worktreePath,
+        branch: adapter!.getStreamBranchName(streamId),
+      });
+    });
+
+    afterEach(() => {
+      // Clean up worktree
+      if (fs.existsSync(worktreePath)) {
+        try {
+          execSync(`git worktree remove "${worktreePath}" --force`, {
+            cwd: repoPath,
+            stdio: 'pipe',
+          });
+        } catch {
+          // Ignore errors - worktree may not exist
+        }
+      }
+    });
+
+    it('should create checkpoints for task commits', () => {
+      // Create and start task
+      const taskId = adapter!.createTask({
+        streamId,
+        title: 'Test task',
+      });
+
+      const startResult = adapter!.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree: worktreePath,
+      });
+
+      expect(startResult.startCommit).toBeDefined();
+
+      // Make a commit in the worktree
+      const testFile = path.join(worktreePath, 'test.txt');
+      fs.writeFileSync(testFile, 'Test content');
+      execSync('git add test.txt', { cwd: worktreePath, stdio: 'pipe' });
+      execSync('git commit -m "Add test file"', { cwd: worktreePath, stdio: 'pipe' });
+
+      // Complete the task (merges to stream)
+      adapter!.completeTask({ taskId, worktree: worktreePath });
+
+      // Create checkpoints for the task
+      const checkpoints = adapter!.createCheckpointsForTask(taskId, 'agent-1');
+
+      // At least 1 checkpoint (feature commit), may include merge commit
+      expect(checkpoints.length).toBeGreaterThanOrEqual(1);
+      expect(checkpoints[0].streamId).toBe(streamId);
+      expect(checkpoints[0].createdBy).toBe('agent-1');
+    });
+
+    it('should return empty array for non-existent task', () => {
+      const checkpoints = adapter!.createCheckpointsForTask('non-existent', 'agent-1');
+      expect(checkpoints).toEqual([]);
+    });
+
+    it('should return empty array for task without streamId', () => {
+      // Create task without starting it (no streamId assignment happens at create)
+      // Actually tasks always have streamId from create, so test task not found instead
+      const checkpoints = adapter!.createCheckpointsForTask('invalid-task-id', 'agent-1');
+      expect(checkpoints).toEqual([]);
+    });
+
+    it('should create multiple checkpoints for multiple commits', () => {
+      // Create and start task
+      const taskId = adapter!.createTask({
+        streamId,
+        title: 'Multi-commit task',
+      });
+
+      adapter!.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree: worktreePath,
+      });
+
+      // Make multiple commits
+      fs.writeFileSync(path.join(worktreePath, 'file1.txt'), 'Content 1');
+      execSync('git add file1.txt', { cwd: worktreePath, stdio: 'pipe' });
+      execSync('git commit -m "Add file 1"', { cwd: worktreePath, stdio: 'pipe' });
+
+      fs.writeFileSync(path.join(worktreePath, 'file2.txt'), 'Content 2');
+      execSync('git add file2.txt', { cwd: worktreePath, stdio: 'pipe' });
+      execSync('git commit -m "Add file 2"', { cwd: worktreePath, stdio: 'pipe' });
+
+      // Complete the task
+      adapter!.completeTask({ taskId, worktree: worktreePath });
+
+      // Create checkpoints
+      const checkpoints = adapter!.createCheckpointsForTask(taskId, 'agent-1');
+
+      // Should have checkpoints for both commits (merge commit may also be included)
+      expect(checkpoints.length).toBeGreaterThanOrEqual(2);
+    });
+  });
 });

@@ -26,7 +26,9 @@ import {
   type ListTasksOptions,
   type CleanupWorkerBranchesOptions,
   type CleanupResult,
+  type Checkpoint,
   workerTasks,
+  diffStacks,
 } from 'dataplane';
 import type { DataplaneConfig } from './config.js';
 import { DEFAULT_DATAPLANE_CONFIG } from './config.js';
@@ -390,6 +392,60 @@ export class DataplaneAdapter {
    */
   recoverStaleTasks(thresholdMs: number = 60 * 60 * 1000): { released: string[] } {
     return workerTasks.recoverStaleTasks(this.tracker.db, thresholdMs);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Checkpoint Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create checkpoints for commits made during a task.
+   *
+   * Creates a checkpoint for each commit between the task's startCommit and
+   * the current HEAD of the task's stream. This captures the work done during
+   * the task for future review and merge workflows.
+   *
+   * @param taskId - Task ID to create checkpoints for
+   * @param agentId - Agent ID (used as createdBy)
+   * @returns Array of created checkpoints
+   */
+  createCheckpointsForTask(taskId: string, agentId: string): Checkpoint[] {
+    const task = this.getTask(taskId);
+    if (!task) {
+      console.warn(`[DataplaneAdapter] Task not found: ${taskId}`);
+      return [];
+    }
+
+    if (!task.streamId) {
+      console.warn(`[DataplaneAdapter] Task ${taskId} has no streamId`);
+      return [];
+    }
+
+    if (!task.startCommit) {
+      console.warn(`[DataplaneAdapter] Task ${taskId} has no startCommit`);
+      return [];
+    }
+
+    try {
+      // Create checkpoints from task's startCommit to stream's current HEAD
+      const checkpoints = diffStacks.createCheckpointsFromStream(
+        this.tracker.db,
+        this.config.repoPath,
+        task.streamId,
+        {
+          from: task.startCommit,
+          createdBy: agentId,
+        }
+      );
+
+      return checkpoints;
+    } catch (error) {
+      console.error(
+        `[DataplaneAdapter] Failed to create checkpoints for task ${taskId}:`,
+        error
+      );
+      return [];
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

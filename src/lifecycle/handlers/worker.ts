@@ -17,6 +17,7 @@
 
 import type { MessageRouter } from "../../router/message-router.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
+import type { DataplaneAdapter } from "../../workspace/dataplane-adapter.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -43,6 +44,9 @@ export interface WorkerHandlerDeps {
 
   /** Agent manager for cascade termination */
   agentManager: AgentManager;
+
+  /** Dataplane adapter for checkpoint creation (optional) */
+  dataplane?: DataplaneAdapter;
 }
 
 // =============================================================================
@@ -86,6 +90,28 @@ export async function handleWorkerDone(
       } else {
         warnings.push("Failed to auto-commit uncommitted changes");
       }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step 1.5: Create checkpoints for task commits (Phase 6)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  if (deps.dataplane && context.taskId) {
+    try {
+      const checkpoints = deps.dataplane.createCheckpointsForTask(
+        context.taskId,
+        context.agentId
+      );
+      if (checkpoints.length > 0) {
+        cleanupActions.push(
+          `Created ${checkpoints.length} checkpoint(s) for task ${context.taskId}`
+        );
+      }
+    } catch (error) {
+      warnings.push(
+        `Failed to create checkpoints: ${error instanceof Error ? error.message : "unknown"}`
+      );
     }
   }
 
