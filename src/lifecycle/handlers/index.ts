@@ -63,10 +63,11 @@ export function createHandlerRegistry(
 ): DoneHandlerRegistry {
   const registry: DoneHandlerRegistry = new Map();
 
-  // Worker handler
+  // Worker handler - include merge queue for queue submission
   const workerDeps: WorkerHandlerDeps = {
     messageRouter: deps.messageRouter,
     agentManager: deps.agentManager,
+    mergeQueue: deps.mergeQueue,
   };
   registry.set("worker", (context, args, cleanupStatus) =>
     handleWorkerDone(context, args, cleanupStatus, workerDeps)

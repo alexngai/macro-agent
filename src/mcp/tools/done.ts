@@ -57,7 +57,13 @@ export interface DoneToolDeps {
   taskManager: TaskManager;
   workspaceManager?: {
     /** Get workspace for an agent */
-    getWorkspace(agentId: string): { integrationBranch?: string } | undefined;
+    getWorkspace(agentId: string): {
+      integrationBranch?: string;
+      path?: string;
+      streamId?: string;
+    } | null;
+    /** Get merge queue for coordinating worker merges */
+    getMergeQueue?(): AllHandlerDeps["mergeQueue"];
   };
 }
 
@@ -115,11 +121,15 @@ export function buildLifecycleContext(
 ): LifecycleContext {
   const agent = eventStore.getAgent(toolContext.agent_id);
 
-  // Try to get integration branch from workspace manager
+  // Try to get workspace info from workspace manager
   let integrationBranch: string | undefined;
+  let workspacePath: string | undefined;
+  let streamId: string | undefined;
   if (workspaceManager) {
     const workspace = workspaceManager.getWorkspace(toolContext.agent_id);
     integrationBranch = workspace?.integrationBranch;
+    workspacePath = workspace?.path;
+    streamId = workspace?.streamId;
   }
 
   return {
@@ -127,9 +137,10 @@ export function buildLifecycleContext(
     role,
     taskId: toolContext.task_id,
     parentId: agent?.parent ?? undefined,
-    workspacePath: toolContext.cwd,
+    workspacePath: workspacePath ?? toolContext.cwd,
     branch: undefined, // Will be detected from workspace if needed
     integrationBranch,
+    streamId,
   };
 }
 
@@ -236,6 +247,10 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
     const handlerDeps: AllHandlerDeps = {
       messageRouter,
       agentManager,
+      mergeQueue: workspaceManager?.getMergeQueue?.(),
+      getWorkspacePath: workspaceManager
+        ? (agentId: string) => workspaceManager.getWorkspace(agentId)?.path
+        : undefined,
     };
 
     const handlerResult = await dispatchDone(

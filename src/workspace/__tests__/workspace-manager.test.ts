@@ -285,4 +285,107 @@ describe('WorkspaceManager', () => {
       expect(manager!.getStreamForAgent('coordinator-1')).toBeNull();
     });
   });
+
+  describe('merge queue', () => {
+    beforeEach(() => {
+      manager = createWorkspaceManager({
+        enabled: true,
+        repoPath,
+        dbPath,
+        skipRecovery: true,
+      });
+    });
+
+    it('should provide merge queue via getMergeQueue()', () => {
+      const mergeQueue = manager!.getMergeQueue();
+
+      expect(mergeQueue).toBeDefined();
+      expect(typeof mergeQueue.submit).toBe('function');
+      expect(typeof mergeQueue.getNext).toBe('function');
+      expect(typeof mergeQueue.getQueueDepth).toBe('function');
+    });
+
+    it('should return the same merge queue instance on multiple calls', () => {
+      const queue1 = manager!.getMergeQueue();
+      const queue2 = manager!.getMergeQueue();
+
+      expect(queue1).toBe(queue2);
+    });
+
+    it('should allow submitting merge requests through the queue', () => {
+      const streamId = manager!.createIntegrationStream('coordinator-1', {
+        name: 'feature/merge-test',
+      });
+
+      const mergeQueue = manager!.getMergeQueue();
+
+      const mrId = mergeQueue.submit({
+        streamId,
+        taskId: 'task-1',
+        workerBranch: 'worker/test-branch',
+        workerAgentId: 'worker-1',
+      });
+
+      expect(mrId).toBeDefined();
+      expect(typeof mrId).toBe('string');
+      expect(mrId.startsWith('mr-')).toBe(true);
+
+      // Verify we can retrieve the merge request
+      const mr = mergeQueue.get(mrId);
+      expect(mr).not.toBeNull();
+      expect(mr!.streamId).toBe(streamId);
+      expect(mr!.taskId).toBe('task-1');
+      expect(mr!.status).toBe('pending');
+    });
+
+    it('should track queue depth correctly', () => {
+      const streamId = manager!.createIntegrationStream('coordinator-1', {
+        name: 'feature/queue-depth',
+      });
+
+      const mergeQueue = manager!.getMergeQueue();
+
+      expect(mergeQueue.getQueueDepth(streamId)).toBe(0);
+
+      mergeQueue.submit({
+        streamId,
+        taskId: 'task-1',
+        workerBranch: 'worker/branch-1',
+        workerAgentId: 'worker-1',
+      });
+
+      expect(mergeQueue.getQueueDepth(streamId)).toBe(1);
+
+      mergeQueue.submit({
+        streamId,
+        taskId: 'task-2',
+        workerBranch: 'worker/branch-2',
+        workerAgentId: 'worker-2',
+      });
+
+      expect(mergeQueue.getQueueDepth(streamId)).toBe(2);
+    });
+
+    it('should close merge queue on manager close', () => {
+      const mergeQueue = manager!.getMergeQueue();
+      const streamId = manager!.createIntegrationStream('coordinator-1', {
+        name: 'feature/close-test',
+      });
+
+      // Submit a merge request
+      mergeQueue.submit({
+        streamId,
+        taskId: 'task-1',
+        workerBranch: 'worker/branch-1',
+        workerAgentId: 'worker-1',
+      });
+
+      // Close the manager
+      manager!.close();
+
+      // Getting merge queue again should create a new instance
+      const newQueue = manager!.getMergeQueue();
+      expect(newQueue).not.toBe(mergeQueue);
+    });
+  });
 });

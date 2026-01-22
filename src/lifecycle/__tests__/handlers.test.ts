@@ -268,6 +268,188 @@ describe("handlers", () => {
         expect.arrayContaining([expect.stringContaining("checkpoint")])
       );
     });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Merge Queue Submission Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    it("should submit to merge queue when completed with all required context", async () => {
+      mockGetCurrentBranch.mockReturnValue("feature/test");
+
+      const mockMergeQueue = {
+        submit: vi.fn().mockReturnValue("mr-123"),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+        integrationBranch: "integration",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockMergeQueue.submit).toHaveBeenCalledWith({
+        streamId: "stream-1",
+        taskId: "task-1",
+        workerBranch: "feature/test",
+        workerAgentId: "worker-1",
+      });
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("mr-123")])
+      );
+    });
+
+    it("should skip queue submission when no merge queue is configured", async () => {
+      mockGetCurrentBranch.mockReturnValue("feature/test");
+
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should still emit MERGE_REQUEST signal
+      expect(result.signalsEmitted).toContain("MERGE_REQUEST");
+      // Should note no queue configured
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("no queue configured")])
+      );
+    });
+
+    it("should skip queue submission when no streamId", async () => {
+      mockGetCurrentBranch.mockReturnValue("feature/test");
+
+      const mockMergeQueue = {
+        submit: vi.fn(),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        // No streamId
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockMergeQueue.submit).not.toHaveBeenCalled();
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("no streamId")])
+      );
+    });
+
+    it("should skip queue submission when no taskId", async () => {
+      mockGetCurrentBranch.mockReturnValue("feature/test");
+
+      const mockMergeQueue = {
+        submit: vi.fn(),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        // No taskId
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockMergeQueue.submit).not.toHaveBeenCalled();
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("no taskId")])
+      );
+    });
+
+    it("should handle queue submission errors gracefully", async () => {
+      mockGetCurrentBranch.mockReturnValue("feature/test");
+
+      const mockMergeQueue = {
+        submit: vi.fn().mockImplementation(() => {
+          throw new Error("Queue submission failed");
+        }),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should complete without throwing
+      expect(result.shouldTerminate).toBe(true);
+      // Should have warning about queue submission failure
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("merge queue")])
+      );
+      // Should indicate submission failed
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("queue submission failed")])
+      );
+    });
+
+    it("should not submit to queue when status is failed", async () => {
+      const mockMergeQueue = {
+        submit: vi.fn(),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "failed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(mockMergeQueue.submit).not.toHaveBeenCalled();
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────

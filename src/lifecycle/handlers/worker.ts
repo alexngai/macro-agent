@@ -3,9 +3,10 @@
  *
  * Handles done() for worker agents:
  * - Commits workspace changes (no push - bare repo shared)
- * - Signals descendants to prepare for termination
+ * - Creates checkpoints for task commits
  * - Emits WORKER_DONE signal
- * - Emits MERGE_REQUEST signal (queue submission stubbed for Phase 6)
+ * - Emits MERGE_REQUEST signal and submits to merge queue
+ * - Signals descendants to prepare for termination
  *
  * Note: Actual termination is handled by AgentManager after done() returns.
  * The AgentManager.terminate() method cascades depth-first to all children.
@@ -13,11 +14,13 @@
  *
  * @module lifecycle/handlers/worker
  * @see s-32xs Self-Cleaning Workers spec
+ * @see s-bcqm Change Management spec
  */
 
 import type { MessageRouter } from "../../router/message-router.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { DataplaneAdapter } from "../../workspace/dataplane-adapter.js";
+import type { MergeQueueInterface } from "../../workspace/merge-queue/types.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -47,6 +50,9 @@ export interface WorkerHandlerDeps {
 
   /** Dataplane adapter for checkpoint creation (optional) */
   dataplane?: DataplaneAdapter;
+
+  /** Merge queue for submitting merge requests (optional) */
+  mergeQueue?: MergeQueueInterface;
 }
 
 // =============================================================================
@@ -140,7 +146,7 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 3: Emit MERGE_REQUEST signal (stubbed for Phase 6)
+  // Step 3: Emit MERGE_REQUEST signal and submit to queue
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (args.status === "completed" && context.workspacePath) {
@@ -149,7 +155,7 @@ export async function handleWorkerDone(
 
     if (sourceBranch) {
       try {
-        // Emit the signal - actual queue submission is stubbed for Phase 6
+        // Emit the signal for notification
         deps.messageRouter.emitStatus({
           from: { agent_id: context.agentId },
           status_type: "checkpoint",
@@ -164,11 +170,37 @@ export async function handleWorkerDone(
         });
         signalsEmitted.push("MERGE_REQUEST");
 
-        // TODO Phase 6: Submit to actual merge queue
-        // mergeQueue.submit({ sourceBranch, targetBranch, taskId, workerId });
-        cleanupActions.push(
-          `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission stubbed for Phase 6)`
-        );
+        // Submit to actual merge queue if available
+        if (deps.mergeQueue && context.streamId && context.taskId) {
+          try {
+            const mrId = deps.mergeQueue.submit({
+              streamId: context.streamId,
+              taskId: context.taskId,
+              workerBranch: sourceBranch,
+              workerAgentId: context.agentId,
+            });
+            cleanupActions.push(
+              `Submitted merge request ${mrId} to queue for ${sourceBranch} -> ${targetBranch}`
+            );
+          } catch (queueError) {
+            warnings.push(
+              `Failed to submit to merge queue: ${queueError instanceof Error ? queueError.message : "unknown"}`
+            );
+            cleanupActions.push(
+              `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission failed)`
+            );
+          }
+        } else {
+          // No queue configured or missing required context
+          const reason = !deps.mergeQueue
+            ? "no queue configured"
+            : !context.streamId
+              ? "no streamId"
+              : "no taskId";
+          cleanupActions.push(
+            `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (${reason})`
+          );
+        }
       } catch (error) {
         warnings.push(
           `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`

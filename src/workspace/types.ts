@@ -9,6 +9,7 @@
  */
 
 import type { Stream, WorkerTask, StartTaskResult } from 'dataplane';
+import type { MergeQueueInterface } from './merge-queue/types.js';
 
 /**
  * Agent identifier type
@@ -299,6 +300,20 @@ export interface WorkspaceManager {
     childId: AgentId,
     childPath: string
   ): void;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Merge Queue
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get the merge queue for coordinating worker merges.
+   *
+   * The merge queue is shared across all streams and uses the same
+   * database as the dataplane adapter.
+   *
+   * @returns MergeQueue instance
+   */
+  getMergeQueue(): MergeQueueInterface;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle
