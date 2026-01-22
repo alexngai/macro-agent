@@ -24,6 +24,12 @@ import {
   createDoneHandler,
   DONE_TOOL_INFO,
 } from "./tools/done.js";
+import type { ActivityWatcher } from "../activity/watcher.js";
+import {
+  WaitForActivitySchema,
+  createWaitForActivityHandler,
+  WAIT_FOR_ACTIVITY_TOOL_INFO,
+} from "./tools/wait_for_activity.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
 const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
@@ -57,6 +63,8 @@ export interface MCPServices {
   messageRouter: MessageRouter;
   /** Optional peer manager for inter-macro-agent communication */
   peerManager?: PeerManager;
+  /** Optional activity watcher for event-driven waking */
+  activityWatcher?: ActivityWatcher;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -233,7 +241,7 @@ export function createMCPServer(
   config: MCPServerConfig = {}
 ): MCPServerInstance {
   const { name = "macro-agent-mcp", version = "1.0.0" } = config;
-  const { eventStore, agentManager, taskManager, messageRouter, peerManager } = services;
+  const { eventStore, agentManager, taskManager, messageRouter, peerManager, activityWatcher } = services;
 
   // Create MCP server
   const server = new McpServer(
@@ -935,6 +943,45 @@ export function createMCPServer(
       );
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: wait_for_activity (optional - requires activityWatcher)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (activityWatcher) {
+    server.registerTool(WAIT_FOR_ACTIVITY_TOOL_INFO.name, {
+      description: WAIT_FOR_ACTIVITY_TOOL_INFO.description,
+      inputSchema: WaitForActivitySchema,
+    }, async (args) => {
+      const handler = createWaitForActivityHandler(context, { activityWatcher });
+
+      try {
+        const result = await handler(args as {
+          event_types?: string[];
+          timeout_ms?: number;
+          scope?: {
+            subtree?: string;
+            role?: string;
+            target_agent?: string;
+          };
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to wait for activity: ${error instanceof Error ? error.message : error}`,
+          "WAIT_FAILED"
+        );
+      }
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Tool: done

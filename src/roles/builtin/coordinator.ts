@@ -65,7 +65,7 @@ export const CoordinatorRole: RoleDefinition = {
       "MERGE_COMPLETE",
       "LAND_COMPLETE",
       "CONFLICT_DETECTED",
-      "GUPP_VIOLATION",
+      "STALE_AGENT",
       "INTEGRATOR_DONE",
     ],
     canEmit: ["WORK_ASSIGNED"],

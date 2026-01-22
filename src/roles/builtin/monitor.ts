@@ -17,7 +17,7 @@ import {
  * Health monitoring agent that:
  * - Activates on specific events (not continuous polling)
  * - Checks worker health and activity
- * - Detects GUPP violations (work assigned, no progress > 30 min)
+ * - Detects stale agents (work assigned, no progress > 30 min)
  * - Detects stale sessions
  * - Requests termination of unresponsive agents
  * - Notifies coordinator of issues
@@ -32,7 +32,7 @@ export const MonitorRole: RoleDefinition = {
   name: "monitor",
   displayName: "Monitor",
   description:
-    "Per-coordinator health monitoring, GUPP violation detection, cleanup orchestration",
+    "Per-coordinator health monitoring, stale agent detection, cleanup orchestration",
 
   capabilities: [
     FILE_CAPABILITIES.READ,
@@ -60,6 +60,6 @@ export const MonitorRole: RoleDefinition = {
       "HEALTH_CHECK_TIMER", // Periodic health check trigger
       "AGENT_TIMEOUT", // External timeout signal
     ],
-    canEmit: ["HEALTH_CHECK", "GUPP_VIOLATION", "FORCE_TERMINATE_REQUEST"],
+    canEmit: ["HEALTH_CHECK", "STALE_AGENT", "FORCE_TERMINATE_REQUEST"],
   },
 };

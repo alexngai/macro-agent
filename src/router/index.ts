@@ -3,8 +3,8 @@
  */
 
 // Original types and router (backward compatible)
-export * from './types.js';
-export * from './message-router.js';
+export * from "./types.js";
+export * from "./message-router.js";
 
 // Enhanced signal types (s-9rld)
 export type {
@@ -24,16 +24,16 @@ export type {
   StatusPayload,
   HealthCheckPayload,
   HealthCheckTimerPayload,
-  GuppViolationPayload,
+  StaleAgentPayload,
   PriorityChangePayload,
   ForceTerminateRequestPayload,
   WorkerSpawnedPayload,
   IntegratorDonePayload,
   AgentTimeoutPayload,
   AssignmentExpiredPayload,
-} from './signals.js';
+} from "./signals.js";
 
-export { SIGNALS, ALL_SIGNALS, isValidSignal } from './signals.js';
+export { SIGNALS, ALL_SIGNALS, isValidSignal } from "./signals.js";
 
 // Enhanced channel types (s-9rld) - use "Enhanced" prefix to avoid conflicts
 export type {
@@ -49,7 +49,7 @@ export type {
   MessagePriority,
   DeliveryMode,
   GroupResolution,
-} from './channels.js';
+} from "./channels.js";
 
 export {
   PRIORITY_VALUES,
@@ -68,7 +68,7 @@ export {
   isBroadcastChannel,
   isRoleChannel,
   isMulticastChannel,
-} from './channels.js';
+} from "./channels.js";
 
 // Enhanced message types (s-9rld) - use prefixes to avoid conflicts
 export type {
@@ -82,7 +82,7 @@ export type {
   SendMessageRequest as EnhancedSendMessageRequest,
   SentMessage as EnhancedSentMessage,
   ReceivedMessage as EnhancedReceivedMessage,
-} from './message-types.js';
+} from "./message-types.js";
 
 export {
   isSignalMessage,
@@ -93,19 +93,16 @@ export {
   isChannelTarget,
   createSignalMessage,
   createContentMessage,
-} from './message-types.js';
+} from "./message-types.js";
 
 // Broadcast channel resolution (Phase 5)
 export {
   matchesBroadcastScope,
   getBroadcastRecipients,
   resolveBroadcastTarget,
-} from './broadcast.js';
+} from "./broadcast.js";
 
-export type {
-  BroadcastAgentInfo,
-  BroadcastAgentSource,
-} from './broadcast.js';
+export type { BroadcastAgentInfo, BroadcastAgentSource } from "./broadcast.js";
 
 // Role channel resolution (Phase 5)
 export {
@@ -113,12 +110,9 @@ export {
   getSubtreeIds,
   resolveRoleTarget,
   getAgentsByRole,
-} from './role-resolver.js';
+} from "./role-resolver.js";
 
-export type {
-  RoleAgentInfo,
-  RoleAgentSource,
-} from './role-resolver.js';
+export type { RoleAgentInfo, RoleAgentSource } from "./role-resolver.js";
 
 // Priority-based wake decisions (Phase 5)
 export {
@@ -128,12 +122,9 @@ export {
   shouldInterruptAgent,
   comparePriority as compareMessagePriority,
   PRIORITY_VALUES as MESSAGE_PRIORITY_VALUES,
-} from './wake.js';
+} from "./wake.js";
 
-export type {
-  SessionChecker,
-  WakeDecision,
-} from './wake.js';
+export type { SessionChecker, WakeDecision } from "./wake.js";
 
 // Wake handler type from message router
-export type { WakeHandler } from './message-router.js';
+export type { WakeHandler } from "./message-router.js";

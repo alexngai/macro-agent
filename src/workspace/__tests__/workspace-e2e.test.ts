@@ -774,8 +774,8 @@ describe('Workspace E2E', () => {
       let task = adapter.getTask(taskId);
       expect(task!.status).toBe('in_progress');
 
-      // Recover tasks with 0ms threshold (all in_progress tasks are stale)
-      const recoveryResult = adapter.recoverStaleTasks(0);
+      // Recover tasks with -1ms threshold (cutoff is 1ms in future, so all tasks are stale)
+      const recoveryResult = adapter.recoverStaleTasks(-1);
 
       // Task should be released back to open
       task = adapter.getTask(taskId);

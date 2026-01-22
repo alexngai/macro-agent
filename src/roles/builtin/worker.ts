@@ -2,7 +2,7 @@
  * Worker Role Definition
  *
  * Executes discrete tasks, writes code, runs tests.
- * Ephemeral, task-bound with 30-minute GUPP timeout.
+ * Ephemeral, task-bound with 30-minute stale timeout.
  */
 
 import type { RoleDefinition } from "../types.js";
@@ -15,8 +15,8 @@ import {
   MSG_CAPABILITIES,
 } from "../capabilities.js";
 
-/** 30 minutes in milliseconds (GUPP timeout) */
-const GUPP_TIMEOUT_MS = 30 * 60 * 1000;
+/** 30 minutes in milliseconds (stale timeout) */
+const STALE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Worker Role
@@ -56,7 +56,7 @@ export const WorkerRole: RoleDefinition = {
   lifecycle: {
     type: "ephemeral",
     taskBound: true,
-    maxDurationMs: GUPP_TIMEOUT_MS,
+    maxDurationMs: STALE_TIMEOUT_MS,
     cascadeTerminate: true,
     selfCleanup: true,
   },
@@ -105,7 +105,7 @@ export const ResolverWorkerRole: RoleDefinition = {
   lifecycle: {
     type: "ephemeral",
     taskBound: true,
-    maxDurationMs: GUPP_TIMEOUT_MS,
+    maxDurationMs: STALE_TIMEOUT_MS,
     cascadeTerminate: true,
     selfCleanup: true,
   },

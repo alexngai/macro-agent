@@ -241,3 +241,54 @@ export {
   PeerError,
   type PeerErrorCode,
 } from './peer/index.js';
+
+// Activity module - event-driven agent waking
+export {
+  // Types
+  type Activity,
+  type ActivityEventType,
+  type ActivitySource,
+  type ActivityTarget,
+  type EventSubscription,
+  type EventSubscriptionScope,
+  type WakeResult,
+  type WakeMethod,
+  type WaitForActivityResult,
+  MONITOR_DEFAULT_EVENT_TYPES,
+
+  // Activity watcher
+  createActivityWatcher,
+  subscribeAgentToEvents,
+  type ActivityWatcher,
+  type ActivityListener,
+  type WakeHandler,
+
+  // Relevance detection
+  findRelevantAgents,
+  matchesRole,
+  matchesSubscriptionScope,
+  getAncestors,
+  isInSubtree,
+  getAgentsByRole,
+  type RelevanceAgentInfo,
+  type RelevanceAgentSource,
+  type RelevanceSubscriptionSource,
+  type RelevanceOptions,
+
+  // Deduplication
+  ActivityDeduplicator,
+  createDeduplicator,
+  type DeduplicationKey,
+  type DeduplicationConfig,
+} from './activity/index.js';
+
+// Agent wake mechanism
+export {
+  wakeAgent,
+  createWakeHandler,
+  createSessionProviderFromAgentManager,
+  formatActivityContext,
+  type WakeSessionInfo,
+  type WakeSessionProvider,
+  type WakeAgentOptions,
+} from './agent/wake.js';

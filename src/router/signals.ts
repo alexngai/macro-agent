@@ -28,7 +28,7 @@ export type SignalType =
   | "STATUS"
   | "HEALTH_CHECK"
   | "HEALTH_CHECK_TIMER"
-  | "GUPP_VIOLATION"
+  | "STALE_AGENT"
   | "PRIORITY_CHANGE"
   | "FORCE_TERMINATE_REQUEST"
   | "WORKER_SPAWNED"
@@ -167,9 +167,9 @@ export interface HealthCheckTimerPayload {
 }
 
 /**
- * GUPP_VIOLATION - Worker timeout detected
+ * STALE_AGENT - Agent went stale (work assigned but no progress)
  */
-export interface GuppViolationPayload {
+export interface StaleAgentPayload {
   workerId: AgentId;
   taskId?: TaskId;
   lastActivity: Timestamp;
@@ -218,7 +218,7 @@ export interface IntegratorDonePayload {
  */
 export interface AgentTimeoutPayload {
   agentId: AgentId;
-  timeoutType: "gupp" | "health_check" | "lease";
+  timeoutType: "stale" | "health_check" | "lease";
   durationMs: number;
 }
 
@@ -265,7 +265,7 @@ export interface SignalPayloadMap {
   STATUS: StatusPayload;
   HEALTH_CHECK: HealthCheckPayload;
   HEALTH_CHECK_TIMER: HealthCheckTimerPayload;
-  GUPP_VIOLATION: GuppViolationPayload;
+  STALE_AGENT: StaleAgentPayload;
   PRIORITY_CHANGE: PriorityChangePayload;
   FORCE_TERMINATE_REQUEST: ForceTerminateRequestPayload;
   WORKER_SPAWNED: WorkerSpawnedPayload;
@@ -315,7 +315,7 @@ export const SIGNALS = {
   // Health monitoring
   HEALTH_CHECK: "HEALTH_CHECK" as const,
   HEALTH_CHECK_TIMER: "HEALTH_CHECK_TIMER" as const,
-  GUPP_VIOLATION: "GUPP_VIOLATION" as const,
+  STALE_AGENT: "STALE_AGENT" as const,
   AGENT_TIMEOUT: "AGENT_TIMEOUT" as const,
   FORCE_TERMINATE_REQUEST: "FORCE_TERMINATE_REQUEST" as const,
 } as const;
