@@ -19,6 +19,11 @@ import type { PeerManager } from "../peer/peer-manager.js";
 import type { ToolContext, HierarchyNode } from "./types.js";
 import { MCPToolError } from "./types.js";
 import type { Agent, AgentId } from "../store/types/index.js";
+import {
+  DoneSchema,
+  createDoneHandler,
+  DONE_TOOL_INFO,
+} from "./tools/done.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
 const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
@@ -926,6 +931,59 @@ export function createMCPServer(
       }
       throw new MCPToolError(
         `Failed to respond to peer request: ${error}`,
+        "INVALID_INPUT"
+      );
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: done
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool(DONE_TOOL_INFO.name, {
+    description: DONE_TOOL_INFO.description,
+    inputSchema: DoneSchema,
+  }, async (args) => {
+    const doneHandler = createDoneHandler(context, {
+      eventStore,
+      agentManager,
+      messageRouter,
+      taskManager,
+    });
+
+    try {
+      const result = await doneHandler(args as {
+        status: "completed" | "failed" | "blocked" | "deferred";
+        summary?: string;
+        details?: Record<string, unknown>;
+        task_id?: string;
+      });
+
+      // If shouldTerminate is true, schedule termination after this tool returns
+      // The agent will be terminated after the tool execution completes
+      if (result.shouldTerminate) {
+        // Schedule termination via agentManager
+        // We use setImmediate to ensure the tool response is sent first
+        setImmediate(async () => {
+          try {
+            await agentManager.terminate(context.agent_id, "completed");
+          } catch (error) {
+            debugLog(`[MCP done] Failed to terminate agent ${context.agent_id}: ${error}`);
+          }
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new MCPToolError(
+        `Failed to execute done: ${error instanceof Error ? error.message : error}`,
         "INVALID_INPUT"
       );
     }
