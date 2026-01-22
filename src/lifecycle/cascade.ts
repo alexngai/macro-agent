@@ -4,14 +4,22 @@
  * Handles cascading termination of child agents when a parent agent completes.
  * Children are terminated depth-first (grandchildren before children).
  *
- * Change consolidation is stubbed for Phase 6.
+ * Change consolidation merges child branches back to parent branches.
  *
  * @module lifecycle/cascade
  * @see s-32xs Self-Cleaning Workers spec
+ * @see s-bcqm Change Management spec
  */
 
 import type { AgentId } from "../store/types/index.js";
-import type { CascadeOptions, CascadeResult } from "./types.js";
+import type {
+  CascadeOptions,
+  CascadeResult,
+  ConsolidationResult,
+  ConsolidationOptions,
+} from "./types.js";
+import type { Workspace, WorkspaceManager } from "../workspace/types.js";
+import { attemptMerge, abortMerge, getCurrentBranch } from "./cleanup.js";
 
 // =============================================================================
 // Agent Manager Interface (to avoid circular dependency)
@@ -102,42 +110,116 @@ export async function cascadeTerminateChildren(
 }
 
 // =============================================================================
-// Change Consolidation (Stubbed for Phase 6)
+// Change Consolidation (Phase 6)
 // =============================================================================
+
+/**
+ * Workspace provider interface for change consolidation.
+ * Allows injection of workspace lookup without tight coupling.
+ */
+export interface WorkspaceProvider {
+  /** Get workspace for an agent */
+  getWorkspace(agentId: AgentId): Workspace | null;
+}
 
 /**
  * Terminate a child with change consolidation
  *
- * STUB: This is a placeholder for Phase 6 implementation.
- * Currently just delegates to regular cascade termination.
- *
- * In Phase 6, this will:
- * 1. Get child's workspace branch
- * 2. Create a merge request to parent's branch
- * 3. Wait for merge to complete (or queue it)
- * 4. Then terminate the child
+ * Merges the child's branch into the parent's branch before terminating.
+ * If a merge conflict occurs, the merge is aborted and the child is
+ * terminated with a "merge_conflict" reason.
  *
  * @param childId - Child agent to terminate
  * @param parentId - Parent agent to consolidate changes into
  * @param agentManager - Agent manager for operations
+ * @param workspaceProvider - Optional workspace provider for getting agent workspaces
+ * @param options - Optional consolidation options
+ * @returns ConsolidationResult indicating success or failure
  */
 export async function terminateWithChangeConsolidation(
   childId: AgentId,
-  _parentId: AgentId,
-  agentManager: CascadeAgentManager
-): Promise<void> {
-  // TODO Phase 6: Implement actual change consolidation
-  // 1. Get child workspace info
-  // 2. Create merge request: child.branch -> parent.branch
-  // 3. Submit to merge queue
-  // 4. Optionally wait for merge completion
+  parentId: AgentId,
+  agentManager: CascadeAgentManager,
+  workspaceProvider?: WorkspaceProvider,
+  options?: ConsolidationOptions
+): Promise<ConsolidationResult> {
+  // If no workspace provider, just terminate normally
+  if (!workspaceProvider) {
+    await agentManager.terminate(childId, "parent_stopped");
+    return { success: true, merged: false };
+  }
 
-  console.log(
-    `[cascade] TODO Phase 6: consolidateChanges(${childId}.workspace -> parent.workspace)`
+  // Get workspaces for both child and parent
+  const childWorkspace = workspaceProvider.getWorkspace(childId);
+  const parentWorkspace = workspaceProvider.getWorkspace(parentId);
+
+  // If either has no workspace, just terminate normally
+  if (!childWorkspace || !parentWorkspace) {
+    await agentManager.terminate(childId, "parent_stopped");
+    return { success: true, merged: false };
+  }
+
+  // Get the child's branch name
+  const childBranch = childWorkspace.branch;
+
+  // Verify the parent worktree is on the expected branch
+  const currentParentBranch = getCurrentBranch(parentWorkspace.path);
+  if (currentParentBranch !== parentWorkspace.branch) {
+    console.warn(
+      `[cascade] Parent worktree is on '${currentParentBranch}' but expected '${parentWorkspace.branch}'`
+    );
+    // Continue with merge anyway - use the actual current branch
+  }
+
+  // Attempt to merge child branch into parent's worktree
+  const mergeMessage =
+    options?.mergeMessage ??
+    `Merge changes from ${childId} (${childBranch})`;
+
+  const mergeResult = attemptMerge(childBranch, parentWorkspace.path, mergeMessage);
+
+  if (mergeResult.success) {
+    // Merge succeeded - terminate child normally
+    await agentManager.terminate(childId, "changes_consolidated");
+    return {
+      success: true,
+      merged: true,
+      mergeCommit: mergeResult.mergeCommit,
+    };
+  }
+
+  // Merge failed
+  if (mergeResult.conflicts && mergeResult.conflicts.length > 0) {
+    // Conflict detected - abort the merge and terminate with conflict status
+    abortMerge(parentWorkspace.path);
+
+    console.warn(
+      `[cascade] Merge conflict consolidating ${childId} -> ${parentId}: ${mergeResult.conflicts.join(", ")}`
+    );
+
+    // Terminate child with conflict reason
+    await agentManager.terminate(childId, "merge_conflict");
+
+    return {
+      success: false,
+      merged: false,
+      conflicts: mergeResult.conflicts,
+    };
+  }
+
+  // Non-conflict error
+  console.error(
+    `[cascade] Merge failed consolidating ${childId} -> ${parentId}: ${mergeResult.error}`
   );
 
-  // For now, just terminate the child normally
-  await agentManager.terminate(childId, "parent_stopped");
+  // Still terminate the child, but note the failure
+  await agentManager.terminate(childId, "merge_failed");
+
+  return {
+    success: false,
+    merged: false,
+    error: mergeResult.error,
+  };
 }
 
 // =============================================================================

@@ -201,3 +201,150 @@ export function commitChanges(
     return undefined;
   }
 }
+
+// =============================================================================
+// Merge Helpers (Phase 6 - Change Consolidation)
+// =============================================================================
+
+/**
+ * Result of a merge attempt
+ */
+export interface MergeResult {
+  /** Whether the merge succeeded */
+  success: boolean;
+
+  /** Merge commit hash if successful */
+  mergeCommit?: string;
+
+  /** List of conflicting files if merge failed */
+  conflicts?: string[];
+
+  /** Error message if merge failed for non-conflict reason */
+  error?: string;
+}
+
+/**
+ * Attempt to merge a source branch into the target branch.
+ *
+ * This performs the merge in the specified worktree, which should already
+ * be on the target branch.
+ *
+ * @param sourceBranch - Branch to merge from
+ * @param worktreePath - Path to worktree (should be on target branch)
+ * @param message - Optional merge commit message
+ * @returns MergeResult indicating success or conflict details
+ */
+export function attemptMerge(
+  sourceBranch: string,
+  worktreePath: string,
+  message?: string
+): MergeResult {
+  try {
+    // Build merge command
+    const mergeMessage = message ?? `Merge branch '${sourceBranch}'`;
+    const mergeCmd = `git merge "${sourceBranch}" --no-ff -m "${mergeMessage.replace(/"/g, '\\"')}"`;
+
+    execSync(mergeCmd, {
+      cwd: worktreePath,
+      encoding: "utf-8",
+      stdio: "pipe",
+    });
+
+    // Get merge commit hash
+    const mergeCommit = execSync("git rev-parse HEAD", {
+      cwd: worktreePath,
+      encoding: "utf-8",
+    }).trim();
+
+    return {
+      success: true,
+      mergeCommit,
+    };
+  } catch (error) {
+    // Check if this is a merge conflict
+    try {
+      const status = execSync("git status --porcelain", {
+        cwd: worktreePath,
+        encoding: "utf-8",
+      });
+
+      // Look for unmerged files (UU, AA, DD, etc.)
+      const conflictPatterns = /^(UU|AA|DD|AU|UA|DU|UD) /gm;
+      const conflicts: string[] = [];
+
+      for (const line of status.split("\n")) {
+        if (conflictPatterns.test(line)) {
+          // Reset regex state
+          conflictPatterns.lastIndex = 0;
+          // Extract filename (after the status prefix)
+          const filename = line.slice(3).trim();
+          if (filename) {
+            conflicts.push(filename);
+          }
+        }
+      }
+
+      if (conflicts.length > 0) {
+        return {
+          success: false,
+          conflicts,
+        };
+      }
+    } catch {
+      // Ignore status check errors
+    }
+
+    // Non-conflict error
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Abort an in-progress merge.
+ *
+ * @param worktreePath - Path to worktree with merge in progress
+ * @returns true if abort succeeded, false otherwise
+ */
+export function abortMerge(worktreePath: string): boolean {
+  try {
+    execSync("git merge --abort", {
+      cwd: worktreePath,
+      encoding: "utf-8",
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a worktree has a merge in progress.
+ *
+ * @param worktreePath - Path to worktree
+ * @returns true if merge is in progress
+ */
+export function hasMergeInProgress(worktreePath: string): boolean {
+  try {
+    const gitDir = execSync("git rev-parse --git-dir", {
+      cwd: worktreePath,
+      encoding: "utf-8",
+    }).trim();
+
+    // Check for MERGE_HEAD file
+    const fs = require("fs");
+    const path = require("path");
+    return fs.existsSync(path.join(worktreePath, gitDir, "MERGE_HEAD"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the current branch of a worktree.
+ * Alias for getCurrentBranch for clarity.
+ */
+export { getCurrentBranch as getWorktreeBranch };

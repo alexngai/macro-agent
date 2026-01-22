@@ -10,7 +10,22 @@ import {
   needsCascadeTermination,
   type CascadeAgent,
   type CascadeAgentManager,
+  type WorkspaceProvider,
 } from "../cascade.js";
+import type { Workspace } from "../../workspace/types.js";
+
+// Mock cleanup module
+vi.mock("../cleanup.js", () => ({
+  attemptMerge: vi.fn(),
+  abortMerge: vi.fn(),
+  getCurrentBranch: vi.fn(),
+}));
+
+import { attemptMerge, abortMerge, getCurrentBranch } from "../cleanup.js";
+
+const mockAttemptMerge = vi.mocked(attemptMerge);
+const mockAbortMerge = vi.mocked(abortMerge);
+const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
 
 // Create mock agent manager
 function createMockAgentManager(
@@ -19,6 +34,32 @@ function createMockAgentManager(
   return {
     getChildren: vi.fn((agentId: string) => childrenMap.get(agentId) ?? []),
     terminate: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+// Create mock workspace provider
+function createMockWorkspaceProvider(
+  workspaceMap: Map<string, Workspace>
+): WorkspaceProvider {
+  return {
+    getWorkspace: (agentId: string) => workspaceMap.get(agentId) ?? null,
+  };
+}
+
+// Helper to create a mock workspace
+function createMockWorkspace(
+  agentId: string,
+  branch: string,
+  path: string
+): Workspace {
+  return {
+    agentId,
+    branch,
+    path,
+    repoPath: "/repo",
+    type: "worktree",
+    isActive: true,
+    createdAt: Date.now(),
   };
 }
 
@@ -198,10 +239,16 @@ describe("cascade", () => {
   // ─────────────────────────────────────────────────────────────────────────────
 
   describe("terminateWithChangeConsolidation", () => {
-    it("should terminate child (stub behavior)", async () => {
+    beforeEach(() => {
+      mockAttemptMerge.mockReset();
+      mockAbortMerge.mockReset();
+      mockGetCurrentBranch.mockReset();
+    });
+
+    it("should terminate child without merge when no workspace provider", async () => {
       const agentManager = createMockAgentManager();
 
-      await terminateWithChangeConsolidation(
+      const result = await terminateWithChangeConsolidation(
         "child-1",
         "parent-1",
         agentManager
@@ -211,21 +258,245 @@ describe("cascade", () => {
         "child-1",
         "parent_stopped"
       );
+      expect(result.success).toBe(true);
+      expect(result.merged).toBe(false);
     });
 
-    it("should log TODO message", async () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    it("should terminate child without merge when child has no workspace", async () => {
       const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      // Only parent has workspace
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
+      );
+
+      expect(agentManager.terminate).toHaveBeenCalledWith(
+        "child-1",
+        "parent_stopped"
+      );
+      expect(result.success).toBe(true);
+      expect(result.merged).toBe(false);
+      expect(mockAttemptMerge).not.toHaveBeenCalled();
+    });
+
+    it("should terminate child without merge when parent has no workspace", async () => {
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      // Only child has workspace
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
+      );
+
+      expect(agentManager.terminate).toHaveBeenCalledWith(
+        "child-1",
+        "parent_stopped"
+      );
+      expect(result.success).toBe(true);
+      expect(result.merged).toBe(false);
+    });
+
+    it("should merge child branch into parent and terminate on success", async () => {
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      mockGetCurrentBranch.mockReturnValue("main");
+      mockAttemptMerge.mockReturnValue({
+        success: true,
+        mergeCommit: "abc123",
+      });
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
+      );
+
+      expect(mockAttemptMerge).toHaveBeenCalledWith(
+        "feature/child",
+        "/worktrees/parent",
+        "Merge changes from child-1 (feature/child)"
+      );
+      expect(agentManager.terminate).toHaveBeenCalledWith(
+        "child-1",
+        "changes_consolidated"
+      );
+      expect(result.success).toBe(true);
+      expect(result.merged).toBe(true);
+      expect(result.mergeCommit).toBe("abc123");
+    });
+
+    it("should use custom merge message when provided", async () => {
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      mockGetCurrentBranch.mockReturnValue("main");
+      mockAttemptMerge.mockReturnValue({ success: true, mergeCommit: "abc123" });
 
       await terminateWithChangeConsolidation(
         "child-1",
         "parent-1",
-        agentManager
+        agentManager,
+        workspaceProvider,
+        { mergeMessage: "Custom merge message" }
+      );
+
+      expect(mockAttemptMerge).toHaveBeenCalledWith(
+        "feature/child",
+        "/worktrees/parent",
+        "Custom merge message"
+      );
+    });
+
+    it("should abort merge and terminate with conflict status on merge conflict", async () => {
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      mockGetCurrentBranch.mockReturnValue("main");
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file1.ts", "file2.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
+      );
+
+      expect(mockAbortMerge).toHaveBeenCalledWith("/worktrees/parent");
+      expect(agentManager.terminate).toHaveBeenCalledWith(
+        "child-1",
+        "merge_conflict"
+      );
+      expect(result.success).toBe(false);
+      expect(result.merged).toBe(false);
+      expect(result.conflicts).toEqual(["file1.ts", "file2.ts"]);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Merge conflict")
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it("should terminate with merge_failed on non-conflict error", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      mockGetCurrentBranch.mockReturnValue("main");
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        error: "Branch not found",
+      });
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
+      );
+
+      expect(agentManager.terminate).toHaveBeenCalledWith(
+        "child-1",
+        "merge_failed"
+      );
+      expect(result.success).toBe(false);
+      expect(result.merged).toBe(false);
+      expect(result.error).toBe("Branch not found");
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Merge failed")
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it("should warn but continue when parent worktree is on unexpected branch", async () => {
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const agentManager = createMockAgentManager();
+      const workspaceMap = new Map<string, Workspace>();
+      workspaceMap.set(
+        "child-1",
+        createMockWorkspace("child-1", "feature/child", "/worktrees/child")
+      );
+      workspaceMap.set(
+        "parent-1",
+        createMockWorkspace("parent-1", "main", "/worktrees/parent")
+      );
+      const workspaceProvider = createMockWorkspaceProvider(workspaceMap);
+
+      // Parent worktree is on different branch than expected
+      mockGetCurrentBranch.mockReturnValue("develop");
+      mockAttemptMerge.mockReturnValue({ success: true, mergeCommit: "abc123" });
+
+      const result = await terminateWithChangeConsolidation(
+        "child-1",
+        "parent-1",
+        agentManager,
+        workspaceProvider
       );
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("TODO Phase 6")
+        expect.stringContaining("expected 'main'")
       );
+      // Should still attempt the merge
+      expect(mockAttemptMerge).toHaveBeenCalled();
+      expect(result.success).toBe(true);
       consoleSpy.mockRestore();
     });
   });

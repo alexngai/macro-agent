@@ -40,6 +40,11 @@ import type {
 import { AgentManagerError } from "./types.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import type { WorkspaceManager, Workspace } from "../workspace/types.js";
+import {
+  terminateWithChangeConsolidation,
+  type WorkspaceProvider,
+  type CascadeAgentManager,
+} from "../lifecycle/cascade.js";
 
 // ─────────────────────────────────────────────────────────────────
 // AgentManager Interface
@@ -535,10 +540,39 @@ export function createAgentManager(
     notifyLifecycle({ type: "stopped", agent: updatedAgent, reason });
 
     // Terminate child agents when parent stops (always cascade)
+    // Use change consolidation to merge child branches back to parent before terminating
     const children = getChildren(agentId);
+    const parentWorkspace = agentWorkspaces.get(agentId);
+
     for (const child of children) {
       if (child.state === "running" || child.state === "spawning") {
-        await terminate(child.id, "parent_stopped");
+        // Create workspace provider for change consolidation
+        const workspaceProvider: WorkspaceProvider | undefined = parentWorkspace
+          ? {
+              getWorkspace: (id: AgentId) => agentWorkspaces.get(id) ?? null,
+            }
+          : undefined;
+
+        // Create cascade adapter for termination
+        const cascadeAdapter: CascadeAgentManager = {
+          getChildren: (id) =>
+            getChildren(id).map((c) => ({
+              id: c.id,
+              state: c.state,
+              parent: c.parent,
+            })),
+          terminate: async (id, terminateReason) => {
+            await terminate(id, terminateReason as AgentStopReason);
+          },
+        };
+
+        // Use terminateWithChangeConsolidation to merge changes before terminating
+        await terminateWithChangeConsolidation(
+          child.id,
+          agentId,
+          cascadeAdapter,
+          workspaceProvider
+        );
       }
     }
   }

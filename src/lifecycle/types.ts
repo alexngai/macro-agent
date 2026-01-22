@@ -202,3 +202,38 @@ export interface CascadeResult {
   /** Any errors during cascade */
   errors?: Array<{ agentId: AgentId; error: string }>;
 }
+
+// =============================================================================
+// Change Consolidation Types (Phase 6)
+// =============================================================================
+
+/**
+ * Result of change consolidation during termination
+ */
+export interface ConsolidationResult {
+  /** Whether the consolidation was successful */
+  success: boolean;
+
+  /** Whether changes were actually merged */
+  merged: boolean;
+
+  /** Merge commit hash if merge was performed */
+  mergeCommit?: string;
+
+  /** List of conflicting files if merge failed */
+  conflicts?: string[];
+
+  /** Error message if consolidation failed */
+  error?: string;
+}
+
+/**
+ * Options for change consolidation
+ */
+export interface ConsolidationOptions {
+  /** Whether to emit CONFLICT_DETECTED signal on merge failure */
+  emitConflictSignal?: boolean;
+
+  /** Custom merge commit message */
+  mergeMessage?: string;
+}

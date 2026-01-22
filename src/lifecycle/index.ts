@@ -33,6 +33,10 @@ export type {
   // Cascade types
   CascadeOptions,
   CascadeResult,
+
+  // Consolidation types (Phase 6)
+  ConsolidationResult,
+  ConsolidationOptions,
 } from "./types.js";
 
 export { DEFAULT_LIFECYCLE_CONFIG } from "./types.js";
@@ -94,4 +98,5 @@ export {
   // Types
   type CascadeAgent,
   type CascadeAgentManager,
+  type WorkspaceProvider,
 } from "./cascade.js";
