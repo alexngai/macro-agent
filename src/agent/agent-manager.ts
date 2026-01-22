@@ -39,6 +39,7 @@ import type {
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
 import { generateSystemPrompt } from "./system-prompt.js";
+import type { WorkspaceManager, Workspace } from "../workspace/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // AgentManager Interface
@@ -177,6 +178,13 @@ export interface AgentManagerConfig {
 
   /** Default working directory */
   defaultCwd?: string;
+
+  /**
+   * Optional WorkspaceManager for workspace isolation.
+   * When provided, agents with workspace-enabled roles will get
+   * isolated git worktrees.
+   */
+  workspaceManager?: WorkspaceManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -192,10 +200,14 @@ export function createAgentManager(
     defaultPermissionMode = "auto-approve",
     defaultAgentType = "claude-code",
     defaultCwd = process.cwd(),
+    workspaceManager,
   } = config;
 
   // Active sessions tracked in memory
   const activeSessions = new Map<AgentId, ActiveSession>();
+
+  // Agent workspace mappings (agentId → workspace)
+  const agentWorkspaces = new Map<AgentId, Workspace>();
 
   // Lifecycle event listeners
   const lifecycleListeners = new Set<AgentLifecycleCallback>();
@@ -215,6 +227,11 @@ export function createAgentManager(
       topics = [],
       config: agentConfig,
       agentType = defaultAgentType,
+      // Workspace-related fields (Phase 2)
+      role,
+      streamId,
+      streamConfig,
+      dataplaneTaskId,
     } = options;
 
     // Generate IDs upfront (including session_id so we can persist before starting MCP)
@@ -361,6 +378,53 @@ export function createAgentManager(
       // Get the agent from materialized view
       const agent = eventStore.getAgent(agentId)!;
 
+      // ─────────────────────────────────────────────────────────────────
+      // Workspace Creation (Phase 2)
+      // ─────────────────────────────────────────────────────────────────
+      let workspace: Workspace | undefined;
+      let resolvedStreamId = streamId;
+
+      if (workspaceManager && role) {
+        try {
+          workspace = await createWorkspaceForRole(
+            workspaceManager,
+            agentId,
+            role,
+            {
+              streamId,
+              streamConfig,
+              dataplaneTaskId,
+              cwd,
+            }
+          );
+
+          if (workspace) {
+            agentWorkspaces.set(agentId, workspace);
+            resolvedStreamId = workspace.streamId;
+
+            // Register with parent coordinator if applicable
+            if (
+              parent &&
+              (role === "worker" || role === "integrator")
+            ) {
+              const parentWorkspace = agentWorkspaces.get(parent);
+              if (parentWorkspace?.role === "coordinator") {
+                workspaceManager.registerChildWorkspace(
+                  parent,
+                  agentId,
+                  workspace.path
+                );
+              }
+            }
+          }
+        } catch (wsError) {
+          console.error(
+            `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`
+          );
+          // Continue without workspace - don't fail the spawn
+        }
+      }
+
       // Notify lifecycle listeners
       notifyLifecycle({ type: "spawned", agent });
       notifyLifecycle({ type: "started", agent });
@@ -370,6 +434,8 @@ export function createAgentManager(
         session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
         agent,
         session,
+        workspace,
+        streamId: resolvedStreamId,
       };
     } catch (error) {
       // Clean up the spawn event we already emitted
@@ -412,6 +478,21 @@ export function createAgentManager(
         // Ignore errors during cleanup
       }
       activeSessions.delete(agentId);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Workspace Cleanup (Phase 2)
+    // ─────────────────────────────────────────────────────────────────
+    if (workspaceManager && agentWorkspaces.has(agentId)) {
+      try {
+        workspaceManager.deallocateWorkspace(agentId);
+        agentWorkspaces.delete(agentId);
+      } catch (wsError) {
+        console.error(
+          `[AgentManager] Failed to deallocate workspace for ${agentId}: ${wsError}`
+        );
+        // Continue with termination even if workspace cleanup fails
+      }
     }
 
     // Emit terminate event
@@ -811,4 +892,94 @@ export function createAgentManager(
     onLifecycleEvent,
     close,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Workspace Creation Helper (Phase 2)
+// ─────────────────────────────────────────────────────────────────
+
+interface CreateWorkspaceOptions {
+  streamId?: string;
+  streamConfig?: import("../workspace/types.js").StreamConfig;
+  dataplaneTaskId?: string;
+  cwd: string;
+}
+
+/**
+ * Create a workspace for an agent based on their role.
+ *
+ * @param workspaceManager - WorkspaceManager instance
+ * @param agentId - Agent ID
+ * @param role - Agent role (e.g., 'worker', 'coordinator', 'integrator')
+ * @param options - Additional options
+ * @returns Created workspace or undefined
+ */
+async function createWorkspaceForRole(
+  workspaceManager: WorkspaceManager,
+  agentId: AgentId,
+  role: string,
+  options: CreateWorkspaceOptions
+): Promise<Workspace | undefined> {
+  const { streamId, streamConfig, dataplaneTaskId } = options;
+
+  switch (role) {
+    case "coordinator": {
+      // Coordinators create a new integration stream
+      if (!streamConfig) {
+        console.warn(
+          `[AgentManager] Coordinator ${agentId} spawn missing streamConfig, skipping workspace`
+        );
+        return undefined;
+      }
+
+      const newStreamId = workspaceManager.createIntegrationStream(
+        agentId,
+        streamConfig
+      );
+
+      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+    }
+
+    case "integrator": {
+      // Integrators join an existing stream
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] Integrator ${agentId} spawn missing streamId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+    }
+
+    case "worker":
+    case "worker.resolver": {
+      // Workers need streamId and either dataplaneTaskId or create a new task
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] Worker ${agentId} spawn missing streamId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      // Use provided task ID or skip (task should be created separately)
+      const taskId = dataplaneTaskId;
+      if (!taskId) {
+        console.warn(
+          `[AgentManager] Worker ${agentId} spawn missing dataplaneTaskId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+    }
+
+    case "monitor":
+      // Monitors don't need workspaces
+      return undefined;
+
+    default:
+      // Unknown role - no workspace
+      return undefined;
+  }
 }

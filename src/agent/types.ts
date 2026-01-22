@@ -10,6 +10,11 @@ import type {
   Agent,
   AgentState,
 } from "../store/types/index.js";
+import type {
+  StreamId,
+  StreamConfig,
+  Workspace,
+} from "../workspace/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Spawn Options
@@ -45,6 +50,34 @@ export interface SpawnAgentOptions {
 
   /** Optional agent type (defaults to "claude-code") */
   agentType?: string;
+
+  // ─────────────────────────────────────────────────────────────────
+  // Workspace-related fields (Phase 2)
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Agent role name (e.g., 'worker', 'coordinator', 'integrator', 'monitor').
+   * If not provided, role is inferred from parent presence.
+   */
+  role?: string;
+
+  /**
+   * Stream ID to join (for workers and integrators).
+   * Required for workers and integrators when using workspace isolation.
+   */
+  streamId?: StreamId;
+
+  /**
+   * Stream configuration for creating a new integration stream.
+   * Used by coordinators to create their integration branch.
+   */
+  streamConfig?: StreamConfig;
+
+  /**
+   * Dataplane task ID to claim (for workers).
+   * If provided, the worker will claim this task and work on it.
+   */
+  dataplaneTaskId?: string;
 }
 
 /**
@@ -96,6 +129,12 @@ export interface SpawnedAgent {
 
   /** Active session for interaction */
   session: Session;
+
+  /** Workspace assigned to the agent (if any) */
+  workspace?: Workspace;
+
+  /** Stream ID the agent belongs to (if any) */
+  streamId?: StreamId;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -235,6 +274,19 @@ export interface SystemPromptContext {
 
   /** Available MCP tools */
   mcpTools?: string[];
+
+  // ─────────────────────────────────────────────────────────────────
+  // Workspace-related context (Phase 2)
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Agent role name (e.g., 'worker', 'coordinator') */
+  role?: string;
+
+  /** Workspace assigned to the agent */
+  workspace?: Workspace;
+
+  /** Stream ID the agent belongs to */
+  streamId?: StreamId;
 }
 
 /**
