@@ -364,6 +364,7 @@ export function createAgentManager(
         task_id: taskId,
         subscribe_parent: subscribeParent,
         additional_topics: topics,
+        role: role ?? undefined,
       });
 
       // Track active session

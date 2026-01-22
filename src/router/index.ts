@@ -94,3 +94,46 @@ export {
   createSignalMessage,
   createContentMessage,
 } from './message-types.js';
+
+// Broadcast channel resolution (Phase 5)
+export {
+  matchesBroadcastScope,
+  getBroadcastRecipients,
+  resolveBroadcastTarget,
+} from './broadcast.js';
+
+export type {
+  BroadcastAgentInfo,
+  BroadcastAgentSource,
+} from './broadcast.js';
+
+// Role channel resolution (Phase 5)
+export {
+  matchesRole,
+  getSubtreeIds,
+  resolveRoleTarget,
+  getAgentsByRole,
+} from './role-resolver.js';
+
+export type {
+  RoleAgentInfo,
+  RoleAgentSource,
+} from './role-resolver.js';
+
+// Priority-based wake decisions (Phase 5)
+export {
+  determineWakeAction,
+  getWakeDecision,
+  shouldWakeAgent,
+  shouldInterruptAgent,
+  comparePriority as compareMessagePriority,
+  PRIORITY_VALUES as MESSAGE_PRIORITY_VALUES,
+} from './wake.js';
+
+export type {
+  SessionChecker,
+  WakeDecision,
+} from './wake.js';
+
+// Wake handler type from message router
+export type { WakeHandler } from './message-router.js';

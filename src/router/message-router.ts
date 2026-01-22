@@ -33,8 +33,23 @@ import type {
   TruncationConfig,
   AgentSpawner,
   AgentSessionChecker,
+  MessagePriority,
+  WakeAction,
 } from "./types.js";
 import { RoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
+import {
+  resolveBroadcastTarget,
+  type BroadcastAgentSource,
+} from "./broadcast.js";
+import {
+  resolveRoleTarget,
+  type RoleAgentSource,
+} from "./role-resolver.js";
+import {
+  getWakeDecision,
+  type SessionChecker,
+  type WakeDecision,
+} from "./wake.js";
 
 /**
  * MessageRouter interface
@@ -131,6 +146,15 @@ export interface MessageRouter {
 }
 
 /**
+ * Callback invoked when a message determines a wake action
+ */
+export type WakeHandler = (
+  agentId: AgentId,
+  decision: WakeDecision,
+  messageId: EventId
+) => void;
+
+/**
  * MessageRouter configuration
  */
 export interface MessageRouterConfig {
@@ -145,6 +169,16 @@ export interface MessageRouterConfig {
    * Used to determine if a previous agent can be reused.
    */
   agentSessionChecker?: AgentSessionChecker;
+  /**
+   * Optional session checker for priority-based wake decisions.
+   * Provides information about agent session state.
+   */
+  sessionChecker?: SessionChecker;
+  /**
+   * Optional callback invoked when a message triggers a wake action.
+   * Used to actually wake/inject/interrupt agents.
+   */
+  wakeHandler?: WakeHandler;
 }
 
 /**
@@ -157,6 +191,8 @@ export function createMessageRouter(
   const truncationConfig = config.truncation ?? DEFAULT_TRUNCATION_CONFIG;
   const agentSpawner = config.agentSpawner;
   const agentSessionChecker = config.agentSessionChecker;
+  const sessionChecker = config.sessionChecker;
+  const wakeHandler = config.wakeHandler;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -166,12 +202,24 @@ export function createMessageRouter(
   // ─────────────────────────────────────────────────────────────────
 
   async function send(request: SendMessageRequest): Promise<SentMessage> {
-    const { from, to, content, correlation_id } = request;
+    const { from, to, content, correlation_id, priority = "normal" } = request;
 
-    // Validate target
-    if (!to.agent_id && !to.task_id && !to.topic) {
+    // Validate target - at least one target type must be specified
+    if (!to.agent_id && !to.task_id && !to.topic && !to.broadcast && !to.role) {
       throw new RoutingError("No target specified", "NO_TARGET", to);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Handle multicast targets (broadcast, role)
+    // ─────────────────────────────────────────────────────────────────
+
+    if (to.broadcast || to.role) {
+      return sendMulticast(request, priority);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Handle unicast targets (agent_id, task_id, topic)
+    // ─────────────────────────────────────────────────────────────────
 
     // Resolve recipients and build effective target
     const resolvedTarget = await resolveTarget(to);
@@ -187,10 +235,19 @@ export function createMessageRouter(
       payload: {
         content,
         correlation_id,
+        priority,
         // Keep original target info for context
         original_target: to.task_id ? { task_id: to.task_id } : undefined,
       },
     });
+
+    // Handle priority-based wake for direct agent target
+    if (resolvedTarget.agent_id && sessionChecker && wakeHandler) {
+      const decision = getWakeDecision(resolvedTarget.agent_id, priority, sessionChecker);
+      if (decision.shouldWake || decision.shouldInterrupt) {
+        wakeHandler(resolvedTarget.agent_id, decision, event.id);
+      }
+    }
 
     // Route to lineage subscribers if this is from an ancestor
     // (children with lineage subscription to themselves receive messages from ancestors)
@@ -202,6 +259,95 @@ export function createMessageRouter(
       event.timestamp,
       correlation_id
     );
+
+    return {
+      id: event.id,
+      from,
+      to,
+      content,
+      timestamp: event.timestamp,
+      correlation_id,
+    };
+  }
+
+  /**
+   * Send a message to multiple recipients (broadcast or role channels).
+   * Fans out to all matching agents at send time.
+   */
+  async function sendMulticast(
+    request: SendMessageRequest,
+    priority: MessagePriority
+  ): Promise<SentMessage> {
+    const { from, to, content, correlation_id } = request;
+
+    // Create agent source adapter for resolution functions
+    const agentSource: BroadcastAgentSource & RoleAgentSource = {
+      listAgents: () => eventStore.listAgents(),
+      getAgent: (id) => eventStore.getAgent(id),
+    };
+
+    // Resolve recipients based on target type
+    let recipientIds: AgentId[] = [];
+
+    if (to.broadcast) {
+      recipientIds = resolveBroadcastTarget(agentSource, to.broadcast);
+    } else if (to.role) {
+      recipientIds = resolveRoleTarget(agentSource, to.role);
+    }
+
+    // Emit a single message event with multicast metadata
+    const event = eventStore.emit({
+      type: "message",
+      source: {
+        agent_id: from.agent_id,
+        task_id: from.task_id,
+      },
+      target: {
+        // For multicast, we emit to each recipient individually
+        // The original multicast info is preserved in payload
+      },
+      payload: {
+        content,
+        correlation_id,
+        priority,
+        multicast: {
+          type: to.broadcast ? "broadcast" : "role",
+          scope: to.broadcast?.scope,
+          role: to.role?.role,
+          coordinatorId: to.role?.coordinatorId,
+          recipientCount: recipientIds.length,
+        },
+      },
+    });
+
+    // Fan out: emit individual message events to each recipient
+    for (const recipientId of recipientIds) {
+      eventStore.emit({
+        type: "message",
+        source: {
+          agent_id: from.agent_id,
+          task_id: from.task_id,
+        },
+        target: {
+          agent_id: recipientId,
+        },
+        payload: {
+          content,
+          correlation_id,
+          priority,
+          via: to.broadcast ? "broadcast" : "role",
+          original_message_id: event.id,
+        },
+      });
+
+      // Handle priority-based wake for each recipient
+      if (sessionChecker && wakeHandler) {
+        const decision = getWakeDecision(recipientId, priority, sessionChecker);
+        if (decision.shouldWake || decision.shouldInterrupt) {
+          wakeHandler(recipientId, decision, event.id);
+        }
+      }
+    }
 
     return {
       id: event.id,
@@ -338,6 +484,7 @@ export function createMessageRouter(
       task_id,
       subscribe_parent = true,
       additional_topics = [],
+      role,
     } = options;
 
     // 1. Subscribe agent to its own direct channel
@@ -359,6 +506,11 @@ export function createMessageRouter(
     // 5. Subscribe to additional topics
     for (const topic of additional_topics) {
       subscribe(agent_id, { type: "topic", target: topic });
+    }
+
+    // 6. Auto-subscribe to role channel if role is provided (Tier 1: Gastown model)
+    if (role) {
+      subscribe(agent_id, { type: "role", target: role });
     }
   }
 
