@@ -19,7 +19,9 @@ export type TaskAction =
   | "unassigned"
   | "status_change"
   | "completed"
-  | "failed";
+  | "failed"
+  | "blocker_added"
+  | "blocker_removed";
 
 // Artifact reference
 export interface ArtifactRef {
@@ -44,6 +46,7 @@ export interface Task {
   assigned_agent?: AgentId;
   parent_task?: TaskId;
   subtasks?: TaskId[];
+  blockers?: TaskId[];
   created_at: Timestamp;
   started_at?: Timestamp;
   completed_at?: Timestamp;

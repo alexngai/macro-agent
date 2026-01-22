@@ -1239,6 +1239,7 @@ function applyTaskEvent(
         assigned_agent: '',
         parent_task: details.parent_task ?? '',
         subtasks: JSON.stringify([]),
+        blockers: JSON.stringify([]),
         created_at: event.timestamp,
         started_at: 0,
         completed_at: 0,
@@ -1354,6 +1355,35 @@ function applyTaskEvent(
       });
       break;
     }
+    case 'blocker_added': {
+      const details = payload.details as { blocker_id: TaskId };
+      const existing = store.getRow('tasks', taskId);
+      const blockers = existing.blockers
+        ? JSON.parse(existing.blockers as string)
+        : [];
+      if (!blockers.includes(details.blocker_id)) {
+        blockers.push(details.blocker_id);
+        store.setPartialRow('tasks', taskId, {
+          blockers: JSON.stringify(blockers),
+        });
+      }
+      break;
+    }
+    case 'blocker_removed': {
+      const details = payload.details as { blocker_id: TaskId };
+      const existing = store.getRow('tasks', taskId);
+      const blockers = existing.blockers
+        ? JSON.parse(existing.blockers as string)
+        : [];
+      const idx = blockers.indexOf(details.blocker_id);
+      if (idx >= 0) {
+        blockers.splice(idx, 1);
+        store.setPartialRow('tasks', taskId, {
+          blockers: JSON.stringify(blockers),
+        });
+      }
+      break;
+    }
   }
 
   const task = rowToTask(store.getRow('tasks', taskId));
@@ -1393,6 +1423,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     assigned_agent: (row.assigned_agent as string) || undefined,
     parent_task: (row.parent_task as string) || undefined,
     subtasks: row.subtasks ? JSON.parse(row.subtasks as string) : undefined,
+    blockers: row.blockers ? JSON.parse(row.blockers as string) : undefined,
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     completed_at: (row.completed_at as number) || undefined,

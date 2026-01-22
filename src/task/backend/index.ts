@@ -56,3 +56,20 @@ export type {
   ArtifactRef,
   AgentHistoryEntry,
 } from "./types.js";
+
+// =============================================================================
+// Implementations
+// =============================================================================
+
+export {
+  InMemoryTaskBackend,
+  createInMemoryTaskBackend,
+  TaskBackendError,
+} from "./memory.js";
+
+export {
+  InMemoryTaskToolProvider,
+  createTaskToolProvider,
+} from "./tool-provider.js";
+
+export type { TaskToolContext, GetToolContext } from "./tool-provider.js";
