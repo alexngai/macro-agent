@@ -284,6 +284,7 @@ export function createAgentManager(
         task,
         task_id: taskId,
         parent: parent ?? null,
+        role: role ?? undefined,
         config: agentConfig ?? {},
         cwd,
       },

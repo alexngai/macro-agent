@@ -55,6 +55,10 @@ export interface DoneToolDeps {
   agentManager: AgentManager;
   messageRouter: MessageRouter;
   taskManager: TaskManager;
+  workspaceManager?: {
+    /** Get workspace for an agent */
+    getWorkspace(agentId: string): { integrationBranch?: string } | undefined;
+  };
 }
 
 // =============================================================================
@@ -74,10 +78,9 @@ export function hasLifecycleDoneCapability(
     return { hasCapability: false, role: "unknown" };
   }
 
-  // Get the agent's role from config or default to "worker"
-  // Note: Role is typically set at spawn time but may not be persisted
-  // This is a simplification - full role lookup would query RoleRegistry
-  const role = (agent.config as Record<string, unknown>)?.role as string ?? "worker";
+  // Get the agent's role (set at spawn time) or default to "worker"
+  // In the future, this should query the RoleRegistry for full capability lookup
+  const role = agent.role ?? "worker";
 
   // Check if the role has lifecycle.done capability
   // For now, we check based on known roles that have this capability
@@ -107,9 +110,17 @@ export function hasLifecycleDoneCapability(
 export function buildLifecycleContext(
   toolContext: ToolContext,
   eventStore: EventStore,
-  role: string
+  role: string,
+  workspaceManager?: DoneToolDeps["workspaceManager"]
 ): LifecycleContext {
   const agent = eventStore.getAgent(toolContext.agent_id);
+
+  // Try to get integration branch from workspace manager
+  let integrationBranch: string | undefined;
+  if (workspaceManager) {
+    const workspace = workspaceManager.getWorkspace(toolContext.agent_id);
+    integrationBranch = workspace?.integrationBranch;
+  }
 
   return {
     agentId: toolContext.agent_id,
@@ -118,6 +129,7 @@ export function buildLifecycleContext(
     parentId: agent?.parent ?? undefined,
     workspacePath: toolContext.cwd,
     branch: undefined, // Will be detected from workspace if needed
+    integrationBranch,
   };
 }
 
@@ -135,7 +147,7 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
     details?: Record<string, unknown>;
     task_id?: string;
   }): Promise<DoneResult> => {
-    const { eventStore, agentManager, messageRouter, taskManager } = deps;
+    const { eventStore, agentManager, messageRouter, taskManager, workspaceManager } = deps;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Step 1: Check capability
@@ -160,7 +172,12 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
     // Step 2: Build context and detect cleanup status
     // ─────────────────────────────────────────────────────────────────────────
 
-    const lifecycleContext = buildLifecycleContext(context, eventStore, role);
+    const lifecycleContext = buildLifecycleContext(
+      context,
+      eventStore,
+      role,
+      workspaceManager
+    );
 
     const cleanupStatus = detectCleanupStatus(lifecycleContext, {
       messageRouter,

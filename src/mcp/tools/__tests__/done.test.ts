@@ -32,12 +32,13 @@ const mockDetectCleanupStatus = vi.mocked(detectCleanupStatus);
 const mockDispatchDone = vi.mocked(dispatchDone);
 
 // Create mock event store
-function createMockEventStore(agentConfig?: Record<string, unknown>) {
+function createMockEventStore(options?: { role?: string }) {
   return {
     getAgent: vi.fn().mockReturnValue({
       id: "agent-1",
       parent: "parent-1",
-      config: agentConfig ?? {},
+      role: options?.role,
+      config: {},
     }),
   };
 }
@@ -208,6 +209,43 @@ describe("done tool", () => {
       const result = buildLifecycleContext(toolContext, eventStore as any, "worker");
 
       expect(result.parentId).toBeUndefined();
+    });
+
+    it("should include integrationBranch from workspace manager", () => {
+      const eventStore = createMockEventStore();
+      const toolContext: ToolContext = {
+        agent_id: "agent-1",
+        session_id: "session-1",
+        cwd: "/workspace",
+      };
+      const workspaceManager = {
+        getWorkspace: vi.fn().mockReturnValue({
+          integrationBranch: "stream/abc123",
+        }),
+      };
+
+      const result = buildLifecycleContext(
+        toolContext,
+        eventStore as any,
+        "worker",
+        workspaceManager
+      );
+
+      expect(result.integrationBranch).toBe("stream/abc123");
+      expect(workspaceManager.getWorkspace).toHaveBeenCalledWith("agent-1");
+    });
+
+    it("should handle missing workspace manager", () => {
+      const eventStore = createMockEventStore();
+      const toolContext: ToolContext = {
+        agent_id: "agent-1",
+        session_id: "session-1",
+        cwd: "/workspace",
+      };
+
+      const result = buildLifecycleContext(toolContext, eventStore as any, "worker");
+
+      expect(result.integrationBranch).toBeUndefined();
     });
   });
 

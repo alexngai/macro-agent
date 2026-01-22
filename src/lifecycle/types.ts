@@ -108,6 +108,9 @@ export interface LifecycleContext {
 
   /** Branch name for the agent's workspace */
   branch?: string;
+
+  /** Integration branch for merge requests (target branch) */
+  integrationBranch?: string;
 }
 
 /**

@@ -35,6 +35,7 @@ export interface Agent {
   stop_reason?: StopReason;
   task: string;
   task_id?: TaskId;
+  role?: string;
   config: AgentConfig;
   cwd: string;
   created_at: Timestamp;

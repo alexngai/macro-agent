@@ -3,9 +3,13 @@
  *
  * Handles done() for worker agents:
  * - Commits workspace changes (no push - bare repo shared)
- * - Cascades terminate to children (basic, no consolidation yet)
+ * - Signals descendants to prepare for termination
  * - Emits WORKER_DONE signal
  * - Emits MERGE_REQUEST signal (queue submission stubbed for Phase 6)
+ *
+ * Note: Actual termination is handled by AgentManager after done() returns.
+ * The AgentManager.terminate() method cascades depth-first to all children.
+ * This handler emits signals for notification only.
  *
  * @module lifecycle/handlers/worker
  * @see s-32xs Self-Cleaning Workers spec
@@ -20,6 +24,11 @@ import type {
   DoneHandlerResult,
 } from "../types.js";
 import { commitChanges, getCurrentBranch } from "../cleanup.js";
+import {
+  getAllDescendants,
+  needsCascadeTermination,
+  type CascadeAgentManager,
+} from "../cascade.js";
 
 // =============================================================================
 // Handler Dependencies
@@ -109,18 +118,20 @@ export async function handleWorkerDone(
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (args.status === "completed" && context.workspacePath) {
-    const branch = context.branch ?? getCurrentBranch(context.workspacePath);
-    if (branch) {
+    const sourceBranch = context.branch ?? getCurrentBranch(context.workspacePath);
+    const targetBranch = context.integrationBranch ?? "integration";
+
+    if (sourceBranch) {
       try {
         // Emit the signal - actual queue submission is stubbed for Phase 6
         deps.messageRouter.emitStatus({
           from: { agent_id: context.agentId },
           status_type: "checkpoint",
-          summary: `Merge request for branch ${branch}`,
+          summary: `Merge request for branch ${sourceBranch}`,
           details: {
             signal: "MERGE_REQUEST",
-            sourceBranch: branch,
-            targetBranch: "integration", // TODO: Get from parent/config
+            sourceBranch,
+            targetBranch,
             taskId: context.taskId,
             workerId: context.agentId,
           },
@@ -128,8 +139,10 @@ export async function handleWorkerDone(
         signalsEmitted.push("MERGE_REQUEST");
 
         // TODO Phase 6: Submit to actual merge queue
-        // mergeQueue.submit({ sourceBranch: branch, targetBranch, taskId, workerId });
-        cleanupActions.push(`MERGE_REQUEST emitted for ${branch} (queue submission stubbed for Phase 6)`);
+        // mergeQueue.submit({ sourceBranch, targetBranch, taskId, workerId });
+        cleanupActions.push(
+          `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission stubbed for Phase 6)`
+        );
       } catch (error) {
         warnings.push(
           `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`
@@ -139,38 +152,64 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 4: Cascade terminate to children (basic - no consolidation)
+  // Step 4: Signal descendants to prepare for termination
   // ─────────────────────────────────────────────────────────────────────────────
+  // Note: This is notification only. Actual termination is handled by
+  // AgentManager.terminate() which cascades depth-first after done() returns.
 
   try {
-    const children = await deps.agentManager.getChildren(context.agentId);
-    if (children.length > 0) {
-      cleanupActions.push(`Signaling ${children.length} child(ren) to terminate`);
+    // Create cascade adapter from AgentManager
+    const cascadeAdapter: CascadeAgentManager = {
+      getChildren: (agentId) => {
+        const children = deps.agentManager.getChildren(agentId);
+        return children.map((c) => ({
+          id: c.id,
+          state: c.state,
+          parent: c.parent,
+        }));
+      },
+      terminate: async () => {
+        // No-op: actual termination handled by AgentManager after done()
+      },
+    };
 
-      // Signal children - actual termination happens after tool execution
-      // The cascade will be performed by the MCP server after done() returns
-      for (const child of children) {
-        try {
-          // Emit termination signal to each child
-          deps.messageRouter.emitStatus({
-            from: { agent_id: context.agentId },
-            status_type: "completed",
-            summary: `Parent ${context.agentId} signaling termination`,
-            details: {
-              signal: "FORCE_TERMINATE_REQUEST",
-              agentId: child.id,
-              reason: "parent_stopped",
-              requestedBy: context.agentId,
-            },
-          });
-        } catch {
-          warnings.push(`Failed to signal child ${child.id}`);
+    // Check if cascade signaling is needed
+    if (needsCascadeTermination(context.agentId, cascadeAdapter)) {
+      // Get ALL descendants (children, grandchildren, etc.)
+      const descendants = getAllDescendants(context.agentId, cascadeAdapter);
+      const activeDescendants = descendants.filter(
+        (d) => d.state === "running" || d.state === "spawning"
+      );
+
+      if (activeDescendants.length > 0) {
+        cleanupActions.push(
+          `Signaling ${activeDescendants.length} descendant(s) to terminate`
+        );
+
+        // Signal all active descendants - notification for cleanup preparation
+        // Actual termination will cascade depth-first via AgentManager
+        for (const descendant of activeDescendants) {
+          try {
+            deps.messageRouter.emitStatus({
+              from: { agent_id: context.agentId },
+              status_type: "completed",
+              summary: `Parent ${context.agentId} signaling termination`,
+              details: {
+                signal: "FORCE_TERMINATE_REQUEST",
+                agentId: descendant.id,
+                reason: "parent_stopped",
+                requestedBy: context.agentId,
+              },
+            });
+          } catch {
+            warnings.push(`Failed to signal descendant ${descendant.id}`);
+          }
         }
       }
     }
   } catch (error) {
     warnings.push(
-      `Failed to get children: ${error instanceof Error ? error.message : "unknown"}`
+      `Failed to signal descendants: ${error instanceof Error ? error.message : "unknown"}`
     );
   }
 

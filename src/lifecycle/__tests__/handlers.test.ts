@@ -30,7 +30,7 @@ function createMockDeps() {
       unsubscribe: vi.fn(),
     },
     agentManager: {
-      getChildren: vi.fn().mockResolvedValue([]),
+      getChildren: vi.fn().mockReturnValue([]),
     },
   };
 }
@@ -134,10 +134,16 @@ describe("handlers", () => {
 
     it("should signal children to terminate", async () => {
       const deps = createMockDeps();
-      deps.agentManager.getChildren.mockResolvedValue([
-        { id: "child-1" },
-        { id: "child-2" },
-      ]);
+      // Mock getChildren to return children only for the parent, not for the children
+      deps.agentManager.getChildren.mockImplementation((agentId: string) => {
+        if (agentId === "worker-1") {
+          return [
+            { id: "child-1", state: "running" },
+            { id: "child-2", state: "running" },
+          ];
+        }
+        return [];
+      });
 
       const context: LifecycleContext = {
         agentId: "worker-1",
@@ -149,10 +155,10 @@ describe("handlers", () => {
       const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
 
       expect(result.cleanupActions).toEqual(
-        expect.arrayContaining([expect.stringContaining("child")])
+        expect.arrayContaining([expect.stringContaining("descendant")])
       );
-      // Should emit termination signal for each child
-      expect(deps.messageRouter.emitStatus).toHaveBeenCalledTimes(3); // WORKER_DONE + 2 children
+      // Should emit termination signal for each descendant
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledTimes(3); // WORKER_DONE + 2 descendants
     });
   });
 

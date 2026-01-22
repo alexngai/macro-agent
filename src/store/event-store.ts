@@ -1067,6 +1067,7 @@ function applySpawnEvent(
     task: string;
     task_id?: TaskId;
     parent?: AgentId | null;
+    role?: string;
     config?: Record<string, unknown>;
     cwd?: string;
   };
@@ -1094,6 +1095,7 @@ function applySpawnEvent(
     stop_reason: '',
     task: payload.task,
     task_id: payload.task_id ?? '',
+    role: payload.role ?? '',
     config: JSON.stringify(payload.config ?? {}),
     cwd: payload.cwd ?? process.cwd(),
     created_at: event.timestamp,
@@ -1404,6 +1406,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     stop_reason: stopReason ? (stopReason as Agent['stop_reason']) : undefined,
     task: row.task as string,
     task_id: (row.task_id as string) || undefined,
+    role: (row.role as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
     cwd: (row.cwd as string) || process.cwd(),
     created_at: row.created_at as Timestamp,
