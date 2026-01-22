@@ -111,6 +111,9 @@ export interface LifecycleContext {
 
   /** Integration branch for merge requests (target branch) */
   integrationBranch?: string;
+
+  /** Stream ID for the agent's workspace (used by integrators for merge queue) */
+  streamId?: string;
 }
 
 /**

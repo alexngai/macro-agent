@@ -5,10 +5,12 @@
  *
  * @module lifecycle/handlers
  * @see s-32xs Self-Cleaning Workers spec
+ * @see s-bcqm Change Management spec
  */
 
 import type { MessageRouter } from "../../router/message-router.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
+import type { MergeQueueInterface } from "../../workspace/merge-queue/types.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -41,6 +43,12 @@ export { handleGenericDone, type GenericHandlerDeps } from "./generic.js";
 export interface AllHandlerDeps {
   messageRouter: MessageRouter;
   agentManager: AgentManager;
+
+  /** Optional merge queue for integrator handlers */
+  mergeQueue?: MergeQueueInterface;
+
+  /** Optional workspace path resolver for integrators */
+  getWorkspacePath?: (agentId: string) => string | undefined;
 }
 
 // =============================================================================
@@ -64,13 +72,15 @@ export function createHandlerRegistry(
     handleWorkerDone(context, args, cleanupStatus, workerDeps)
   );
 
-  // Integrator handler
-  const integratorDeps: IntegratorHandlerDeps = {
-    messageRouter: deps.messageRouter,
-  };
-  registry.set("integrator", (context, args, cleanupStatus) =>
-    handleIntegratorDone(context, args, cleanupStatus, integratorDeps)
-  );
+  // Integrator handler - include merge queue and workspace path resolver
+  registry.set("integrator", (context, args, cleanupStatus) => {
+    const integratorDeps: IntegratorHandlerDeps = {
+      messageRouter: deps.messageRouter,
+      mergeQueue: deps.mergeQueue,
+      workspacePath: deps.getWorkspacePath?.(context.agentId),
+    };
+    return handleIntegratorDone(context, args, cleanupStatus, integratorDeps);
+  });
 
   // Monitor handler
   const monitorDeps: MonitorHandlerDeps = {
