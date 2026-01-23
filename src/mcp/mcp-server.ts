@@ -30,6 +30,13 @@ import {
   createWaitForActivityHandler,
   WAIT_FOR_ACTIVITY_TOOL_INFO,
 } from "./tools/wait_for_activity.js";
+import {
+  InjectContextSchema,
+  createInjectContextHandler,
+  formatInjectContextResult,
+  INJECT_CONTEXT_TOOL_INFO,
+} from "./tools/inject_context.js";
+import type { TaskToolProvider } from "../task/backend/types.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
 const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
@@ -65,6 +72,8 @@ export interface MCPServices {
   peerManager?: PeerManager;
   /** Optional activity watcher for event-driven waking */
   activityWatcher?: ActivityWatcher;
+  /** Optional task tool provider for backend-specific task tools */
+  taskToolProvider?: TaskToolProvider;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -241,7 +250,10 @@ export function createMCPServer(
   config: MCPServerConfig = {}
 ): MCPServerInstance {
   const { name = "macro-agent-mcp", version = "1.0.0" } = config;
-  const { eventStore, agentManager, taskManager, messageRouter, peerManager, activityWatcher } = services;
+  const { eventStore, agentManager, taskManager, messageRouter, peerManager, activityWatcher, taskToolProvider } = services;
+
+  // Get excluded tools from tool provider (if any)
+  const excludedTools = new Set(taskToolProvider?.getExcludedTools?.() ?? []);
 
   // Create MCP server
   const server = new McpServer(
@@ -745,79 +757,83 @@ export function createMCPServer(
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: create_task
+  // Tool: create_task (conditionally registered based on tool provider)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("create_task", {
-    description: "Create a new task",
-    inputSchema: CreateTaskSchema,
-  }, async (args) => {
-    try {
-      const task = taskManager.create({
-        description: args.description,
-        created_by: context.agent_id,
-        parent_task: args.parent_task,
-        inputs: args.inputs,
-      });
+  if (!excludedTools.has("create_task")) {
+    server.registerTool("create_task", {
+      description: "Create a new task",
+      inputSchema: CreateTaskSchema,
+    }, async (args) => {
+      try {
+        const task = taskManager.create({
+          description: args.description,
+          created_by: context.agent_id,
+          parent_task: args.parent_task,
+          inputs: args.inputs,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                task_id: task.id,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to create task: ${error}`,
+          "INVALID_INPUT"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: get_task (conditionally registered based on tool provider)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (!excludedTools.has("get_task")) {
+    server.registerTool("get_task", {
+      description: "Get details of a specific task",
+      inputSchema: GetTaskSchema,
+    }, async (args) => {
+      const task = taskManager.get(args.task_id);
+      if (!task) {
+        throw new MCPToolError(
+          `Task not found: ${args.task_id}`,
+          "TASK_NOT_FOUND"
+        );
+      }
+
+      // Use completed_at, started_at, or created_at as last update
+      const updatedAt = task.completed_at ?? task.started_at ?? task.created_at;
 
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              task_id: task.id,
+              id: task.id,
+              description: task.description,
+              status: task.status,
+              assigned_agent: task.assigned_agent,
+              parent_task: task.parent_task,
+              subtasks: task.subtasks ?? [],
+              inputs: task.inputs,
+              outputs: task.outputs,
+              artifacts: task.artifacts,
+              created_at: task.created_at,
+              updated_at: updatedAt,
             }),
           },
         ],
       };
-    } catch (error) {
-      throw new MCPToolError(
-        `Failed to create task: ${error}`,
-        "INVALID_INPUT"
-      );
-    }
-  });
-
-  // ─────────────────────────────────────────────────────────────────
-  // Tool: get_task
-  // ─────────────────────────────────────────────────────────────────
-
-  server.registerTool("get_task", {
-    description: "Get details of a specific task",
-    inputSchema: GetTaskSchema,
-  }, async (args) => {
-    const task = taskManager.get(args.task_id);
-    if (!task) {
-      throw new MCPToolError(
-        `Task not found: ${args.task_id}`,
-        "TASK_NOT_FOUND"
-      );
-    }
-
-    // Use completed_at, started_at, or created_at as last update
-    const updatedAt = task.completed_at ?? task.started_at ?? task.created_at;
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            id: task.id,
-            description: task.description,
-            status: task.status,
-            assigned_agent: task.assigned_agent,
-            parent_task: task.parent_task,
-            subtasks: task.subtasks ?? [],
-            inputs: task.inputs,
-            outputs: task.outputs,
-            artifacts: task.artifacts,
-            created_at: task.created_at,
-            updated_at: updatedAt,
-          }),
-        },
-      ],
-    };
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Tool: send_peer_message
@@ -1035,6 +1051,74 @@ export function createMCPServer(
       );
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: inject_context
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool(INJECT_CONTEXT_TOOL_INFO.name, {
+    description: INJECT_CONTEXT_TOOL_INFO.description,
+    inputSchema: InjectContextSchema,
+  }, async (args) => {
+    const handler = createInjectContextHandler(
+      { agentManager, messageRouter },
+      context.agent_id
+    );
+
+    try {
+      const result = await handler(args as {
+        target_agent_id: string;
+        content: string;
+        urgent?: boolean;
+        reason?: string;
+      });
+
+      return formatInjectContextResult(result);
+    } catch (error) {
+      throw new MCPToolError(
+        `Failed to inject context: ${error instanceof Error ? error.message : error}`,
+        "ROUTING_FAILED"
+      );
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Task Tool Provider (dynamic tools from backend)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (taskToolProvider) {
+    const providerTools = taskToolProvider.getTools();
+    for (const tool of providerTools) {
+      // Use z.record for flexible input since tool providers define their own schemas
+      // The actual validation is done by the tool handler
+      server.registerTool(tool.name, {
+        description: tool.description,
+        inputSchema: {
+          params: z.record(z.string(), z.unknown()).optional()
+            .describe("Tool parameters (validated by the tool handler)"),
+        },
+      }, async (args: { params?: Record<string, unknown> }) => {
+        try {
+          // Pass the params to the handler, or an empty object if not provided
+          const result = await tool.handler(args.params ?? args);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(result),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new MCPToolError(
+            `Failed to execute ${tool.name}: ${error instanceof Error ? error.message : error}`,
+            "INVALID_INPUT"
+          );
+        }
+      });
+    }
+    debugLog(`[MCP] Registered ${providerTools.length} tools from task tool provider`);
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Server Lifecycle

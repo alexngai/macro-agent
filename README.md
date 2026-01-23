@@ -10,6 +10,28 @@ A multi-agent orchestration system for spawning and managing hierarchical Claude
 - **MCP Tool Integration** - Agents communicate via Model Context Protocol tools
 - **Task Lifecycle** - Create, assign, and track tasks across agents
 - **Message Routing** - Parent-child and topic-based message delivery
+- **Sudocode Integration** - Optional issue tracking with dependency management
+
+## Sudocode Integration
+
+macro-agent can integrate with [sudocode](https://github.com/sudocode-ai/sudocode) for external issue tracking:
+
+```bash
+# Enable sudocode backend
+export MACRO_TASK_BACKEND=sudocode
+export SUDOCODE_PROJECT_PATH=/path/to/project
+
+# Start macro-agent
+npx multiagent start
+```
+
+With sudocode enabled:
+- Tasks are bound to sudocode issues via `external_id`
+- Blocking relationships come from sudocode's issue links
+- `listReady()` returns only tasks with no incomplete blockers
+- Task status can sync with issue status
+
+See [docs/sudocode-integration.md](docs/sudocode-integration.md) for full documentation.
 
 ## Installation
 

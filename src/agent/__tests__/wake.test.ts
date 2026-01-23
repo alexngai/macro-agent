@@ -643,6 +643,7 @@ describe("createSessionProviderFromAgentManager", () => {
   it("should return session info when agent has session", () => {
     const agentManager = {
       hasActiveSession: vi.fn().mockReturnValue(true),
+      isPrompting: vi.fn().mockReturnValue(false),
     } as unknown as AgentManager;
 
     const provider = createSessionProviderFromAgentManager(agentManager);
@@ -650,28 +651,118 @@ describe("createSessionProviderFromAgentManager", () => {
 
     expect(info).toEqual({
       hasSession: true,
-      isPrompting: false, // Default, not tracked
-      supportsInjection: false, // Claude Code doesn't support injection yet
+      isPrompting: false,
+      supportsInjection: false, // Default until inject succeeds
     });
+    expect(agentManager.isPrompting).toHaveBeenCalledWith("agent-1");
   });
 
-  it("should not have inject method (not implemented)", () => {
+  it("should return isPrompting true when agent is prompting", () => {
+    const agentManager = {
+      hasActiveSession: vi.fn().mockReturnValue(true),
+      isPrompting: vi.fn().mockReturnValue(true),
+    } as unknown as AgentManager;
+
+    const provider = createSessionProviderFromAgentManager(agentManager);
+    const info = provider.getSessionInfo("agent-1");
+
+    expect(info?.isPrompting).toBe(true);
+  });
+
+  it("should have inject method that calls session.inject", async () => {
+    const mockSession = {
+      inject: vi.fn().mockResolvedValue({ success: true }),
+    };
     const agentManager = {
       hasActiveSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(mockSession),
     } as unknown as AgentManager;
 
     const provider = createSessionProviderFromAgentManager(agentManager);
 
-    expect(provider.inject).toBeUndefined();
+    expect(provider.inject).toBeDefined();
+    const result = await provider.inject!("agent-1", "test message");
+
+    expect(result).toBe(true);
+    expect(mockSession.inject).toHaveBeenCalledWith("test message");
   });
 
-  it("should not have interrupt method (not implemented)", () => {
+  it("should have inject return false when no session", async () => {
     const agentManager = {
       hasActiveSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(null),
+    } as unknown as AgentManager;
+
+    const provider = createSessionProviderFromAgentManager(agentManager);
+    const result = await provider.inject!("agent-1", "test message");
+
+    expect(result).toBe(false);
+  });
+
+  it("should have inject return false when inject fails", async () => {
+    const mockSession = {
+      inject: vi.fn().mockResolvedValue({ success: false }),
+    };
+    const agentManager = {
+      hasActiveSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(mockSession),
+    } as unknown as AgentManager;
+
+    const provider = createSessionProviderFromAgentManager(agentManager);
+    const result = await provider.inject!("agent-1", "test message");
+
+    expect(result).toBe(false);
+  });
+
+  it("should have interrupt method that calls session.interruptWith", async () => {
+    const mockSession = {
+      interruptWith: vi.fn().mockImplementation(async function* () {
+        yield { type: "update" };
+      }),
+    };
+    const agentManager = {
+      hasActiveSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(mockSession),
     } as unknown as AgentManager;
 
     const provider = createSessionProviderFromAgentManager(agentManager);
 
-    expect(provider.interrupt).toBeUndefined();
+    expect(provider.interrupt).toBeDefined();
+    const result = await provider.interrupt!("agent-1", "test message");
+
+    expect(result).toBe(true);
+    expect(mockSession.interruptWith).toHaveBeenCalledWith("test message");
+  });
+
+  it("should have interrupt return false when no session", async () => {
+    const agentManager = {
+      hasActiveSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(null),
+    } as unknown as AgentManager;
+
+    const provider = createSessionProviderFromAgentManager(agentManager);
+    const result = await provider.interrupt!("agent-1", "test message");
+
+    expect(result).toBe(false);
+  });
+
+  it("should cache injection support after successful inject", async () => {
+    const mockSession = {
+      inject: vi.fn().mockResolvedValue({ success: true }),
+    };
+    const agentManager = {
+      hasActiveSession: vi.fn().mockReturnValue(true),
+      isPrompting: vi.fn().mockReturnValue(false),
+      getSession: vi.fn().mockReturnValue(mockSession),
+    } as unknown as AgentManager;
+
+    const provider = createSessionProviderFromAgentManager(agentManager);
+
+    // Before inject, supportsInjection is false
+    expect(provider.getSessionInfo("agent-1")?.supportsInjection).toBe(false);
+
+    // After successful inject, supportsInjection should be cached as true
+    await provider.inject!("agent-1", "test");
+    expect(provider.getSessionInfo("agent-1")?.supportsInjection).toBe(true);
   });
 });

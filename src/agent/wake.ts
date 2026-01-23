@@ -263,27 +263,80 @@ export function createWakeHandler(
 
 /**
  * Create a session provider from AgentManager.
+ * Provides real inject/interrupt implementations using acp-factory Session.
  */
 export function createSessionProviderFromAgentManager(
   agentManager: AgentManager
 ): WakeSessionProvider {
+  // Cache for injection support per agent (cleared when session ends)
+  const injectionSupportCache = new Map<AgentId, boolean>();
+
   return {
     getSessionInfo(agentId: AgentId): WakeSessionInfo | null {
       const hasSession = agentManager.hasActiveSession(agentId);
       if (!hasSession) {
+        // Clear cache when session ends
+        injectionSupportCache.delete(agentId);
         return null;
       }
 
-      // Note: AgentManager doesn't expose isPrompting directly
-      // In a real implementation, we'd need to track this
       return {
         hasSession: true,
-        isPrompting: false, // Would need to be tracked
-        supportsInjection: false, // Claude Code doesn't support injection yet
+        isPrompting: agentManager.isPrompting(agentId),
+        // Use cached value if available, otherwise assume not supported
+        // Actual check happens async in inject()
+        supportsInjection: injectionSupportCache.get(agentId) ?? false,
       };
     },
 
-    // Note: inject and interrupt would need to be implemented
-    // when the underlying session supports it
+    async inject(agentId: AgentId, message: string): Promise<boolean> {
+      const session = agentManager.getSession(agentId);
+      if (!session) {
+        return false;
+      }
+
+      try {
+        const result = await session.inject(message);
+        // Cache the result for future getSessionInfo calls
+        injectionSupportCache.set(agentId, result.success);
+        return result.success;
+      } catch {
+        injectionSupportCache.set(agentId, false);
+        return false;
+      }
+    },
+
+    async interrupt(agentId: AgentId, message: string): Promise<boolean> {
+      const session = agentManager.getSession(agentId);
+      if (!session) {
+        return false;
+      }
+
+      try {
+        // Drive the async iterator to ensure interrupt is processed
+        const iterable = session.interruptWith(message);
+        const iterator = iterable[Symbol.asyncIterator]();
+
+        // Consume at least the first update to ensure interrupt started
+        const firstUpdate = await iterator.next();
+
+        if (!firstUpdate.done) {
+          // Let the rest run in the background
+          (async () => {
+            try {
+              for await (const _ of iterable) {
+                // Just drive to completion
+              }
+            } catch {
+              // Ignore background errors
+            }
+          })();
+        }
+
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
