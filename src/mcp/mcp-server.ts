@@ -30,6 +30,12 @@ import {
   createWaitForActivityHandler,
   WAIT_FOR_ACTIVITY_TOOL_INFO,
 } from "./tools/wait_for_activity.js";
+import {
+  InjectContextSchema,
+  createInjectContextHandler,
+  formatInjectContextResult,
+  INJECT_CONTEXT_TOOL_INFO,
+} from "./tools/inject_context.js";
 import type { TaskToolProvider } from "../task/backend/types.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
@@ -1042,6 +1048,36 @@ export function createMCPServer(
       throw new MCPToolError(
         `Failed to execute done: ${error instanceof Error ? error.message : error}`,
         "INVALID_INPUT"
+      );
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: inject_context
+  // ─────────────────────────────────────────────────────────────────
+
+  server.registerTool(INJECT_CONTEXT_TOOL_INFO.name, {
+    description: INJECT_CONTEXT_TOOL_INFO.description,
+    inputSchema: InjectContextSchema,
+  }, async (args) => {
+    const handler = createInjectContextHandler(
+      { agentManager, messageRouter },
+      context.agent_id
+    );
+
+    try {
+      const result = await handler(args as {
+        target_agent_id: string;
+        content: string;
+        urgent?: boolean;
+        reason?: string;
+      });
+
+      return formatInjectContextResult(result);
+    } catch (error) {
+      throw new MCPToolError(
+        `Failed to inject context: ${error instanceof Error ? error.message : error}`,
+        "ROUTING_FAILED"
       );
     }
   });

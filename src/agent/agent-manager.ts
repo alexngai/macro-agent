@@ -129,6 +129,18 @@ export interface AgentManager {
    */
   hasActiveSession(agentId: AgentId): boolean;
 
+  /**
+   * Check if an agent is currently processing a prompt.
+   * Returns false if no session or session is idle.
+   */
+  isPrompting(agentId: AgentId): boolean;
+
+  /**
+   * Check if an agent's session supports context injection.
+   * Returns false if no session or injection not supported.
+   */
+  supportsInjection(agentId: AgentId): Promise<boolean>;
+
   // ── Permission Handling ─────────────────────────────────────────
 
   /**
@@ -811,6 +823,25 @@ export function createAgentManager(
     return activeSessions.has(agentId);
   }
 
+  function isPrompting(agentId: AgentId): boolean {
+    const activeSession = activeSessions.get(agentId);
+    return activeSession?.isPrompting ?? false;
+  }
+
+  async function supportsInjection(agentId: AgentId): Promise<boolean> {
+    const session = getSession(agentId);
+    if (!session) {
+      return false;
+    }
+    // Check if the session supports injection
+    // Uses acp-factory's supportsInject() which returns cached/estimated result
+    try {
+      return session.supportsInject();
+    } catch {
+      return false;
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Permission Handling
   // ─────────────────────────────────────────────────────────────────
@@ -923,6 +954,8 @@ export function createAgentManager(
     prompt,
     getSession,
     hasActiveSession,
+    isPrompting,
+    supportsInjection,
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,

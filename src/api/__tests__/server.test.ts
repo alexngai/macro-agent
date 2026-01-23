@@ -106,6 +106,8 @@ function createMockAgentManager(): AgentManager {
     prompt: vi.fn(async function* () {}),
     getSession: vi.fn(() => null),
     hasActiveSession: vi.fn(() => false),
+    isPrompting: vi.fn(() => false),
+    supportsInjection: vi.fn(async () => false),
     onLifecycleEvent: vi.fn(() => () => {}),
     close: vi.fn(async () => {}),
   };
@@ -552,6 +554,461 @@ describe("API Server", () => {
       await server.stop();
 
       expect(eventStore.persist).toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /api/agents/:id/inject", () => {
+    it("should return 400 if content is missing", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("MISSING_CONTENT");
+    });
+
+    it("should return 404 if agent not found", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(null);
+
+      const res = await request(server.app)
+        .post("/api/agents/nonexistent/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe("AGENT_NOT_FOUND");
+    });
+
+    it("should fall back to message when no session", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.getSession).mockReturnValue(null);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("message");
+      // The inject module wraps the content with a header
+      expect(messageRouter.send).toHaveBeenCalledWith({
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "[Context Injection from User]\n\nTest message",
+        priority: "high",
+      });
+    });
+
+    it("should inject successfully when session supports it", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("inject");
+    });
+
+    it("should fall back to interrupt when inject not supported", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: false, error: "Not supported" }),
+        supportsInject: vi.fn().mockReturnValue(false),
+        interruptWith: vi.fn().mockImplementation(async function* () {
+          yield { type: "update" };
+        }),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message", urgent: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("interrupt");
+    });
+
+    it("should include reason in response when provided", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message", reason: "Priority change" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
+    it("should format content with reason when provided", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.getSession).mockReturnValue(null);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message", reason: "Build is failing" });
+
+      expect(res.status).toBe(200);
+      // The content should include the reason in the formatted message
+      expect(messageRouter.send).toHaveBeenCalledWith({
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "[Context Injection from User]\nReason: Build is failing\n\nTest message",
+        priority: "high",
+      });
+    });
+
+    it("should use urgent mode to prefer interrupt over inject", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      const interruptWithMock = vi.fn().mockImplementation(async function* () {
+        yield { type: "update" };
+      });
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: interruptWithMock,
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Urgent message", urgent: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("interrupt");
+      // Interrupt should have been called
+      expect(interruptWithMock).toHaveBeenCalled();
+    });
+
+    it("should fall back to inject when urgent interrupt fails", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: vi.fn().mockImplementation(async function* () {
+          throw new Error("Interrupt failed");
+        }),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Urgent message", urgent: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("inject");
+    });
+
+    it("should fall back to message when inject throws an error", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(false);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockRejectedValue(new Error("Injection error")),
+        supportsInject: vi.fn().mockReturnValue(true),
+        checkInjectSupport: vi.fn().mockResolvedValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("message");
+    });
+
+    it("should return 500 when all fallbacks fail", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(false);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: false }),
+        supportsInject: vi.fn().mockReturnValue(false),
+        checkInjectSupport: vi.fn().mockResolvedValue(false),
+        interruptWith: vi.fn(),
+      } as any);
+      vi.mocked(messageRouter.send).mockRejectedValue(new Error("Message failed"));
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toContain("Failed to send message");
+    });
+
+    it("should skip interrupt when agent is not prompting", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(false);
+      const interruptWithMock = vi.fn();
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: false }),
+        supportsInject: vi.fn().mockReturnValue(false),
+        checkInjectSupport: vi.fn().mockResolvedValue(false),
+        interruptWith: interruptWithMock,
+      } as any);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.method).toBe("message");
+      // Interrupt should NOT have been called since agent is not prompting
+      expect(interruptWithMock).not.toHaveBeenCalled();
+    });
+
+    it("should verify inject support when supportsInject returns false initially then true on recheck", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      // First call returns false, second call returns true (simulating support becoming available)
+      const supportsInjectMock = vi.fn()
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: supportsInjectMock,
+        interruptWith: vi.fn(),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.method).toBe("inject");
+      // supportsInject should have been called twice (once for initial check, once for verification)
+      expect(supportsInjectMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("should include note about injection method", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.note).toBe("Queued for next turn");
+    });
+
+    it("should include note for interrupt method", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: false }),
+        supportsInject: vi.fn().mockReturnValue(false),
+        checkInjectSupport: vi.fn().mockResolvedValue(false),
+        interruptWith: vi.fn().mockImplementation(async function* () {
+          yield { type: "update" };
+        }),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.note).toBe("Cancelled current work and restarted with context");
+    });
+
+    it("should include note for message fallback with no session", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.getSession).mockReturnValue(null);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.note).toContain("Agent has no active session");
+    });
+
+    it("should handle empty content string", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("MISSING_CONTENT");
+    });
+
+    it("should handle whitespace-only content as valid", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(true);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: true }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "   " });
+
+      // Whitespace-only is still truthy and passes validation
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
+    it("should handle stopped agent by falling back to message", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent({ state: "stopped" }));
+      vi.mocked(agentManager.getSession).mockReturnValue(null);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      // Should succeed via message fallback even for stopped agent
+      expect(res.status).toBe(200);
+      expect(res.body.method).toBe("message");
+    });
+
+    it("should handle inject returning failure with error", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.isPrompting).mockReturnValue(false);
+      vi.mocked(agentManager.getSession).mockReturnValue({
+        inject: vi.fn().mockResolvedValue({ success: false, error: "Not supported in this context" }),
+        supportsInject: vi.fn().mockReturnValue(true),
+        checkInjectSupport: vi.fn().mockResolvedValue(true),
+        interruptWith: vi.fn(),
+      } as any);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      // Should fall back to message when inject returns failure
+      expect(res.status).toBe(200);
+      expect(res.body.method).toBe("message");
+    });
+
+    it("should correctly pass agent_id as __human__ for human source", async () => {
+      const server = createTrackedServer();
+      vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
+      vi.mocked(agentManager.getSession).mockReturnValue(null);
+      vi.mocked(messageRouter.send).mockResolvedValue({
+        id: "evt_123",
+        timestamp: Date.now(),
+        from: { agent_id: "__human__" },
+        to: { agent_id: "agent_test123" },
+        content: "Test message",
+        priority: "high",
+      });
+
+      const res = await request(server.app)
+        .post("/api/agents/agent_test123/inject")
+        .send({ content: "Test message" });
+
+      expect(res.status).toBe(200);
+      expect(messageRouter.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: { agent_id: "__human__" },
+        })
+      );
     });
   });
 });
