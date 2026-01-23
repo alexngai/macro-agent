@@ -1108,6 +1108,7 @@ function applySpawnEvent(
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
+    last_activity_at: event.timestamp,
   });
 
   const agent = rowToAgent(store.getRow('agents', agentId));
@@ -1131,6 +1132,7 @@ function applyTerminateEvent(
     state: 'stopped',
     stop_reason: payload.reason,
     stopped_at: event.timestamp,
+    last_activity_at: event.timestamp,
   });
 
   const agent = rowToAgent(store.getRow('agents', agentId));
@@ -1150,15 +1152,22 @@ function applyStatusEvent(
 
   const payload = event.payload as { status_type: string };
 
+  // Handle specific status types
   if (payload.status_type === 'started') {
     store.setPartialRow('agents', agentId, {
       state: 'running',
       started_at: event.timestamp,
+      last_activity_at: event.timestamp,
     });
-
-    const agent = rowToAgent(store.getRow('agents', agentId));
-    notify(agentId, agent);
+  } else {
+    // Always update last_activity_at on any status event
+    store.setPartialRow('agents', agentId, {
+      last_activity_at: event.timestamp,
+    });
   }
+
+  const agent = rowToAgent(store.getRow('agents', agentId));
+  notify(agentId, agent);
 }
 
 /**
@@ -1240,6 +1249,7 @@ function applyTaskEvent(
         description: string;
         parent_task?: TaskId;
         inputs?: Record<string, unknown>;
+        retryPolicy?: unknown;
       };
       store.setRow('tasks', taskId, {
         id: taskId,
@@ -1257,6 +1267,10 @@ function applyTaskEvent(
         outputs: JSON.stringify({}),
         artifacts: JSON.stringify([]),
         agent_history: JSON.stringify([]),
+        retry_policy: details.retryPolicy
+          ? JSON.stringify(details.retryPolicy)
+          : '',
+        retry_state: '',
       });
       break;
     }
@@ -1304,6 +1318,8 @@ function applyTaskEvent(
         artifacts?: unknown[];
         description?: string;
         subtask_added?: TaskId;
+        retryState?: unknown;
+        agent_id?: AgentId | null;
       };
       const updates: Record<string, unknown> = {};
 
@@ -1343,6 +1359,15 @@ function applyTaskEvent(
           : [];
         subtasks.push(details.subtask_added);
         updates.subtasks = JSON.stringify(subtasks);
+      }
+
+      if (details.retryState !== undefined) {
+        updates.retry_state = JSON.stringify(details.retryState);
+      }
+
+      // Allow clearing the assigned agent (for retry)
+      if (details.agent_id === null) {
+        updates.assigned_agent = '';
       }
 
       if (Object.keys(updates).length > 0) {
@@ -1419,6 +1444,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,
+    last_activity_at: (row.last_activity_at as number) || undefined,
   };
 }
 
@@ -1442,5 +1468,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     outputs: row.outputs ? JSON.parse(row.outputs as string) : undefined,
     artifacts: row.artifacts ? JSON.parse(row.artifacts as string) : undefined,
     agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
+    retryPolicy: row.retry_policy ? JSON.parse(row.retry_policy as string) : undefined,
+    retryState: row.retry_state ? JSON.parse(row.retry_state as string) : undefined,
   };
 }

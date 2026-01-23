@@ -43,6 +43,12 @@ export interface SessionMapping {
 
   /** When the mapping was last updated */
   updatedAt: number;
+
+  /** Whether the session is currently processing a prompt (for health monitoring) */
+  isProcessing: boolean;
+
+  /** When isProcessing last changed (for health monitoring) */
+  lastProcessingChangeAt: number;
 }
 
 // ─────────────────────────────────────────────────────────────────
