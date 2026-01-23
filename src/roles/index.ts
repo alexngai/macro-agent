@@ -100,4 +100,42 @@ export {
   mergeRoles,
   validateRole,
   filterToolsForRole,
+  isToolAllowedForRole,
+  getRequiredCapabilityForTool,
 } from "./registry.js";
+
+export type { RoleRegistryConfig } from "./registry.js";
+
+// =============================================================================
+// Config Loader
+// =============================================================================
+
+export {
+  // Path utilities
+  getProjectConfigPath,
+  getUserConfigPath,
+  CONFIG_FILE_NAME,
+  PROJECT_CONFIG_DIR,
+  USER_CONFIG_DIR,
+
+  // Config parsing
+  parseCapabilities,
+  entryToRoleConfig,
+
+  // File loading
+  loadConfigFile,
+  loadProjectConfig,
+  loadUserConfig,
+  loadAllConfigs,
+
+  // File watching
+  watchConfigFile,
+} from "./config-loader.js";
+
+export type {
+  RoleConfigFile,
+  RoleConfigEntry,
+  LoadResult,
+  LoadConfigOptions,
+  LoadAllResult,
+} from "./config-loader.js";

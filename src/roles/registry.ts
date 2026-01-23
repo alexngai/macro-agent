@@ -29,6 +29,40 @@ import {
   ALWAYS_ALLOWED_TOOLS,
   capabilityGrantsTool,
 } from "./capabilities.js";
+import {
+  loadProjectConfig,
+  loadUserConfig,
+  loadConfigFile,
+  loadAllConfigs,
+  watchConfigFile,
+  type LoadConfigOptions,
+  type LoadResult,
+  type LoadAllResult,
+} from "./config-loader.js";
+
+// =============================================================================
+// Registry Configuration
+// =============================================================================
+
+/**
+ * Configuration options for DefaultRoleRegistry
+ */
+export interface RoleRegistryConfig {
+  /** Project root directory for project-level config */
+  projectPath?: string;
+
+  /** Auto-load configs on construction */
+  autoLoad?: boolean;
+
+  /** Skip loading user-level config */
+  skipUserConfig?: boolean;
+
+  /** Skip loading project-level config */
+  skipProjectConfig?: boolean;
+
+  /** Enable file watching for hot-reload */
+  watchFiles?: boolean;
+}
 
 /**
  * Default Role Registry Implementation
@@ -47,6 +81,34 @@ export class DefaultRoleRegistry implements RoleRegistry {
 
   /** User-level role overrides */
   private userRoles: Map<string, RoleConfig> = new Map();
+
+  /** Registry configuration */
+  private config: RoleRegistryConfig;
+
+  /** File watchers for hot-reload */
+  private watchers: Array<() => void> = [];
+
+  /** Warnings from config loading */
+  private loadWarnings: string[] = [];
+
+  /**
+   * Create a new DefaultRoleRegistry
+   *
+   * @param config - Optional configuration
+   */
+  constructor(config: RoleRegistryConfig = {}) {
+    this.config = config;
+
+    // Auto-load configs if enabled
+    if (config.autoLoad) {
+      this.loadConfigs();
+    }
+
+    // Set up file watching if enabled
+    if (config.watchFiles) {
+      this.startWatching();
+    }
+  }
 
   /**
    * Get a role by exact name (no inheritance resolution)
@@ -191,6 +253,10 @@ export class DefaultRoleRegistry implements RoleRegistry {
     // 3. Check custom roles
     const customRole = this.customRoles.get(roleName);
     if (customRole) {
+      // Apply inheritance if custom role has extends
+      if ((customRole as RoleConfig).extends) {
+        return this.applyOverride(customRole as RoleConfig, roleName);
+      }
       return customRole;
     }
 
@@ -252,6 +318,195 @@ export class DefaultRoleRegistry implements RoleRegistry {
     // Fall back to generic
     console.info(`Falling back to 'generic' role`);
     return GenericRole;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Config File Loading
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Load all config files (user and project level)
+   *
+   * @returns Load result with warnings
+   */
+  loadConfigs(): LoadAllResult {
+    const result = loadAllConfigs({
+      projectPath: this.config.projectPath,
+      skipUserConfig: this.config.skipUserConfig,
+      skipProjectConfig: this.config.skipProjectConfig,
+    });
+
+    // Register user-level roles first (lower priority)
+    for (const role of result.user.roles) {
+      this.registerUserRole(role);
+    }
+
+    // Register project-level roles (higher priority)
+    for (const role of result.project.roles) {
+      this.registerProjectRole(role);
+    }
+
+    // Store warnings
+    this.loadWarnings = result.allWarnings;
+
+    // Log warnings if any
+    if (result.allWarnings.length > 0) {
+      console.warn("[RoleRegistry] Config loading warnings:", result.allWarnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from project config file
+   *
+   * @param projectPath - Optional project path override
+   * @returns Load result
+   */
+  loadProjectConfig(projectPath?: string): LoadResult {
+    const result = loadProjectConfig(projectPath ?? this.config.projectPath);
+
+    for (const role of result.roles) {
+      this.registerProjectRole(role);
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] Project config warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from user config file
+   *
+   * @returns Load result
+   */
+  loadUserConfig(): LoadResult {
+    const result = loadUserConfig();
+
+    for (const role of result.roles) {
+      this.registerUserRole(role);
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] User config warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from a specific config file
+   *
+   * @param filePath - Path to config file
+   * @param level - Which level to register roles at
+   * @returns Load result
+   */
+  loadFromFile(
+    filePath: string,
+    level: "project" | "user" | "custom" = "custom"
+  ): LoadResult {
+    const result = loadConfigFile(filePath);
+
+    for (const role of result.roles) {
+      switch (level) {
+        case "project":
+          this.registerProjectRole(role);
+          break;
+        case "user":
+          this.registerUserRole(role);
+          break;
+        case "custom":
+          this.registerRole(role);
+          break;
+      }
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] Config file warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Get warnings from config loading
+   *
+   * @returns Array of warning messages
+   */
+  getLoadWarnings(): string[] {
+    return [...this.loadWarnings];
+  }
+
+  /**
+   * Clear all loaded roles (but keep built-in)
+   */
+  clearLoadedRoles(): void {
+    this.projectRoles.clear();
+    this.userRoles.clear();
+    this.customRoles.clear();
+    this.loadWarnings = [];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // File Watching
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Start watching config files for changes
+   */
+  private startWatching(): void {
+    // Import the functions we need
+    const { getProjectConfigPath, getUserConfigPath } = require("./config-loader.js");
+
+    // Watch project config
+    if (!this.config.skipProjectConfig) {
+      const projectPath = getProjectConfigPath(this.config.projectPath);
+      const unwatch = watchConfigFile(projectPath, (result) => {
+        // Reload project roles
+        this.projectRoles.clear();
+        for (const role of result.roles) {
+          this.registerProjectRole(role);
+        }
+        console.log("[RoleRegistry] Reloaded project config");
+      });
+      this.watchers.push(unwatch);
+    }
+
+    // Watch user config
+    if (!this.config.skipUserConfig) {
+      const userPath = getUserConfigPath();
+      const unwatch = watchConfigFile(userPath, (result) => {
+        // Reload user roles
+        this.userRoles.clear();
+        for (const role of result.roles) {
+          this.registerUserRole(role);
+        }
+        console.log("[RoleRegistry] Reloaded user config");
+      });
+      this.watchers.push(unwatch);
+    }
+  }
+
+  /**
+   * Stop watching config files
+   */
+  stopWatching(): void {
+    for (const unwatch of this.watchers) {
+      unwatch();
+    }
+    this.watchers = [];
+  }
+
+  /**
+   * Cleanup resources (watchers, etc.)
+   */
+  dispose(): void {
+    this.stopWatching();
   }
 }
 
