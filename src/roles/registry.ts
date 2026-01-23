@@ -26,6 +26,8 @@ import {
   isKnownCapability,
   CAPABILITY_TOOL_MAP,
   WILDCARD_CAPABILITY,
+  ALWAYS_ALLOWED_TOOLS,
+  capabilityGrantsTool,
 } from "./capabilities.js";
 
 /**
@@ -372,6 +374,78 @@ export function filterToolsForRole(
       );
       return allTools.filter((t) => allowedTools.has(t.name));
   }
+}
+
+/**
+ * Check if a specific tool is allowed for a role
+ *
+ * Used for runtime tool filtering enforcement.
+ *
+ * @param toolName - Name of the MCP tool to check
+ * @param role - Resolved role definition
+ * @returns true if the tool is allowed, false otherwise
+ */
+export function isToolAllowedForRole(
+  toolName: string,
+  role: RoleDefinition
+): boolean {
+  // Always-allowed tools (observability, read-only)
+  if (ALWAYS_ALLOWED_TOOLS.includes(toolName)) {
+    return true;
+  }
+
+  const toolConfig = role.tools ?? { mode: "capability" };
+
+  switch (toolConfig.mode) {
+    case "all":
+      return true;
+
+    case "allowlist":
+      return toolConfig.tools?.includes(toolName) ?? false;
+
+    case "denylist":
+      return !toolConfig.tools?.includes(toolName);
+
+    case "capability":
+    default:
+      // Wildcard capability = all tools allowed
+      if (role.capabilities?.includes(WILDCARD_CAPABILITY)) {
+        return true;
+      }
+
+      // Check if any capability grants this tool
+      for (const cap of role.capabilities ?? []) {
+        if (capabilityGrantsTool(cap, toolName)) {
+          return true;
+        }
+      }
+
+      return false;
+  }
+}
+
+/**
+ * Get the capability required for a tool (for error messages)
+ *
+ * @param toolName - Name of the MCP tool
+ * @returns Capability string or undefined if no specific capability required
+ */
+export function getRequiredCapabilityForTool(
+  toolName: string
+): string | undefined {
+  // Check always-allowed tools
+  if (ALWAYS_ALLOWED_TOOLS.includes(toolName)) {
+    return undefined; // No capability required
+  }
+
+  // Find the first capability that grants this tool
+  for (const [capability, tools] of Object.entries(CAPABILITY_TOOL_MAP)) {
+    if (tools.includes(toolName)) {
+      return capability;
+    }
+  }
+
+  return undefined;
 }
 
 // =============================================================================

@@ -128,26 +128,28 @@ export function isKnownCapability(capability: string): capability is Capability 
 /**
  * Maps capabilities to their corresponding MCP tools.
  * Used for capability-based tool filtering.
+ *
+ * NOTE: Tool names must match actual MCP tool registration names in mcp-server.ts
  */
 export const CAPABILITY_TOOL_MAP: CapabilityToolMap = {
-  // File operations
+  // File operations (Claude Code tools, if available)
   [FILE_CAPABILITIES.READ]: ["read", "glob", "grep"],
   [FILE_CAPABILITIES.WRITE]: ["write", "edit"],
   [FILE_CAPABILITIES.DELETE]: ["bash"], // rm via bash
 
-  // Git operations
-  [GIT_CAPABILITIES.COMMIT]: ["bash"], // git commit via bash
-  [GIT_CAPABILITIES.MERGE]: ["bash"], // git merge via bash
-  [GIT_CAPABILITIES.PUSH]: ["bash"], // git push via bash
-  [GIT_CAPABILITIES.BRANCH_CREATE]: ["bash"], // git branch via bash
-  [GIT_CAPABILITIES.BRANCH_DELETE]: ["bash"], // git branch -d via bash
+  // Git operations (via bash)
+  [GIT_CAPABILITIES.COMMIT]: ["bash"],
+  [GIT_CAPABILITIES.MERGE]: ["bash"],
+  [GIT_CAPABILITIES.PUSH]: ["bash"],
+  [GIT_CAPABILITIES.BRANCH_CREATE]: ["bash"],
+  [GIT_CAPABILITIES.BRANCH_DELETE]: ["bash"],
 
-  // Agent operations
-  [AGENT_CAPABILITIES.SPAWN_WORKER]: ["spawn"],
-  [AGENT_CAPABILITIES.SPAWN_INTEGRATOR]: ["spawn"],
-  [AGENT_CAPABILITIES.SPAWN_MONITOR]: ["spawn"],
-  [AGENT_CAPABILITIES.SPAWN_CUSTOM]: ["spawn"],
-  [AGENT_CAPABILITIES.TERMINATE]: ["terminate"],
+  // Agent operations - MCP tool names
+  [AGENT_CAPABILITIES.SPAWN_WORKER]: ["spawn_agent"],
+  [AGENT_CAPABILITIES.SPAWN_INTEGRATOR]: ["spawn_agent"],
+  [AGENT_CAPABILITIES.SPAWN_MONITOR]: ["spawn_agent"],
+  [AGENT_CAPABILITIES.SPAWN_CUSTOM]: ["spawn_agent"],
+  [AGENT_CAPABILITIES.TERMINATE]: ["stop_agent"],
 
   // Lifecycle operations
   [LIFECYCLE_CAPABILITIES.DONE]: ["done"],
@@ -164,11 +166,31 @@ export const CAPABILITY_TOOL_MAP: CapabilityToolMap = {
   [EXEC_CAPABILITIES.TEST]: ["bash"],
   [EXEC_CAPABILITIES.LINT]: ["bash"],
 
-  // Communication operations
-  [MSG_CAPABILITIES.SEND]: ["message", "send_message"],
-  [MSG_CAPABILITIES.BROADCAST]: ["broadcast", "send_message"],
-  [MSG_CAPABILITIES.SUBSCRIBE]: ["subscribe"],
+  // Communication operations - MCP tool names
+  [MSG_CAPABILITIES.SEND]: ["send_message", "check_messages", "send_peer_message"],
+  [MSG_CAPABILITIES.BROADCAST]: ["send_message"],
+  [MSG_CAPABILITIES.SUBSCRIBE]: ["check_messages"],
 };
+
+// =============================================================================
+// Workspace/Query Tools (always available)
+// =============================================================================
+
+/**
+ * Tools that are always available regardless of capabilities.
+ * These are read-only observability tools that don't require special permissions.
+ */
+export const ALWAYS_ALLOWED_TOOLS: string[] = [
+  "emit_status",
+  "query_index",
+  "get_hierarchy",
+  "get_agent_summary",
+  "get_task",
+  "inject_context",
+  "wait_for_activity",
+  "send_peer_request",
+  "respond_to_peer_request",
+];
 
 /**
  * Get the tools allowed for a set of capabilities

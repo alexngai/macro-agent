@@ -13,6 +13,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   DefaultRoleRegistry,
   filterToolsForRole,
+  isToolAllowedForRole,
+  getRequiredCapabilityForTool,
 } from "../../../src/roles/registry.js";
 import {
   AGENT_CAPABILITIES,
@@ -169,23 +171,26 @@ describe("Role Capability Enforcement", () => {
   // ─────────────────────────────────────────────────────────────────────────
 
   describe("Tool Filtering by Capability", () => {
+    // Use actual MCP tool names that match CAPABILITY_TOOL_MAP
     const mockTools: Tool[] = [
       { name: "read", description: "Read files" },
       { name: "write", description: "Write files" },
       { name: "edit", description: "Edit files" },
       { name: "bash", description: "Run bash commands" },
-      { name: "spawn", description: "Spawn agents" },
+      { name: "spawn_agent", description: "Spawn agents" },
       { name: "done", description: "Signal completion" },
-      { name: "terminate", description: "Terminate agents" },
+      { name: "stop_agent", description: "Stop agents" },
       { name: "glob", description: "Glob files" },
       { name: "grep", description: "Search files" },
+      { name: "send_message", description: "Send messages" },
+      { name: "check_messages", description: "Check messages" },
     ];
 
-    it("ROLE-TOOL-01: Worker role gets spawn tool (for spawning workers)", () => {
+    it("ROLE-TOOL-01: Worker role gets spawn_agent tool (for spawning workers)", () => {
       const workerRole = getBuiltinRole("worker")!;
       const filteredTools = filterToolsForRole(mockTools, workerRole);
 
-      const hasSpawn = filteredTools.some((t) => t.name === "spawn");
+      const hasSpawn = filteredTools.some((t) => t.name === "spawn_agent");
       expect(hasSpawn).toBe(true);
     });
 
@@ -197,27 +202,27 @@ describe("Role Capability Enforcement", () => {
       expect(hasDone).toBe(true);
     });
 
-    it("ROLE-TOOL-03: Worker role does NOT get terminate tool", () => {
+    it("ROLE-TOOL-03: Worker role does NOT get stop_agent tool", () => {
       const workerRole = getBuiltinRole("worker")!;
       const filteredTools = filterToolsForRole(mockTools, workerRole);
 
-      const hasTerminate = filteredTools.some((t) => t.name === "terminate");
+      const hasTerminate = filteredTools.some((t) => t.name === "stop_agent");
       expect(hasTerminate).toBe(false);
     });
 
-    it("ROLE-TOOL-04: Coordinator role gets spawn tool", () => {
+    it("ROLE-TOOL-04: Coordinator role gets spawn_agent tool", () => {
       const coordRole = getBuiltinRole("coordinator")!;
       const filteredTools = filterToolsForRole(mockTools, coordRole);
 
-      const hasSpawn = filteredTools.some((t) => t.name === "spawn");
+      const hasSpawn = filteredTools.some((t) => t.name === "spawn_agent");
       expect(hasSpawn).toBe(true);
     });
 
-    it("ROLE-TOOL-05: Coordinator role gets terminate tool", () => {
+    it("ROLE-TOOL-05: Coordinator role gets stop_agent tool", () => {
       const coordRole = getBuiltinRole("coordinator")!;
       const filteredTools = filterToolsForRole(mockTools, coordRole);
 
-      const hasTerminate = filteredTools.some((t) => t.name === "terminate");
+      const hasTerminate = filteredTools.some((t) => t.name === "stop_agent");
       expect(hasTerminate).toBe(true);
     });
 
@@ -245,11 +250,11 @@ describe("Role Capability Enforcement", () => {
       expect(hasRead).toBe(true);
     });
 
-    it("ROLE-TOOL-09: Monitor role does NOT get spawn tool", () => {
+    it("ROLE-TOOL-09: Monitor role does NOT get spawn_agent tool", () => {
       const monitorRole = getBuiltinRole("monitor")!;
       const filteredTools = filterToolsForRole(mockTools, monitorRole);
 
-      const hasSpawn = filteredTools.some((t) => t.name === "spawn");
+      const hasSpawn = filteredTools.some((t) => t.name === "spawn_agent");
       expect(hasSpawn).toBe(false);
     });
 
@@ -266,33 +271,113 @@ describe("Role Capability Enforcement", () => {
   // ─────────────────────────────────────────────────────────────────────────
 
   describe("Capability to Tool Mapping", () => {
-    it("agent.spawn.worker maps to spawn tool", () => {
+    it("agent.spawn.worker maps to spawn_agent tool", () => {
       const tools = CAPABILITY_TOOL_MAP[AGENT_CAPABILITIES.SPAWN_WORKER];
-      expect(tools).toContain("spawn");
+      expect(tools).toContain("spawn_agent");
     });
 
-    it("agent.spawn.integrator maps to spawn tool", () => {
+    it("agent.spawn.integrator maps to spawn_agent tool", () => {
       const tools = CAPABILITY_TOOL_MAP[AGENT_CAPABILITIES.SPAWN_INTEGRATOR];
-      expect(tools).toContain("spawn");
+      expect(tools).toContain("spawn_agent");
     });
 
-    it("agent.terminate maps to terminate tool", () => {
+    it("agent.terminate maps to stop_agent tool", () => {
       const tools = CAPABILITY_TOOL_MAP[AGENT_CAPABILITIES.TERMINATE];
-      expect(tools).toContain("terminate");
+      expect(tools).toContain("stop_agent");
     });
 
-    it("getToolsForCapabilities returns spawn for spawn capabilities", () => {
+    it("getToolsForCapabilities returns spawn_agent for spawn capabilities", () => {
       const capabilities = [
         AGENT_CAPABILITIES.SPAWN_WORKER,
         AGENT_CAPABILITIES.SPAWN_INTEGRATOR,
       ];
       const tools = getToolsForCapabilities(capabilities, [
-        "spawn",
+        "spawn_agent",
         "read",
         "write",
       ]);
 
-      expect(tools).toContain("spawn");
+      expect(tools).toContain("spawn_agent");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Unit Tests: Runtime Tool Filtering (isToolAllowedForRole)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("Runtime Tool Filtering (isToolAllowedForRole)", () => {
+    it("ROLE-RUNTIME-01: Worker can use spawn_agent tool", () => {
+      const workerRole = getBuiltinRole("worker")!;
+      expect(isToolAllowedForRole("spawn_agent", workerRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-02: Worker can use done tool", () => {
+      const workerRole = getBuiltinRole("worker")!;
+      expect(isToolAllowedForRole("done", workerRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-03: Worker cannot use stop_agent tool", () => {
+      const workerRole = getBuiltinRole("worker")!;
+      expect(isToolAllowedForRole("stop_agent", workerRole)).toBe(false);
+    });
+
+    it("ROLE-RUNTIME-04: Coordinator can use spawn_agent tool", () => {
+      const coordRole = getBuiltinRole("coordinator")!;
+      expect(isToolAllowedForRole("spawn_agent", coordRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-05: Coordinator can use stop_agent tool", () => {
+      const coordRole = getBuiltinRole("coordinator")!;
+      expect(isToolAllowedForRole("stop_agent", coordRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-06: Monitor cannot use spawn_agent tool", () => {
+      const monitorRole = getBuiltinRole("monitor")!;
+      expect(isToolAllowedForRole("spawn_agent", monitorRole)).toBe(false);
+    });
+
+    it("ROLE-RUNTIME-07: Monitor cannot use write tool", () => {
+      const monitorRole = getBuiltinRole("monitor")!;
+      expect(isToolAllowedForRole("write", monitorRole)).toBe(false);
+    });
+
+    it("ROLE-RUNTIME-08: All roles can use observability tools", () => {
+      const workerRole = getBuiltinRole("worker")!;
+      const monitorRole = getBuiltinRole("monitor")!;
+
+      // These are in ALWAYS_ALLOWED_TOOLS
+      expect(isToolAllowedForRole("emit_status", workerRole)).toBe(true);
+      expect(isToolAllowedForRole("query_index", workerRole)).toBe(true);
+      expect(isToolAllowedForRole("get_hierarchy", workerRole)).toBe(true);
+      expect(isToolAllowedForRole("get_agent_summary", workerRole)).toBe(true);
+
+      expect(isToolAllowedForRole("emit_status", monitorRole)).toBe(true);
+      expect(isToolAllowedForRole("query_index", monitorRole)).toBe(true);
+      expect(isToolAllowedForRole("get_hierarchy", monitorRole)).toBe(true);
+      expect(isToolAllowedForRole("get_agent_summary", monitorRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-09: Generic role with wildcard allows all tools", () => {
+      const genericRole = getBuiltinRole("generic")!;
+      expect(isToolAllowedForRole("spawn_agent", genericRole)).toBe(true);
+      expect(isToolAllowedForRole("stop_agent", genericRole)).toBe(true);
+      expect(isToolAllowedForRole("write", genericRole)).toBe(true);
+      expect(isToolAllowedForRole("any_custom_tool", genericRole)).toBe(true);
+    });
+
+    it("ROLE-RUNTIME-10: getRequiredCapabilityForTool returns correct capability", () => {
+      expect(getRequiredCapabilityForTool("spawn_agent")).toBe(
+        AGENT_CAPABILITIES.SPAWN_WORKER
+      );
+      expect(getRequiredCapabilityForTool("stop_agent")).toBe(
+        AGENT_CAPABILITIES.TERMINATE
+      );
+      expect(getRequiredCapabilityForTool("done")).toBe("lifecycle.done");
+    });
+
+    it("ROLE-RUNTIME-11: getRequiredCapabilityForTool returns undefined for always-allowed tools", () => {
+      expect(getRequiredCapabilityForTool("emit_status")).toBeUndefined();
+      expect(getRequiredCapabilityForTool("query_index")).toBeUndefined();
     });
   });
 
