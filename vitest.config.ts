@@ -5,7 +5,7 @@ export default defineConfig({
     watch: false,
     globals: true,
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
     // Use forks instead of threads to avoid segfaults with better-sqlite3
     // Native modules can cause memory access issues during thread cleanup
     pool: "forks",
