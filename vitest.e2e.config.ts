@@ -5,16 +5,15 @@ export default defineConfig({
     watch: false,
     globals: true,
     environment: "node",
-    include: ["src/**/*.test.ts"],
-    // Exclude e2e tests from regular test runs
-    exclude: ["**/node_modules/**", "**/e2e/**"],
+    // Only run sudocode e2e tests
+    include: ["src/task/backend/sudocode/__tests__/e2e/*.e2e.test.ts"],
     // Use forks instead of threads to avoid segfaults with better-sqlite3
-    // Native modules can cause memory access issues during thread cleanup
     pool: "forks",
-    coverage: {
-      provider: "v8",
-      reporter: ["text", "json", "html"],
-    },
+    // Longer timeout for e2e tests that start servers
+    testTimeout: 30000,
+    hookTimeout: 30000,
+    // Run tests sequentially to avoid server port conflicts
+    fileParallelism: false,
     server: {
       deps: {
         // Force inline the sudocode packages to avoid Node.js type stripping issues

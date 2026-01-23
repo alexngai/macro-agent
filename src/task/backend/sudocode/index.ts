@@ -77,3 +77,44 @@ export {
   isIssueComplete,
   isIssueBlocked,
 } from "./mapping.js";
+
+// =============================================================================
+// Sync Policy
+// =============================================================================
+
+export type {
+  SyncPolicy,
+  IssueClosed,
+  DescriptionChanged,
+  BlockerChanged,
+  UpdateIssueOnComplete,
+  SyncEvent,
+  SyncEventCallback,
+  IssueClosedSyncEvent,
+  IssueDeletedSyncEvent,
+  BlockerAddedSyncEvent,
+  BlockerRemovedSyncEvent,
+  DescriptionChangedSyncEvent,
+} from "./sync-policy.js";
+
+export {
+  SyncPolicyEngine,
+  defaultSyncPolicy,
+  createSyncPolicyEngine,
+} from "./sync-policy.js";
+
+// =============================================================================
+// Tool Provider
+// =============================================================================
+
+export type {
+  TaskToolMode,
+  SudocodeToolContext,
+  GetSudocodeToolContext,
+  SudocodeTaskToolProviderConfig,
+} from "./tools.js";
+
+export {
+  SudocodeTaskToolProvider,
+  createSudocodeTaskToolProvider,
+} from "./tools.js";

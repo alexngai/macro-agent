@@ -164,15 +164,31 @@ describe("SudocodeClient", () => {
     });
 
     describe("standalone mode", () => {
-      it("should throw when StandaloneClient is not implemented", async () => {
-        const config: SudocodeClientConfig = {
-          mode: "standalone",
-          projectPath: "/tmp/test-project",
-        };
+      it("should create a StandaloneClient", async () => {
+        // Create a temp directory for the test
+        const { mkdtempSync, rmSync } = await import("fs");
+        const { tmpdir } = await import("os");
+        const { join } = await import("path");
+        const tmpDir = mkdtempSync(join(tmpdir(), "sudocode-client-test-"));
 
-        await expect(createSudocodeClient(config)).rejects.toThrow(
-          "StandaloneClient not yet implemented"
-        );
+        try {
+          const config: SudocodeClientConfig = {
+            mode: "standalone",
+            projectPath: tmpDir,
+          };
+
+          const client = await createSudocodeClient(config);
+
+          try {
+            expect(client.isReady()).toBe(true);
+            expect(typeof client.getIssue).toBe("function");
+            expect(typeof client.listIssues).toBe("function");
+          } finally {
+            client.close();
+          }
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
       });
     });
 
@@ -199,32 +215,61 @@ describe("SudocodeClient", () => {
       it("should fall back to standalone when server is unavailable", async () => {
         mockFetch.mockRejectedValueOnce(new Error("Connection refused"));
 
-        const config: SudocodeClientConfig = {
-          mode: "auto",
-          projectPath: "/tmp/test-project",
-        };
+        // Create a temp directory for the test
+        const { mkdtempSync, rmSync } = await import("fs");
+        const { tmpdir } = await import("os");
+        const { join } = await import("path");
+        const tmpDir = mkdtempSync(join(tmpdir(), "sudocode-client-test-"));
 
-        // Will throw because StandaloneClient is not implemented
-        await expect(createSudocodeClient(config)).rejects.toThrow(
-          "StandaloneClient not yet implemented"
-        );
+        try {
+          const config: SudocodeClientConfig = {
+            mode: "auto",
+            projectPath: tmpDir,
+          };
 
-        expect(mockFetch).toHaveBeenCalled();
+          const client = await createSudocodeClient(config);
+
+          try {
+            expect(mockFetch).toHaveBeenCalled();
+            // Should have fallen back to StandaloneClient (no WebSocket created)
+            expect(MockWebSocket.instances).toHaveLength(0);
+            expect(client.isReady()).toBe(true);
+          } finally {
+            client.close();
+          }
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
       });
 
       it("should use standalone when preferManaged is false", async () => {
         mockFetch.mockResolvedValueOnce({ ok: true });
 
-        const config: SudocodeClientConfig = {
-          mode: "auto",
-          autoDetect: { preferManaged: false },
-          projectPath: "/tmp/test-project",
-        };
+        // Create a temp directory for the test
+        const { mkdtempSync, rmSync } = await import("fs");
+        const { tmpdir } = await import("os");
+        const { join } = await import("path");
+        const tmpDir = mkdtempSync(join(tmpdir(), "sudocode-client-test-"));
 
-        // Will throw because StandaloneClient is not implemented
-        await expect(createSudocodeClient(config)).rejects.toThrow(
-          "StandaloneClient not yet implemented"
-        );
+        try {
+          const config: SudocodeClientConfig = {
+            mode: "auto",
+            autoDetect: { preferManaged: false },
+            projectPath: tmpDir,
+          };
+
+          const client = await createSudocodeClient(config);
+
+          try {
+            // Should have used StandaloneClient despite server being available
+            expect(MockWebSocket.instances).toHaveLength(0);
+            expect(client.isReady()).toBe(true);
+          } finally {
+            client.close();
+          }
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
       });
     });
   });

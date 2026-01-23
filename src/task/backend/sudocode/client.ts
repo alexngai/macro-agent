@@ -490,8 +490,8 @@ export async function createSudocodeClient(
 
   if (mode === "standalone") {
     // Import and create StandaloneClient
-    const { StandaloneClient } = await import("./standalone-client.js");
-    return new StandaloneClient({ projectPath });
+    const { createStandaloneClient } = await import("./standalone-client.js");
+    return createStandaloneClient({ projectPath });
   }
 
   // Auto mode: detect server availability
@@ -510,6 +510,6 @@ export async function createSudocodeClient(
   }
 
   // Fall back to standalone
-  const { StandaloneClient } = await import("./standalone-client.js");
-  return new StandaloneClient({ projectPath });
+  const { createStandaloneClient } = await import("./standalone-client.js");
+  return createStandaloneClient({ projectPath });
 }

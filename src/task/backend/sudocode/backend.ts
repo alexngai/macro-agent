@@ -34,6 +34,12 @@ import type {
 } from "../types.js";
 import type { SudocodeClient, IssueChangeCallback } from "./client.js";
 import { mapSudocodeStatus, isIssueComplete } from "./mapping.js";
+import type { SyncPolicy, SyncEventCallback, SyncEvent } from "./sync-policy.js";
+import {
+  SyncPolicyEngine,
+  defaultSyncPolicy,
+  createSyncPolicyEngine,
+} from "./sync-policy.js";
 
 // Valid status transitions
 const VALID_STATUS_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -70,9 +76,12 @@ export interface SudocodeTaskBackendConfig {
 
   /** Whether to auto-close issues when tasks complete */
   autoCloseIssues?: boolean;
+
+  /** Sync policy configuration */
+  syncPolicy?: Partial<SyncPolicy>;
 }
 
-const DEFAULT_CONFIG: Required<SudocodeTaskBackendConfig> = {
+const DEFAULT_CONFIG: Required<Omit<SudocodeTaskBackendConfig, "syncPolicy">> = {
   projectPath: process.cwd(),
   syncStatus: true,
   autoCloseIssues: false,
@@ -90,9 +99,10 @@ const DEFAULT_CONFIG: Required<SudocodeTaskBackendConfig> = {
  * - Status changes can optionally sync to issues
  */
 export class SudocodeTaskBackend implements TaskBackend {
-  private readonly config: Required<SudocodeTaskBackendConfig>;
+  private readonly config: Required<Omit<SudocodeTaskBackendConfig, "syncPolicy">>;
   private readonly tasksByIssue: Map<string, Set<TaskId>> = new Map();
   private readonly issueByTask: Map<TaskId, string> = new Map();
+  private readonly syncEngine: SyncPolicyEngine;
   private issueChangeUnsubscribe?: Unsubscribe;
 
   constructor(
@@ -101,6 +111,10 @@ export class SudocodeTaskBackend implements TaskBackend {
     config?: SudocodeTaskBackendConfig
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.syncEngine = createSyncPolicyEngine(
+      config?.syncPolicy ?? {},
+      this
+    );
     this.rebuildIndex();
     this.subscribeToIssueChanges();
   }
@@ -268,8 +282,18 @@ export class SudocodeTaskBackend implements TaskBackend {
     if (!this.config.syncStatus) return;
 
     const callback: IssueChangeCallback = (event) => {
-      // When an issue changes, we may need to update task status
-      if (event.type === "status_changed" && event.issue) {
+      // Handle via sync policy engine
+      this.syncEngine.handleIssueChange(event).catch(() => {
+        // Ignore errors from sync engine
+      });
+
+      // Additionally handle status mapping for non-closed status changes
+      // (closed status is handled by the sync engine based on policy)
+      if (
+        event.type === "status_changed" &&
+        event.issue &&
+        event.issue.status !== "closed"
+      ) {
         const taskIds = this.getTasksByIssue(event.issueId);
         const newStatus = mapSudocodeStatus(event.issue.status);
 
@@ -450,11 +474,32 @@ export class SudocodeTaskBackend implements TaskBackend {
     return this.toExtendedTask(updated);
   }
 
-  async delete(_id: TaskId): Promise<void> {
-    throw new SudocodeTaskBackendError(
-      "Delete operation not supported - tasks are immutable",
-      "NOT_SUPPORTED"
-    );
+  async delete(id: TaskId): Promise<void> {
+    const task = this.eventStore.getTask(id);
+    if (!task) {
+      throw new SudocodeTaskBackendError(
+        `Task not found: ${id}`,
+        "TASK_NOT_FOUND",
+        id
+      );
+    }
+
+    // Remove from index if bound to an issue
+    const issueId = this.getIssueForTask(id);
+    if (issueId) {
+      this.removeFromIndex(issueId, id);
+    }
+
+    // Emit deleted event (soft delete - task remains in EventStore but marked deleted)
+    this.eventStore.emit({
+      type: "task",
+      source: { agent_id: task.assigned_agent ?? task.created_by },
+      payload: {
+        task_id: id,
+        action: "status_change",
+        details: { status: "failed", deleted: true },
+      },
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -840,6 +885,7 @@ export class SudocodeTaskBackend implements TaskBackend {
       );
     }
 
+    // Always track locally via EventStore
     this.eventStore.emit({
       type: "task",
       source: { agent_id: task.assigned_agent ?? task.created_by },
@@ -849,6 +895,19 @@ export class SudocodeTaskBackend implements TaskBackend {
         details: { blocker_id: blockerId },
       },
     });
+
+    // If both tasks are bound to sudocode issues, create a sudocode relationship
+    const taskIssueId = this.getIssueForTask(taskId);
+    const blockerIssueId = this.getIssueForTask(blockerId);
+    if (taskIssueId && blockerIssueId) {
+      try {
+        // In sudocode, "A blocks B" means A must complete before B
+        // So we create: blockerIssue blocks taskIssue
+        await this.client.createLink(blockerIssueId, taskIssueId, "blocks");
+      } catch {
+        // Log but don't fail - local tracking is the source of truth
+      }
+    }
   }
 
   async removeBlocker(taskId: TaskId, blockerId: TaskId): Promise<void> {
@@ -861,6 +920,7 @@ export class SudocodeTaskBackend implements TaskBackend {
       );
     }
 
+    // Always update local EventStore tracking
     this.eventStore.emit({
       type: "task",
       source: { agent_id: task.assigned_agent ?? task.created_by },
@@ -870,6 +930,17 @@ export class SudocodeTaskBackend implements TaskBackend {
         details: { blocker_id: blockerId },
       },
     });
+
+    // If both tasks are bound to sudocode issues, remove the sudocode relationship
+    const taskIssueId = this.getIssueForTask(taskId);
+    const blockerIssueId = this.getIssueForTask(blockerId);
+    if (taskIssueId && blockerIssueId) {
+      try {
+        await this.client.removeLink(blockerIssueId, taskIssueId, "blocks");
+      } catch {
+        // Log but don't fail - local tracking is the source of truth
+      }
+    }
   }
 
   async getBlockers(taskId: TaskId): Promise<ExtendedTask[]> {
@@ -882,18 +953,44 @@ export class SudocodeTaskBackend implements TaskBackend {
       );
     }
 
+    // Track blockers by ID to avoid duplicates
+    const blockerMap = new Map<TaskId, ExtendedTask>();
+
     // Get local task blockers
     const localBlockerIds = task.blockers ?? [];
-    const blockers: ExtendedTask[] = [];
-
     for (const blockerId of localBlockerIds) {
       const blocker = this.eventStore.getTask(blockerId);
-      if (blocker) {
-        blockers.push(await this.toExtendedTask(blocker));
+      if (blocker && !blockerMap.has(blockerId)) {
+        blockerMap.set(blockerId, await this.toExtendedTask(blocker));
       }
     }
 
-    return blockers;
+    // If task is bound to an issue, also get sudocode blockers
+    const taskIssueId = this.getIssueForTask(taskId);
+    if (taskIssueId) {
+      try {
+        const issueBlockers = await this.client.getBlockers(taskIssueId);
+        for (const issueBlocker of issueBlockers) {
+          // Find tasks bound to this blocking issue
+          const blockerTaskIds = this.getTasksByIssue(issueBlocker.id);
+          for (const blockerTaskId of blockerTaskIds) {
+            if (!blockerMap.has(blockerTaskId)) {
+              const blockerTask = this.eventStore.getTask(blockerTaskId);
+              if (blockerTask) {
+                blockerMap.set(
+                  blockerTaskId,
+                  await this.toExtendedTask(blockerTask)
+                );
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore errors fetching sudocode blockers - local is source of truth
+      }
+    }
+
+    return Array.from(blockerMap.values());
   }
 
   async getBlocking(taskId: TaskId): Promise<ExtendedTask[]> {
@@ -906,11 +1003,44 @@ export class SudocodeTaskBackend implements TaskBackend {
       );
     }
 
-    // Find all tasks that have this task in their blockers
-    const allTasks = this.eventStore.listTasks();
-    const blocking = allTasks.filter((t) => t.blockers?.includes(taskId));
+    // Track blocked tasks by ID to avoid duplicates
+    const blockingMap = new Map<TaskId, ExtendedTask>();
 
-    return Promise.all(blocking.map((t) => this.toExtendedTask(t)));
+    // Find all local tasks that have this task in their blockers
+    const allTasks = this.eventStore.listTasks();
+    const localBlocking = allTasks.filter((t) => t.blockers?.includes(taskId));
+    for (const blockedTask of localBlocking) {
+      if (!blockingMap.has(blockedTask.id)) {
+        blockingMap.set(blockedTask.id, await this.toExtendedTask(blockedTask));
+      }
+    }
+
+    // If task is bound to an issue, also get sudocode blocking
+    const taskIssueId = this.getIssueForTask(taskId);
+    if (taskIssueId) {
+      try {
+        const issueBlocking = await this.client.getBlocking(taskIssueId);
+        for (const blockedIssue of issueBlocking) {
+          // Find tasks bound to this blocked issue
+          const blockedTaskIds = this.getTasksByIssue(blockedIssue.id);
+          for (const blockedTaskId of blockedTaskIds) {
+            if (!blockingMap.has(blockedTaskId)) {
+              const blockedTask = this.eventStore.getTask(blockedTaskId);
+              if (blockedTask) {
+                blockingMap.set(
+                  blockedTaskId,
+                  await this.toExtendedTask(blockedTask)
+                );
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore errors fetching sudocode blocking - local is source of truth
+      }
+    }
+
+    return Array.from(blockingMap.values());
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -964,6 +1094,24 @@ export class SudocodeTaskBackend implements TaskBackend {
 
       callback(event);
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Sync Policy
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get the current sync policy
+   */
+  getSyncPolicy(): SyncPolicy {
+    return this.syncEngine.getPolicy();
+  }
+
+  /**
+   * Subscribe to sync events from the policy engine
+   */
+  onSyncEvent(callback: SyncEventCallback): Unsubscribe {
+    return this.syncEngine.onSyncEvent(callback);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

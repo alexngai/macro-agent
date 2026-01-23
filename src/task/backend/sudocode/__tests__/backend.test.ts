@@ -190,6 +190,7 @@ function createMockEventStore(): EventStore {
 function createMockSudocodeClient(): SudocodeClient {
   const issues = new Map<string, Issue>();
   const issueBlockers = new Map<string, Issue[]>();
+  const issueBlocking = new Map<string, Issue[]>();
   const issueChangeCallbacks: IssueChangeCallback[] = [];
 
   // Add some test issues
@@ -229,7 +230,7 @@ function createMockSudocodeClient(): SudocodeClient {
     createLink: vi.fn(async () => {}),
     removeLink: vi.fn(async () => {}),
     getBlockers: vi.fn(async (id: string) => issueBlockers.get(id) ?? []),
-    getBlocking: vi.fn(async () => []),
+    getBlocking: vi.fn(async (id: string) => issueBlocking.get(id) ?? []),
 
     getSpec: vi.fn(async () => null),
     listSpecs: vi.fn(async () => []),
@@ -251,6 +252,7 @@ function createMockSudocodeClient(): SudocodeClient {
     // Test helpers
     _setIssue: (id: string, issue: Issue) => issues.set(id, issue),
     _setBlockers: (id: string, blockers: Issue[]) => issueBlockers.set(id, blockers),
+    _setBlocking: (id: string, blocking: Issue[]) => issueBlocking.set(id, blocking),
     _notifyChange: (event: any) => {
       for (const cb of issueChangeCallbacks) {
         cb(event);
@@ -259,6 +261,7 @@ function createMockSudocodeClient(): SudocodeClient {
   } as unknown as SudocodeClient & {
     _setIssue: (id: string, issue: Issue) => void;
     _setBlockers: (id: string, blockers: Issue[]) => void;
+    _setBlocking: (id: string, blocking: Issue[]) => void;
     _notifyChange: (event: any) => void;
   };
 }
@@ -268,6 +271,7 @@ describe("SudocodeTaskBackend", () => {
   let client: SudocodeClient & {
     _setIssue: (id: string, issue: Issue) => void;
     _setBlockers: (id: string, blockers: Issue[]) => void;
+    _setBlocking: (id: string, blocking: Issue[]) => void;
     _notifyChange: (event: any) => void;
   };
   let backend: SudocodeTaskBackend;
@@ -407,6 +411,39 @@ describe("SudocodeTaskBackend", () => {
       await expect(
         backend.update("nonexistent", { description: "Test" })
       ).rejects.toThrow("Task not found");
+    });
+  });
+
+  describe("delete", () => {
+    it("should soft-delete a task", async () => {
+      const task = await backend.create({
+        description: "Test task",
+        created_by: "agent-1",
+      });
+
+      await backend.delete(task.id);
+
+      const deleted = await backend.get(task.id);
+      expect(deleted!.status).toBe("failed");
+    });
+
+    it("should remove task from issue index when deleted", async () => {
+      const task = await backend.create({
+        description: "Test task",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+
+      await backend.delete(task.id);
+
+      const taskIds = backend.getTasksByIssue("i-test1");
+      expect(taskIds).not.toContain(task.id);
+    });
+
+    it("should throw for non-existent task", async () => {
+      await expect(backend.delete("nonexistent")).rejects.toThrow(
+        "Task not found"
+      );
     });
   });
 
@@ -945,6 +982,199 @@ describe("SudocodeTaskBackend", () => {
       await expect(backend.unbindFromIssue("nonexistent")).rejects.toThrow(
         "Task not found"
       );
+    });
+  });
+
+  describe("sudocode relationship integration", () => {
+    it("should create sudocode link when both tasks are bound to issues", async () => {
+      // Create two tasks bound to different issues
+      const blocker = await backend.create({
+        description: "Blocker task",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+      const blocked = await backend.create({
+        description: "Blocked task",
+        created_by: "agent-1",
+        external_id: "i-test2",
+      });
+
+      await backend.addBlocker(blocked.id, blocker.id);
+
+      // Verify sudocode createLink was called with correct args
+      expect(client.createLink).toHaveBeenCalledWith(
+        "i-test1", // blocker issue
+        "i-test2", // blocked issue
+        "blocks"
+      );
+    });
+
+    it("should not create sudocode link when tasks are not bound", async () => {
+      // Create two tasks without external_id
+      const blocker = await backend.create({
+        description: "Blocker task",
+        created_by: "agent-1",
+      });
+      const blocked = await backend.create({
+        description: "Blocked task",
+        created_by: "agent-1",
+      });
+
+      await backend.addBlocker(blocked.id, blocker.id);
+
+      // createLink should not be called
+      expect(client.createLink).not.toHaveBeenCalled();
+    });
+
+    it("should remove sudocode link when both tasks are bound to issues", async () => {
+      // Create two tasks bound to different issues
+      const blocker = await backend.create({
+        description: "Blocker task",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+      const blocked = await backend.create({
+        description: "Blocked task",
+        created_by: "agent-1",
+        external_id: "i-test2",
+      });
+
+      await backend.addBlocker(blocked.id, blocker.id);
+      await backend.removeBlocker(blocked.id, blocker.id);
+
+      // Verify sudocode removeLink was called with correct args
+      expect(client.removeLink).toHaveBeenCalledWith(
+        "i-test1", // blocker issue
+        "i-test2", // blocked issue
+        "blocks"
+      );
+    });
+
+    it("should merge local and sudocode blockers in getBlockers", async () => {
+      // Create a task bound to i-test2
+      const task = await backend.create({
+        description: "Test task",
+        created_by: "agent-1",
+        external_id: "i-test2",
+      });
+
+      // Create a local blocker (unbound task)
+      const localBlocker = await backend.create({
+        description: "Local blocker",
+        created_by: "agent-1",
+      });
+      await backend.addBlocker(task.id, localBlocker.id);
+
+      // Create a task bound to i-test1 (sudocode blocker)
+      const sudocodeBlocker = await backend.create({
+        description: "Sudocode blocker",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+
+      // Set up sudocode to report i-test1 as blocking i-test2
+      client._setBlockers("i-test2", [
+        {
+          id: "i-test1",
+          uuid: "uuid-1",
+          title: "Test Issue 1",
+          content: "Test content",
+          status: "open",
+          priority: 1,
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z",
+        },
+      ]);
+
+      const blockers = await backend.getBlockers(task.id);
+
+      // Should have both local and sudocode blockers
+      expect(blockers).toHaveLength(2);
+      expect(blockers.map((b) => b.id)).toContain(localBlocker.id);
+      expect(blockers.map((b) => b.id)).toContain(sudocodeBlocker.id);
+    });
+
+    it("should merge local and sudocode blocking in getBlocking", async () => {
+      // Create a task bound to i-test1
+      const task = await backend.create({
+        description: "Test task",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+
+      // Create a local blocked task (unbound)
+      const localBlocked = await backend.create({
+        description: "Local blocked",
+        created_by: "agent-1",
+      });
+      await backend.addBlocker(localBlocked.id, task.id);
+
+      // Create a task bound to i-test2 (sudocode blocked)
+      const sudocodeBlocked = await backend.create({
+        description: "Sudocode blocked",
+        created_by: "agent-1",
+        external_id: "i-test2",
+      });
+
+      // Set up sudocode to report i-test1 blocks i-test2
+      client._setBlocking("i-test1", [
+        {
+          id: "i-test2",
+          uuid: "uuid-2",
+          title: "Test Issue 2",
+          content: "Test content",
+          status: "open",
+          priority: 2,
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z",
+        },
+      ]);
+
+      const blocking = await backend.getBlocking(task.id);
+
+      // Should have both local and sudocode blocked tasks
+      expect(blocking).toHaveLength(2);
+      expect(blocking.map((b) => b.id)).toContain(localBlocked.id);
+      expect(blocking.map((b) => b.id)).toContain(sudocodeBlocked.id);
+    });
+
+    it("should deduplicate when same task is both local and sudocode blocker", async () => {
+      // Create blocker bound to i-test1
+      const blocker = await backend.create({
+        description: "Blocker task",
+        created_by: "agent-1",
+        external_id: "i-test1",
+      });
+
+      // Create blocked task bound to i-test2
+      const blocked = await backend.create({
+        description: "Blocked task",
+        created_by: "agent-1",
+        external_id: "i-test2",
+      });
+
+      // Add as local blocker
+      await backend.addBlocker(blocked.id, blocker.id);
+
+      // Also set up sudocode to report the same relationship
+      client._setBlockers("i-test2", [
+        {
+          id: "i-test1",
+          uuid: "uuid-1",
+          title: "Test Issue 1",
+          content: "Test content",
+          status: "open",
+          priority: 1,
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z",
+        },
+      ]);
+
+      const blockers = await backend.getBlockers(blocked.id);
+
+      // Should only have one blocker (deduplicated)
+      expect(blockers).toHaveLength(1);
+      expect(blockers[0].id).toBe(blocker.id);
     });
   });
 
