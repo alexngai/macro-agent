@@ -236,6 +236,7 @@ export interface SimulatorServices {
   messageRouter: MessageRouter;
   taskManager: TaskManager;
   mergeQueue?: MergeQueueInterface;
+  roleRegistry?: import("../../../src/roles/types.js").RoleRegistry;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

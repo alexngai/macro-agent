@@ -352,4 +352,5 @@ export type AgentManagerErrorCode =
   | "ALREADY_RUNNING"
   | "NOT_RUNNING"
   | "INVALID_STATE"
-  | "PERMISSION_DENIED";
+  | "PERMISSION_DENIED"
+  | "CAPABILITY_DENIED";

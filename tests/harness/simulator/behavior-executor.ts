@@ -367,16 +367,25 @@ export class BehaviorExecutor {
         return { status: "completed", step };
 
       case "spawn_child": {
-        const childSimulator = await this.config.spawnChild({
-          role: step.role,
-          behavior: step.behavior,
-          config: step.config as Record<string, unknown>,
-        });
-        return {
-          status: "spawned_child",
-          step,
-          childAgentId: childSimulator.agentId,
-        };
+        try {
+          const childSimulator = await this.config.spawnChild({
+            role: step.role,
+            behavior: step.behavior,
+            config: step.config as Record<string, unknown>,
+          });
+          return {
+            status: "spawned_child",
+            step,
+            childAgentId: childSimulator.agentId,
+          };
+        } catch (error) {
+          // Spawn failed (e.g., capability denied)
+          return {
+            status: "failed",
+            step,
+            error: error instanceof Error ? error : new Error(String(error)),
+          };
+        }
       }
 
       case "done":

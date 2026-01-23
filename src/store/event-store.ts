@@ -307,12 +307,13 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     };
 
     // Store the event
+    // Note: Use empty object for undefined source to avoid JSON.parse errors in query
     store.setRow('events', event.id, {
       id: event.id,
       version: event.version,
       timestamp: event.timestamp,
       type: event.type,
-      source: JSON.stringify(event.source),
+      source: JSON.stringify(event.source ?? {}),
       target: event.target ? JSON.stringify(event.target) : '',
       payload: JSON.stringify(event.payload),
       metadata: event.metadata ? JSON.stringify(event.metadata) : '',
@@ -336,12 +337,18 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       if (!row.id) continue;
 
       // Parse raw event data
+      // Handle legacy data where source might be stored as "undefined" string
+      const sourceStr = row.source as string;
+      const parsedSource = sourceStr && sourceStr !== 'undefined'
+        ? JSON.parse(sourceStr)
+        : {};
+
       const rawEvent = {
         id: row.id as string,
         version: row.version as number | undefined,
         timestamp: row.timestamp as number,
         type: row.type as string,
-        source: JSON.parse(row.source as string),
+        source: parsedSource,
         target: row.target ? JSON.parse(row.target as string) : undefined,
         payload: JSON.parse(row.payload as string),
         metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,

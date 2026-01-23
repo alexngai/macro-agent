@@ -30,6 +30,9 @@ import type {
   DoneStatus,
 } from "./types.js";
 import { BehaviorExecutor } from "./behavior-executor.js";
+import { AGENT_CAPABILITIES } from "../../../src/roles/capabilities.js";
+import { DefaultRoleRegistry } from "../../../src/roles/registry.js";
+import type { Capability } from "../../../src/roles/types.js";
 
 /**
  * Create a new agent simulator
@@ -408,12 +411,21 @@ class DefaultAgentSimulator implements AgentSimulator {
         return { status: "completed", step };
 
       case "spawn_child":
-        const childSimulator = await this.spawnChild(step);
-        return {
-          status: "spawned_child",
-          step,
-          childAgentId: childSimulator.agentId,
-        };
+        try {
+          const childSimulator = await this.spawnChild(step);
+          return {
+            status: "spawned_child",
+            step,
+            childAgentId: childSimulator.agentId,
+          };
+        } catch (error) {
+          // Spawn failed (e.g., capability denied)
+          return {
+            status: "failed",
+            step,
+            error: error instanceof Error ? error : new Error(String(error)),
+          };
+        }
 
       case "done":
         await this.handleDone(step.status, step.summary, step.details);
@@ -654,6 +666,19 @@ class DefaultAgentSimulator implements AgentSimulator {
     behavior: SimulatedBehavior;
     config?: Partial<SimulatorConfig>;
   }): Promise<AgentSimulator> {
+    // Check spawn capability
+    const roleRegistry = this.services.roleRegistry ?? new DefaultRoleRegistry();
+    const parentRole = this.role ?? "worker";
+    const childRole = step.role;
+    const requiredCapability = this.getSpawnCapability(childRole);
+
+    if (!roleRegistry.hasCapability(parentRole, requiredCapability)) {
+      throw new Error(
+        `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
+          `Required capability: ${requiredCapability}`
+      );
+    }
+
     const childConfig: SimulatorConfig = {
       role: step.role,
       behavior: step.behavior,
@@ -675,6 +700,28 @@ class DefaultAgentSimulator implements AgentSimulator {
 
     this.context!.children.push(child);
     return child;
+  }
+
+  /**
+   * Map a child role name to the required spawn capability
+   * Handles subroles like "worker.resolver" by checking base role
+   */
+  private getSpawnCapability(childRole: string): Capability {
+    // Extract base role (e.g., "worker.resolver" -> "worker")
+    const baseRole = childRole.split(".")[0];
+
+    switch (baseRole) {
+      case "worker":
+        return AGENT_CAPABILITIES.SPAWN_WORKER;
+      case "integrator":
+        return AGENT_CAPABILITIES.SPAWN_INTEGRATOR;
+      case "monitor":
+        return AGENT_CAPABILITIES.SPAWN_MONITOR;
+      case "coordinator":
+        return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+      default:
+        return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+    }
   }
 
   private async handleDone(

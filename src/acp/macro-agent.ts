@@ -66,6 +66,9 @@ import { ACPError } from "./types.js";
 import type { PeerManager } from "../peer/peer-manager.js";
 import type { CapabilityManager } from "../peer/capability-manager.js";
 import type { AgentConfig } from "../agent/types.js";
+import type { RoleRegistry, Capability } from "../roles/types.js";
+import { AGENT_CAPABILITIES } from "../roles/capabilities.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Protocol Constants
@@ -111,6 +114,9 @@ export interface MacroAgentConfig {
   /** CapabilityManager for peer capability management (optional) */
   capabilityManager?: CapabilityManager;
 
+  /** RoleRegistry for role-based capability checking (optional, uses default if not provided) */
+  roleRegistry?: RoleRegistry;
+
   /** Default working directory for new sessions */
   defaultCwd?: string;
 }
@@ -130,6 +136,7 @@ export class MacroAgent implements Agent {
   private taskManager: TaskManager;
   private peerManager: PeerManager | undefined;
   private capabilityManager: CapabilityManager | undefined;
+  private roleRegistry: RoleRegistry;
   private sessionMapper: SessionMapper;
   private defaultCwd: string;
 
@@ -147,6 +154,7 @@ export class MacroAgent implements Agent {
     this.taskManager = config.taskManager;
     this.peerManager = config.peerManager;
     this.capabilityManager = config.capabilityManager;
+    this.roleRegistry = config.roleRegistry ?? new DefaultRoleRegistry();
     this.sessionMapper = new SessionMapper();
     this.defaultCwd = config.defaultCwd ?? process.cwd();
   }
@@ -497,6 +505,31 @@ export class MacroAgent implements Agent {
       }
     }
 
+    // Check spawn capability if parent exists
+    if (parentId) {
+      const parentAgent = this.eventStore.getAgent(parentId);
+      if (parentAgent) {
+        const childRole = params.role ?? "worker";
+        const requiredCapability = this.getSpawnCapability(childRole);
+
+        // Check if parent has the required spawn capability
+        const parentRole = parentAgent.role ?? "worker";
+        if (!this.roleRegistry.hasCapability(parentRole, requiredCapability)) {
+          throw new ACPError(
+            `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
+              `Required capability: ${requiredCapability}`,
+            "CAPABILITY_DENIED",
+            {
+              parentId,
+              parentRole,
+              childRole,
+              requiredCapability,
+            }
+          );
+        }
+      }
+    }
+
     // Merge default config with per-spawn override
     const mergedConfig = this.mergeSubAgentConfig(
       this.initConfig.defaultSubAgentConfig,
@@ -507,6 +540,7 @@ export class MacroAgent implements Agent {
     const spawned = await this.agentManager.spawn({
       task: params.task_description,
       parent: parentId ?? null,
+      role: params.role,
       cwd: params.options?.cwd ?? this.defaultCwd,
       subscribeParent: params.options?.subscribeParent ?? true,
       topics: params.options?.topics,
@@ -520,6 +554,31 @@ export class MacroAgent implements Agent {
       taskId: spawned.agent.task_id!,
       sessionId: spawned.session_id,
     };
+  }
+
+  /**
+   * Map a child role name to the required spawn capability.
+   * Handles subroles like "worker.resolver" by checking base role.
+   */
+  private getSpawnCapability(childRole: string): Capability {
+    // Extract base role (e.g., "worker.resolver" -> "worker")
+    const baseRole = childRole.split(".")[0];
+
+    switch (baseRole) {
+      case "worker":
+        return AGENT_CAPABILITIES.SPAWN_WORKER;
+      case "integrator":
+        return AGENT_CAPABILITIES.SPAWN_INTEGRATOR;
+      case "monitor":
+        return AGENT_CAPABILITIES.SPAWN_MONITOR;
+      case "coordinator":
+        // Coordinators require special handling - typically only other coordinators
+        // or system-level agents can spawn coordinators
+        return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+      default:
+        // For custom roles, check against the custom spawn capability
+        return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+    }
   }
 
   /**

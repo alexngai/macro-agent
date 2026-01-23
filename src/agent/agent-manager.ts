@@ -38,6 +38,9 @@ import type {
   AgentConfig,
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
+import type { RoleRegistry, Capability } from "../roles/types.js";
+import { AGENT_CAPABILITIES } from "../roles/capabilities.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import type { WorkspaceManager, Workspace } from "../workspace/types.js";
 import {
@@ -45,6 +48,35 @@ import {
   type WorkspaceProvider,
   type CascadeAgentManager,
 } from "../lifecycle/cascade.js";
+
+// ─────────────────────────────────────────────────────────────────
+// Helper Functions
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Map a child role name to the required spawn capability.
+ * Handles subroles like "worker.resolver" by checking base role.
+ */
+function getSpawnCapability(childRole: string): Capability {
+  // Extract base role (e.g., "worker.resolver" -> "worker")
+  const baseRole = childRole.split(".")[0];
+
+  switch (baseRole) {
+    case "worker":
+      return AGENT_CAPABILITIES.SPAWN_WORKER;
+    case "integrator":
+      return AGENT_CAPABILITIES.SPAWN_INTEGRATOR;
+    case "monitor":
+      return AGENT_CAPABILITIES.SPAWN_MONITOR;
+    case "coordinator":
+      // Coordinators require special handling - typically only other coordinators
+      // or system-level agents can spawn coordinators
+      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+    default:
+      // For custom roles, check against the custom spawn capability
+      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // AgentManager Interface
@@ -190,6 +222,14 @@ export interface AgentManagerConfig {
    * isolated git worktrees.
    */
   workspaceManager?: WorkspaceManager;
+
+  /**
+   * Optional RoleRegistry for capability enforcement.
+   * When provided, spawn operations will check if the parent agent
+   * has the required capability to spawn the requested child role.
+   * Defaults to DefaultRoleRegistry if not provided.
+   */
+  roleRegistry?: RoleRegistry;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -206,6 +246,7 @@ export function createAgentManager(
     defaultAgentType = "claude-code",
     defaultCwd = process.cwd(),
     workspaceManager,
+    roleRegistry = new DefaultRoleRegistry(),
   } = config;
 
   // Active sessions tracked in memory
@@ -251,6 +292,20 @@ export function createAgentManager(
         throw new AgentManagerError(
           `Parent agent not found: ${parent}`,
           "AGENT_NOT_FOUND",
+          parent
+        );
+      }
+
+      // Check spawn capability
+      const childRole = role ?? "worker";
+      const requiredCapability = getSpawnCapability(childRole);
+      const parentRole = parentAgent.role ?? "worker";
+
+      if (!roleRegistry.hasCapability(parentRole, requiredCapability)) {
+        throw new AgentManagerError(
+          `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
+            `Required capability: ${requiredCapability}`,
+          "CAPABILITY_DENIED",
           parent
         );
       }
