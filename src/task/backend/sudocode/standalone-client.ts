@@ -164,8 +164,14 @@ export class StandaloneClient implements SudocodeClient {
     const cli = this.getCli();
     const db = this.getDb();
 
+    // Transform updates to match CLI's expected type (convert null to undefined)
+    const cliUpdates = {
+      ...updates,
+      assignee: updates.assignee === null ? undefined : updates.assignee,
+    };
+
     const previousIssue = cli.getIssue(db, id) as Issue | undefined;
-    const updated = cli.updateIssue(db, id, updates) as Issue;
+    const updated = cli.updateIssue(db, id, cliUpdates) as Issue;
 
     // Emit change event
     if (previousIssue) {

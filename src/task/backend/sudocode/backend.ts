@@ -1135,7 +1135,12 @@ export class SudocodeTaskBackend implements TaskBackend {
    * Get the external_id from a task (if stored in outputs)
    */
   private getTaskExternalId(task: Task): string | undefined {
-    // Check if external_id is stored in task outputs (where we put it on creation)
+    // First check in-memory index (populated during create and rebuildIndex)
+    const fromIndex = this.issueByTask.get(task.id);
+    if (fromIndex) {
+      return fromIndex;
+    }
+    // Fall back to checking outputs (for persistence after restart via bindToIssue)
     const outputs = task.outputs as Record<string, unknown> | undefined;
     if (outputs?.external_id && typeof outputs.external_id === "string") {
       return outputs.external_id;

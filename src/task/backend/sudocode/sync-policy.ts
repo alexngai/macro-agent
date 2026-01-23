@@ -143,7 +143,7 @@ export type SyncEventCallback = (event: SyncEvent) => void;
 export interface SyncableTaskBackend {
   getTasksByIssue(issueId: string): TaskId[];
   get(taskId: TaskId): Promise<{ status: string } | null>;
-  complete(taskId: TaskId, outputs?: { reason?: string }): Promise<void>;
+  complete(taskId: TaskId, outputs?: { summary?: string }): Promise<void>;
   fail(taskId: TaskId, error: { code: string; message: string }): Promise<void>;
   update(taskId: TaskId, updates: { description?: string }): Promise<unknown>;
 }
@@ -236,7 +236,7 @@ export class SyncPolicyEngine {
       switch (this.policy.onIssueClosed) {
         case "complete_task":
           await this.backend.complete(taskId, {
-            reason: "issue_closed_externally",
+            summary: "Issue closed externally",
           });
           break;
 

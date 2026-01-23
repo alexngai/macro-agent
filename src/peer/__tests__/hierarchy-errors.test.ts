@@ -67,7 +67,7 @@ describe("HierarchyErrors", () => {
     it("should create error with code and message", () => {
       const error = new HierarchyError(4001, "Test error");
 
-      expect(error.code).toBe(4001);
+      expect(error.errorCode).toBe(4001);
       expect(error.message).toBe("Test error");
       expect(error.name).toBe("HierarchyError");
     });
@@ -99,7 +99,7 @@ describe("HierarchyErrors", () => {
     it("capabilityDenied should create correct error", () => {
       const error = capabilityDenied("task-delegation", "peer-1");
 
-      expect(error.code).toBe(4001);
+      expect(error.errorCode).toBe(4001);
       expect(error.message).toContain("task-delegation");
       expect(error.data).toEqual({ capability: "task-delegation", peerId: "peer-1" });
     });
@@ -107,7 +107,7 @@ describe("HierarchyErrors", () => {
     it("peerUnavailable should create correct error", () => {
       const error = peerUnavailable("peer-1", "connection timeout");
 
-      expect(error.code).toBe(4002);
+      expect(error.errorCode).toBe(4002);
       expect(error.message).toContain("peer-1");
       expect(error.message).toContain("connection timeout");
     });
@@ -115,28 +115,28 @@ describe("HierarchyErrors", () => {
     it("taskRejected should create correct error", () => {
       const error = taskRejected("task-123", "queue full");
 
-      expect(error.code).toBe(4003);
+      expect(error.errorCode).toBe(4003);
       expect(error.data).toEqual({ taskId: "task-123", reason: "queue full" });
     });
 
     it("taskTimeout should create correct error", () => {
       const error = taskTimeout("task-123", 5000);
 
-      expect(error.code).toBe(4004);
+      expect(error.errorCode).toBe(4004);
       expect(error.message).toContain("5000ms");
     });
 
     it("invalidRequest should create correct error", () => {
       const error = invalidRequest("missing required field", { field: "taskId" });
 
-      expect(error.code).toBe(4005);
+      expect(error.errorCode).toBe(4005);
       expect(error.data).toEqual({ field: "taskId" });
     });
 
     it("internalError should create correct error", () => {
       const error = internalError("something went wrong");
 
-      expect(error.code).toBe(4006);
+      expect(error.errorCode).toBe(4006);
       expect(error.message).toContain("something went wrong");
     });
   });
@@ -145,35 +145,35 @@ describe("HierarchyErrors", () => {
     it("federationRejected should create correct error", () => {
       const error = federationRejected("peer-1", "not accepting federations");
 
-      expect(error.code).toBe(4101);
+      expect(error.errorCode).toBe(4101);
       expect(error.data).toEqual({ peerId: "peer-1", reason: "not accepting federations" });
     });
 
     it("remoteAgentNotFound should create correct error", () => {
       const error = remoteAgentNotFound("agent-123", "peer-1");
 
-      expect(error.code).toBe(4102);
+      expect(error.errorCode).toBe(4102);
       expect(error.data).toEqual({ agentId: "agent-123", peerId: "peer-1" });
     });
 
     it("federationNotFound should create correct error", () => {
       const error = federationNotFound("fed-123");
 
-      expect(error.code).toBe(4103);
+      expect(error.errorCode).toBe(4103);
       expect(error.data).toEqual({ federationId: "fed-123" });
     });
 
     it("mountDenied should create correct error", () => {
       const error = mountDenied("agent-123", "agent is private");
 
-      expect(error.code).toBe(4104);
+      expect(error.errorCode).toBe(4104);
       expect(error.message).toContain("agent-123");
     });
 
     it("alreadyFederated should create correct error", () => {
       const error = alreadyFederated("peer-1");
 
-      expect(error.code).toBe(4105);
+      expect(error.errorCode).toBe(4105);
       expect(error.data).toEqual({ peerId: "peer-1" });
     });
   });
@@ -182,28 +182,28 @@ describe("HierarchyErrors", () => {
     it("registrationRejected should create correct error", () => {
       const error = registrationRejected("parent-peer", "capacity reached");
 
-      expect(error.code).toBe(4201);
+      expect(error.errorCode).toBe(4201);
       expect(error.data).toEqual({ parentPeerId: "parent-peer", reason: "capacity reached" });
     });
 
     it("proxyNotFound should create correct error", () => {
       const error = proxyNotFound("proxy-123");
 
-      expect(error.code).toBe(4202);
+      expect(error.errorCode).toBe(4202);
       expect(error.data).toEqual({ proxyAgentId: "proxy-123" });
     });
 
     it("alreadyRegistered should create correct error", () => {
       const error = alreadyRegistered("parent-peer");
 
-      expect(error.code).toBe(4203);
+      expect(error.errorCode).toBe(4203);
       expect(error.data).toEqual({ parentPeerId: "parent-peer" });
     });
 
     it("notRegistered should create correct error", () => {
       const error = notRegistered("parent-peer");
 
-      expect(error.code).toBe(4204);
+      expect(error.errorCode).toBe(4204);
       expect(error.data).toEqual({ parentPeerId: "parent-peer" });
     });
   });
@@ -292,14 +292,14 @@ describe("HierarchyErrors", () => {
         const original = new Error("Something broke");
         const result = toHierarchyError(original);
 
-        expect(result.code).toBe(4006);
+        expect(result.errorCode).toBe(4006);
         expect(result.message).toContain("Something broke");
       });
 
       it("should wrap string in INTERNAL_ERROR", () => {
         const result = toHierarchyError("string error");
 
-        expect(result.code).toBe(4006);
+        expect(result.errorCode).toBe(4006);
         expect(result.message).toContain("string error");
       });
     });

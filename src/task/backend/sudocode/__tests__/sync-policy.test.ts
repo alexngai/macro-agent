@@ -111,7 +111,7 @@ describe("SyncPolicyEngine", () => {
       await engine.handleIssueChange(event);
 
       expect(backend.complete).toHaveBeenCalledWith("task-1", {
-        reason: "issue_closed_externally",
+        summary: "Issue closed externally",
       });
     });
 
