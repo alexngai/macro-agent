@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { AgentFactory } from "acp-factory";
 import { createEventStore, EventStore } from "../../store/event-store.js";
 import { createMessageRouter, MessageRouter } from "../../router/message-router.js";
 import { createAgentManager, AgentManager } from "../agent-manager.js";
@@ -359,6 +360,45 @@ describe("System Prompt Generator", () => {
       expect(prompt).toContain("spawn_agent");
       expect(prompt).toContain("get_hierarchy");
       expect(prompt).toContain("create_task");
+    });
+
+    it("should include signal handling section for coordinator role", () => {
+      const context: SystemPromptContext = {
+        agentId: "coordinator_1",
+        task: "Orchestrate workers",
+        isHeadManager: true,
+        lineage: [],
+        role: "coordinator",
+        mcpTools: ["spawn_agent", "stop_agent", "emit_status"],
+      };
+
+      const prompt = generateSystemPrompt(context);
+
+      // Should include signal handling section
+      expect(prompt).toContain("Signal Handling");
+      expect(prompt).toContain("STALE_AGENT");
+      expect(prompt).toContain("Decision flow");
+      expect(prompt).toContain("Retry Flow");
+      expect(prompt).toContain("Failure Flow");
+      expect(prompt).toContain("retryPolicy");
+    });
+
+    it("should not include signal handling section for worker role", () => {
+      const context: SystemPromptContext = {
+        agentId: "worker_1",
+        task: "Do work",
+        parentId: "coordinator_1",
+        isHeadManager: false,
+        lineage: ["coordinator_1"],
+        role: "worker",
+        mcpTools: ["emit_status"],
+      };
+
+      const prompt = generateSystemPrompt(context);
+
+      // Should NOT include coordinator-specific signal handling
+      expect(prompt).not.toContain("STALE_AGENT Signal");
+      expect(prompt).not.toContain("Retry Flow");
     });
   });
 });
@@ -889,6 +929,164 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       );
 
       expect(result).toBe(false);
+    });
+  });
+});
+
+describe("AgentManager HealthCheckService Integration", () => {
+  let eventStore: EventStore;
+  let messageRouter: MessageRouter;
+  let mockHealthCheckService: {
+    startForCoordinator: ReturnType<typeof vi.fn>;
+    stopForCoordinator: ReturnType<typeof vi.fn>;
+    stopAll: ReturnType<typeof vi.fn>;
+  };
+  let agentManager: AgentManager;
+  let mockHandle: any;
+  let mockSession: any;
+
+  beforeEach(async () => {
+    eventStore = await createEventStore({ inMemory: true });
+    messageRouter = createMessageRouter(eventStore);
+
+    // Create mock HealthCheckService
+    mockHealthCheckService = {
+      startForCoordinator: vi.fn(),
+      stopForCoordinator: vi.fn(),
+      stopAll: vi.fn(),
+    };
+
+    // Counter for unique session IDs
+    let sessionCounter = 0;
+
+    // Set up mocks with unique session IDs per call (matching existing tests)
+    mockHandle = {
+      createSession: vi.fn().mockImplementation(() => {
+        sessionCounter++;
+        mockSession = {
+          id: `mock_session_${sessionCounter}`,
+          prompt: vi.fn(),
+        };
+        return Promise.resolve(mockSession);
+      }),
+      loadSession: vi.fn().mockImplementation(() => {
+        return Promise.resolve(mockSession);
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.mocked(AgentFactory.spawn).mockResolvedValue(mockHandle);
+
+    agentManager = createAgentManager(eventStore, messageRouter, {
+      healthCheckService: mockHealthCheckService as any,
+    });
+  });
+
+  afterEach(async () => {
+    await agentManager.close();
+    await eventStore.close();
+    vi.clearAllMocks();
+  });
+
+  describe("spawn() with coordinator role", () => {
+    it("should start health checks when spawning a coordinator", async () => {
+      const spawned = await agentManager.spawn({
+        task: "Coordinate work",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      expect(mockHealthCheckService.startForCoordinator).toHaveBeenCalledWith(
+        spawned.id
+      );
+    });
+
+    it("should not start health checks when spawning a worker", async () => {
+      // First spawn a coordinator as parent
+      const coordinator = await agentManager.spawn({
+        task: "Coordinate",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      // Clear the call from coordinator spawn
+      mockHealthCheckService.startForCoordinator.mockClear();
+
+      // Now spawn a worker
+      await agentManager.spawn({
+        task: "Do work",
+        role: "worker",
+        parent: coordinator.id,
+        cwd: "/tmp",
+      });
+
+      expect(mockHealthCheckService.startForCoordinator).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("terminate() with coordinator role", () => {
+    it("should stop health checks when terminating a coordinator", async () => {
+      const spawned = await agentManager.spawn({
+        task: "Coordinate work",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      await agentManager.terminate(spawned.id, "completed");
+
+      expect(mockHealthCheckService.stopForCoordinator).toHaveBeenCalledWith(
+        spawned.id
+      );
+    });
+
+    it("should not stop health checks when terminating a worker", async () => {
+      // First spawn a coordinator
+      const coordinator = await agentManager.spawn({
+        task: "Coordinate",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      // Spawn a worker
+      const worker = await agentManager.spawn({
+        task: "Do work",
+        role: "worker",
+        parent: coordinator.id,
+        cwd: "/tmp",
+      });
+
+      // Terminate the worker
+      await agentManager.terminate(worker.id, "completed");
+
+      // stopForCoordinator should NOT have been called for the worker
+      // (it may have been called for the coordinator spawn, so check the last call)
+      const calls = mockHealthCheckService.stopForCoordinator.mock.calls;
+      const workerStopCalls = calls.filter(
+        (call: any) => call[0] === worker.id
+      );
+      expect(workerStopCalls).toHaveLength(0);
+    });
+  });
+
+  describe("close()", () => {
+    it("should stop all health checks on close", async () => {
+      // Spawn some coordinators
+      await agentManager.spawn({
+        task: "Coordinate 1",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      await agentManager.spawn({
+        task: "Coordinate 2",
+        role: "coordinator",
+        cwd: "/tmp",
+      });
+
+      // Close the manager
+      await agentManager.close();
+
+      expect(mockHealthCheckService.stopAll).toHaveBeenCalled();
     });
   });
 });
