@@ -115,11 +115,45 @@ describe('Workspace E2E', () => {
   });
 
   afterEach(() => {
-    // Close resources
-    mergeQueue.close();
-    manager.close();
-    adapter.close();
-    db.close();
+    // Close resources first
+    try {
+      mergeQueue?.close();
+    } catch { /* ignore */ }
+    try {
+      manager?.close();
+    } catch { /* ignore */ }
+    try {
+      adapter?.close();
+    } catch { /* ignore */ }
+    try {
+      db?.close();
+    } catch { /* ignore */ }
+
+    // Remove all worktrees before deleting temp directory
+    // This prevents dangling worktree references
+    if (repoPath && fs.existsSync(repoPath)) {
+      try {
+        const worktreeList = execSync('git worktree list --porcelain', {
+          cwd: repoPath,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        });
+        const worktrees = worktreeList
+          .split('\n')
+          .filter((line) => line.startsWith('worktree '))
+          .map((line) => line.replace('worktree ', ''))
+          .filter((wt) => wt !== repoPath); // Don't remove main repo
+
+        for (const wt of worktrees) {
+          try {
+            execSync(`git worktree remove --force "${wt}"`, {
+              cwd: repoPath,
+              stdio: 'pipe',
+            });
+          } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
 
     // Clean up temp directory
     if (tempDir && fs.existsSync(tempDir)) {

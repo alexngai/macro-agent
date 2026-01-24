@@ -221,40 +221,47 @@ describe("End-to-End Integration", () => {
     testFn(
       "should persist events to file",
       async () => {
-        const testPath = "./test-integration-store.json";
-
-        // Create a persisted event store
-        const persistedStore = await createEventStore({
-          path: testPath,
-          inMemory: false,
-        });
-
-        const router = createMessageRouter(persistedStore);
-        const manager = createAgentManager(persistedStore, router, {
-          defaultPermissionMode: "auto-approve",
-        });
-
-        const headManager = await manager.getOrCreateHeadManager({
-          cwd: process.cwd(),
-        });
-
-        // Persist events
-        await persistedStore.persist();
-
-        // Verify agent exists in store
-        const agent = persistedStore.getAgent(headManager.id);
-        expect(agent).not.toBeNull();
-
-        await manager.terminate(headManager.id, "completed");
-        await manager.close();
-        await persistedStore.close();
-
-        // Clean up test file
+        const os = await import("os");
+        const path = await import("path");
         const fs = await import("fs/promises");
+
+        // Use a temp directory instead of project root
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "macro-e2e-"));
+        const testPath = path.join(tempDir, "test-integration-store.json");
+
         try {
-          await fs.unlink(testPath);
-        } catch {
-          // Ignore if doesn't exist
+          // Create a persisted event store
+          const persistedStore = await createEventStore({
+            path: testPath,
+            inMemory: false,
+          });
+
+          const router = createMessageRouter(persistedStore);
+          const manager = createAgentManager(persistedStore, router, {
+            defaultPermissionMode: "auto-approve",
+          });
+
+          const headManager = await manager.getOrCreateHeadManager({
+            cwd: tempDir, // Use temp dir instead of project root
+          });
+
+          // Persist events
+          await persistedStore.persist();
+
+          // Verify agent exists in store
+          const agent = persistedStore.getAgent(headManager.id);
+          expect(agent).not.toBeNull();
+
+          await manager.terminate(headManager.id, "completed");
+          await manager.close();
+          await persistedStore.close();
+        } finally {
+          // Clean up temp directory
+          try {
+            await fs.rm(tempDir, { recursive: true, force: true });
+          } catch {
+            // Ignore cleanup errors
+          }
         }
       },
       30000

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import {
   detectCleanupStatus,
   hasUncommittedChanges,
@@ -17,9 +17,11 @@ import type { LifecycleContext } from "../types.js";
 // Mock child_process
 vi.mock("child_process", () => ({
   execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
 const mockExecSync = vi.mocked(execSync);
+const mockExecFileSync = vi.mocked(execFileSync);
 
 describe("cleanup", () => {
   beforeEach(() => {
@@ -263,16 +265,19 @@ describe("cleanup", () => {
 
   describe("commitChanges", () => {
     it("should commit changes and return hash", () => {
+      // execSync for hasUncommittedChanges and git rev-parse
       mockExecSync
         .mockReturnValueOnce(" M file.ts\n") // hasUncommittedChanges check
-        .mockReturnValueOnce("") // git add
-        .mockReturnValueOnce("") // git commit
         .mockReturnValueOnce("abc123def456\n"); // git rev-parse
+
+      // execFileSync for git add and git commit
+      mockExecFileSync.mockReturnValue(Buffer.from(""));
 
       const result = commitChanges("/path/to/workspace", "Test commit");
 
       expect(result).toBe("abc123def456");
-      expect(mockExecSync).toHaveBeenCalledTimes(4);
+      expect(mockExecSync).toHaveBeenCalledTimes(2); // status + rev-parse
+      expect(mockExecFileSync).toHaveBeenCalledTimes(2); // add + commit
     });
 
     it("should return undefined when no changes to commit", () => {
@@ -285,9 +290,9 @@ describe("cleanup", () => {
     });
 
     it("should return undefined when commit fails", () => {
-      mockExecSync
-        .mockReturnValueOnce(" M file.ts\n") // hasUncommittedChanges check
-        .mockReturnValueOnce("") // git add
+      mockExecSync.mockReturnValueOnce(" M file.ts\n"); // hasUncommittedChanges check
+      mockExecFileSync
+        .mockReturnValueOnce(Buffer.from("")) // git add succeeds
         .mockImplementationOnce(() => {
           throw new Error("Commit failed");
         }); // git commit fails
@@ -297,17 +302,19 @@ describe("cleanup", () => {
       expect(result).toBeUndefined();
     });
 
-    it("should escape quotes in commit message", () => {
+    it("should pass message directly to git commit (no shell escaping needed)", () => {
       mockExecSync
         .mockReturnValueOnce(" M file.ts\n")
-        .mockReturnValueOnce("")
-        .mockReturnValueOnce("")
         .mockReturnValueOnce("abc123\n");
+      mockExecFileSync.mockReturnValue(Buffer.from(""));
 
       commitChanges("/path/to/workspace", 'Test "quoted" message');
 
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('Test \\"quoted\\" message'),
+      // With execFileSync, the message is passed directly as an argument
+      // No shell escaping is needed because there's no shell interpretation
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "git",
+        ["commit", "-m", 'Test "quoted" message'],
         expect.any(Object)
       );
     });

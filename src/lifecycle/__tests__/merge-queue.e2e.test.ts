@@ -56,6 +56,10 @@ describe("Merge Queue E2E", () => {
 
     // Reset mocks
     vi.clearAllMocks();
+
+    // Default mock for getCurrentBranch - tests can override as needed
+    // This prevents infinite loops when processAllPendingMerges checks branch
+    mockGetCurrentBranch.mockReturnValue("integration");
   });
 
   afterEach(() => {
@@ -193,6 +197,8 @@ describe("Merge Queue E2E", () => {
       expect(mergeQueue.getQueueDepth("stream-1")).toBe(1);
 
       // Step 2: Integrator processes queue
+      // Integrator is on the integration branch, not the worker branch
+      mockGetCurrentBranch.mockReturnValue("integration");
       mockAttemptMerge.mockReturnValue({
         success: true,
         mergeCommit: "merge-commit-123",

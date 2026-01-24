@@ -9,7 +9,9 @@
  * @see s-32xs Self-Cleaning Workers spec
  */
 
-import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import { execSync, execFileSync } from "child_process";
 import type { CleanupStatus, LifecycleContext } from "./types.js";
 import type { MessageRouter } from "../router/message-router.js";
 
@@ -179,13 +181,13 @@ export function commitChanges(
     }
 
     // Stage all changes
-    execSync("git add --all", {
+    execFileSync("git", ["add", "--all"], {
       cwd: workspacePath,
       encoding: "utf-8",
     });
 
-    // Commit
-    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+    // Commit - use execFileSync with array args to prevent command injection
+    execFileSync("git", ["commit", "-m", message], {
       cwd: workspacePath,
       encoding: "utf-8",
     });
@@ -213,8 +215,11 @@ export interface MergeResult {
   /** Whether the merge succeeded */
   success: boolean;
 
-  /** Merge commit hash if successful */
+  /** Merge commit hash if successful (only set if a new merge commit was created) */
   mergeCommit?: string;
+
+  /** True if branches were already merged (no new commit created) */
+  alreadyMerged?: boolean;
 
   /** List of conflicting files if merge failed */
   conflicts?: string[];
@@ -240,25 +245,37 @@ export function attemptMerge(
   message?: string
 ): MergeResult {
   try {
-    // Build merge command
-    const mergeMessage = message ?? `Merge branch '${sourceBranch}'`;
-    const mergeCmd = `git merge "${sourceBranch}" --no-ff -m "${mergeMessage.replace(/"/g, '\\"')}"`;
+    // Capture HEAD before merge to detect "already up-to-date" scenario
+    const headBefore = execSync("git rev-parse HEAD", {
+      cwd: worktreePath,
+      encoding: "utf-8",
+    }).trim();
 
-    execSync(mergeCmd, {
+    // Merge with execFileSync to prevent command injection
+    const mergeMessage = message ?? `Merge branch '${sourceBranch}'`;
+    execFileSync("git", ["merge", sourceBranch, "--no-ff", "-m", mergeMessage], {
       cwd: worktreePath,
       encoding: "utf-8",
       stdio: "pipe",
     });
 
-    // Get merge commit hash
-    const mergeCommit = execSync("git rev-parse HEAD", {
+    // Get HEAD after merge
+    const headAfter = execSync("git rev-parse HEAD", {
       cwd: worktreePath,
       encoding: "utf-8",
     }).trim();
 
+    // Check if HEAD changed - if not, branches were already merged
+    if (headBefore === headAfter) {
+      return {
+        success: true,
+        alreadyMerged: true,
+      };
+    }
+
     return {
       success: true,
-      mergeCommit,
+      mergeCommit: headAfter,
     };
   } catch (error) {
     // Check if this is a merge conflict
@@ -269,13 +286,12 @@ export function attemptMerge(
       });
 
       // Look for unmerged files (UU, AA, DD, etc.)
-      const conflictPatterns = /^(UU|AA|DD|AU|UA|DU|UD) /gm;
+      // Note: Using regex without /g flag since we test one line at a time
+      const conflictPattern = /^(UU|AA|DD|AU|UA|DU|UD) /;
       const conflicts: string[] = [];
 
       for (const line of status.split("\n")) {
-        if (conflictPatterns.test(line)) {
-          // Reset regex state
-          conflictPatterns.lastIndex = 0;
+        if (conflictPattern.test(line)) {
           // Extract filename (after the status prefix)
           const filename = line.slice(3).trim();
           if (filename) {
@@ -335,8 +351,6 @@ export function hasMergeInProgress(worktreePath: string): boolean {
     }).trim();
 
     // Check for MERGE_HEAD file
-    const fs = require("fs");
-    const path = require("path");
     return fs.existsSync(path.join(worktreePath, gitDir, "MERGE_HEAD"));
   } catch {
     return false;

@@ -26,7 +26,43 @@ import {
   isKnownCapability,
   CAPABILITY_TOOL_MAP,
   WILDCARD_CAPABILITY,
+  ALWAYS_ALLOWED_TOOLS,
+  capabilityGrantsTool,
 } from "./capabilities.js";
+import {
+  loadProjectConfig,
+  loadUserConfig,
+  loadConfigFile,
+  loadAllConfigs,
+  watchConfigFile,
+  type LoadConfigOptions,
+  type LoadResult,
+  type LoadAllResult,
+} from "./config-loader.js";
+
+// =============================================================================
+// Registry Configuration
+// =============================================================================
+
+/**
+ * Configuration options for DefaultRoleRegistry
+ */
+export interface RoleRegistryConfig {
+  /** Project root directory for project-level config */
+  projectPath?: string;
+
+  /** Auto-load configs on construction */
+  autoLoad?: boolean;
+
+  /** Skip loading user-level config */
+  skipUserConfig?: boolean;
+
+  /** Skip loading project-level config */
+  skipProjectConfig?: boolean;
+
+  /** Enable file watching for hot-reload */
+  watchFiles?: boolean;
+}
 
 /**
  * Default Role Registry Implementation
@@ -45,6 +81,34 @@ export class DefaultRoleRegistry implements RoleRegistry {
 
   /** User-level role overrides */
   private userRoles: Map<string, RoleConfig> = new Map();
+
+  /** Registry configuration */
+  private config: RoleRegistryConfig;
+
+  /** File watchers for hot-reload */
+  private watchers: Array<() => void> = [];
+
+  /** Warnings from config loading */
+  private loadWarnings: string[] = [];
+
+  /**
+   * Create a new DefaultRoleRegistry
+   *
+   * @param config - Optional configuration
+   */
+  constructor(config: RoleRegistryConfig = {}) {
+    this.config = config;
+
+    // Auto-load configs if enabled
+    if (config.autoLoad) {
+      this.loadConfigs();
+    }
+
+    // Set up file watching if enabled
+    if (config.watchFiles) {
+      this.startWatching();
+    }
+  }
 
   /**
    * Get a role by exact name (no inheritance resolution)
@@ -189,6 +253,10 @@ export class DefaultRoleRegistry implements RoleRegistry {
     // 3. Check custom roles
     const customRole = this.customRoles.get(roleName);
     if (customRole) {
+      // Apply inheritance if custom role has extends
+      if ((customRole as RoleConfig).extends) {
+        return this.applyOverride(customRole as RoleConfig, roleName);
+      }
       return customRole;
     }
 
@@ -250,6 +318,195 @@ export class DefaultRoleRegistry implements RoleRegistry {
     // Fall back to generic
     console.info(`Falling back to 'generic' role`);
     return GenericRole;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Config File Loading
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Load all config files (user and project level)
+   *
+   * @returns Load result with warnings
+   */
+  loadConfigs(): LoadAllResult {
+    const result = loadAllConfigs({
+      projectPath: this.config.projectPath,
+      skipUserConfig: this.config.skipUserConfig,
+      skipProjectConfig: this.config.skipProjectConfig,
+    });
+
+    // Register user-level roles first (lower priority)
+    for (const role of result.user.roles) {
+      this.registerUserRole(role);
+    }
+
+    // Register project-level roles (higher priority)
+    for (const role of result.project.roles) {
+      this.registerProjectRole(role);
+    }
+
+    // Store warnings
+    this.loadWarnings = result.allWarnings;
+
+    // Log warnings if any
+    if (result.allWarnings.length > 0) {
+      console.warn("[RoleRegistry] Config loading warnings:", result.allWarnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from project config file
+   *
+   * @param projectPath - Optional project path override
+   * @returns Load result
+   */
+  loadProjectConfig(projectPath?: string): LoadResult {
+    const result = loadProjectConfig(projectPath ?? this.config.projectPath);
+
+    for (const role of result.roles) {
+      this.registerProjectRole(role);
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] Project config warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from user config file
+   *
+   * @returns Load result
+   */
+  loadUserConfig(): LoadResult {
+    const result = loadUserConfig();
+
+    for (const role of result.roles) {
+      this.registerUserRole(role);
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] User config warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Load roles from a specific config file
+   *
+   * @param filePath - Path to config file
+   * @param level - Which level to register roles at
+   * @returns Load result
+   */
+  loadFromFile(
+    filePath: string,
+    level: "project" | "user" | "custom" = "custom"
+  ): LoadResult {
+    const result = loadConfigFile(filePath);
+
+    for (const role of result.roles) {
+      switch (level) {
+        case "project":
+          this.registerProjectRole(role);
+          break;
+        case "user":
+          this.registerUserRole(role);
+          break;
+        case "custom":
+          this.registerRole(role);
+          break;
+      }
+    }
+
+    if (result.warnings.length > 0) {
+      this.loadWarnings.push(...result.warnings);
+      console.warn("[RoleRegistry] Config file warnings:", result.warnings);
+    }
+
+    return result;
+  }
+
+  /**
+   * Get warnings from config loading
+   *
+   * @returns Array of warning messages
+   */
+  getLoadWarnings(): string[] {
+    return [...this.loadWarnings];
+  }
+
+  /**
+   * Clear all loaded roles (but keep built-in)
+   */
+  clearLoadedRoles(): void {
+    this.projectRoles.clear();
+    this.userRoles.clear();
+    this.customRoles.clear();
+    this.loadWarnings = [];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // File Watching
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Start watching config files for changes
+   */
+  private startWatching(): void {
+    // Import the functions we need
+    const { getProjectConfigPath, getUserConfigPath } = require("./config-loader.js");
+
+    // Watch project config
+    if (!this.config.skipProjectConfig) {
+      const projectPath = getProjectConfigPath(this.config.projectPath);
+      const unwatch = watchConfigFile(projectPath, (result) => {
+        // Reload project roles
+        this.projectRoles.clear();
+        for (const role of result.roles) {
+          this.registerProjectRole(role);
+        }
+        console.log("[RoleRegistry] Reloaded project config");
+      });
+      this.watchers.push(unwatch);
+    }
+
+    // Watch user config
+    if (!this.config.skipUserConfig) {
+      const userPath = getUserConfigPath();
+      const unwatch = watchConfigFile(userPath, (result) => {
+        // Reload user roles
+        this.userRoles.clear();
+        for (const role of result.roles) {
+          this.registerUserRole(role);
+        }
+        console.log("[RoleRegistry] Reloaded user config");
+      });
+      this.watchers.push(unwatch);
+    }
+  }
+
+  /**
+   * Stop watching config files
+   */
+  stopWatching(): void {
+    for (const unwatch of this.watchers) {
+      unwatch();
+    }
+    this.watchers = [];
+  }
+
+  /**
+   * Cleanup resources (watchers, etc.)
+   */
+  dispose(): void {
+    this.stopWatching();
   }
 }
 
@@ -372,6 +629,78 @@ export function filterToolsForRole(
       );
       return allTools.filter((t) => allowedTools.has(t.name));
   }
+}
+
+/**
+ * Check if a specific tool is allowed for a role
+ *
+ * Used for runtime tool filtering enforcement.
+ *
+ * @param toolName - Name of the MCP tool to check
+ * @param role - Resolved role definition
+ * @returns true if the tool is allowed, false otherwise
+ */
+export function isToolAllowedForRole(
+  toolName: string,
+  role: RoleDefinition
+): boolean {
+  // Always-allowed tools (observability, read-only)
+  if (ALWAYS_ALLOWED_TOOLS.includes(toolName)) {
+    return true;
+  }
+
+  const toolConfig = role.tools ?? { mode: "capability" };
+
+  switch (toolConfig.mode) {
+    case "all":
+      return true;
+
+    case "allowlist":
+      return toolConfig.tools?.includes(toolName) ?? false;
+
+    case "denylist":
+      return !toolConfig.tools?.includes(toolName);
+
+    case "capability":
+    default:
+      // Wildcard capability = all tools allowed
+      if (role.capabilities?.includes(WILDCARD_CAPABILITY)) {
+        return true;
+      }
+
+      // Check if any capability grants this tool
+      for (const cap of role.capabilities ?? []) {
+        if (capabilityGrantsTool(cap, toolName)) {
+          return true;
+        }
+      }
+
+      return false;
+  }
+}
+
+/**
+ * Get the capability required for a tool (for error messages)
+ *
+ * @param toolName - Name of the MCP tool
+ * @returns Capability string or undefined if no specific capability required
+ */
+export function getRequiredCapabilityForTool(
+  toolName: string
+): string | undefined {
+  // Check always-allowed tools
+  if (ALWAYS_ALLOWED_TOOLS.includes(toolName)) {
+    return undefined; // No capability required
+  }
+
+  // Find the first capability that grants this tool
+  for (const [capability, tools] of Object.entries(CAPABILITY_TOOL_MAP)) {
+    if (tools.includes(toolName)) {
+      return capability;
+    }
+  }
+
+  return undefined;
 }
 
 // =============================================================================
