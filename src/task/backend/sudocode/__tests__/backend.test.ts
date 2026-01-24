@@ -415,34 +415,40 @@ describe("SudocodeTaskBackend", () => {
   });
 
   describe("delete", () => {
-    it("should soft-delete a task", async () => {
+    it("should throw not supported error", async () => {
       const task = await backend.create({
         description: "Test task",
         created_by: "agent-1",
       });
 
-      await backend.delete(task.id);
+      // Delete is not supported - tasks are immutable in event-sourced system
+      await expect(backend.delete(task.id)).rejects.toThrow("not supported");
 
-      const deleted = await backend.get(task.id);
-      expect(deleted!.status).toBe("failed");
+      // Task should remain unchanged
+      const unchanged = await backend.get(task.id);
+      expect(unchanged!.status).toBe("pending");
     });
 
-    it("should remove task from issue index when deleted", async () => {
+    it("should throw not supported even for tasks bound to issues", async () => {
       const task = await backend.create({
         description: "Test task",
         created_by: "agent-1",
         external_id: "i-test1",
       });
 
-      await backend.delete(task.id);
+      // Delete is not supported regardless of issue binding
+      await expect(backend.delete(task.id)).rejects.toThrow("not supported");
 
+      // Task should still be in the issue index
       const taskIds = backend.getTasksByIssue("i-test1");
-      expect(taskIds).not.toContain(task.id);
+      expect(taskIds).toContain(task.id);
     });
 
-    it("should throw for non-existent task", async () => {
+    it("should throw not supported even for non-existent task", async () => {
+      // Note: We throw "not supported" before checking if task exists
+      // This matches InMemoryTaskBackend behavior for consistency
       await expect(backend.delete("nonexistent")).rejects.toThrow(
-        "Task not found"
+        "not supported"
       );
     });
   });
