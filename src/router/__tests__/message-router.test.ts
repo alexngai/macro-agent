@@ -121,6 +121,76 @@ describe("MessageRouter", () => {
         ).rejects.toThrow(RoutingError);
       });
 
+      it("should still deliver message to terminated agent (queued for potential restart)", async () => {
+        // Note: Messages to terminated agents are still delivered to their queue.
+        // This allows messages to be available if the agent is restarted.
+        // If strict blocking is needed, callers should check agent state first.
+        createAgent("sender_1");
+        createAgent("recipient_1");
+
+        // Terminate the recipient
+        eventStore.emit({
+          type: "terminate",
+          source: { agent_id: "recipient_1" },
+          payload: {
+            agent_id: "recipient_1",
+            reason: "completed",
+          },
+        });
+
+        // Sending to terminated agent still succeeds (message queued)
+        const result = await router.send({
+          from: { agent_id: "sender_1" },
+          to: { agent_id: "recipient_1" },
+          content: "Hello",
+        });
+
+        expect(result.id).toBeDefined();
+
+        // Message is in the queue (even for terminated agent)
+        const messages = router.getMessages("recipient_1");
+        expect(messages).toHaveLength(1);
+      });
+
+      it("should deliver topic messages to all subscribers including terminated", async () => {
+        // Note: Topic routing delivers to all subscribers regardless of state.
+        // This is different from broadcast which filters by running state.
+        // For strict running-only delivery, use broadcast channels.
+        createAgent("sender_1");
+        createAgent("agent_1");
+        createAgent("agent_2");
+        createAgent("agent_3");
+
+        // Subscribe all to a topic
+        router.subscribe("agent_1", { type: "topic", target: "updates" });
+        router.subscribe("agent_2", { type: "topic", target: "updates" });
+        router.subscribe("agent_3", { type: "topic", target: "updates" });
+
+        // Terminate agent_2
+        eventStore.emit({
+          type: "terminate",
+          source: { agent_id: "agent_2" },
+          payload: {
+            agent_id: "agent_2",
+            reason: "completed",
+          },
+        });
+
+        // Topic message is delivered to all subscribers
+        const result = await router.send({
+          from: { agent_id: "sender_1" },
+          to: { topic: "updates" },
+          content: "Update notification",
+        });
+
+        expect(result.id).toBeDefined();
+
+        // All subscribers receive the message (including terminated)
+        expect(router.getMessages("agent_1")).toHaveLength(1);
+        expect(router.getMessages("agent_2")).toHaveLength(1);
+        expect(router.getMessages("agent_3")).toHaveLength(1);
+      });
+
       it("should include correlation_id for threading", async () => {
         createAgent("requester");
         createAgent("responder");
