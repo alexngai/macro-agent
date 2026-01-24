@@ -357,12 +357,6 @@ export async function createTestHarness(
   const messageRouter = createMessageRouter(eventStore);
   const taskManager = createTaskManager(eventStore);
 
-  const services: SimulatorServices = {
-    eventStore,
-    messageRouter,
-    taskManager,
-  };
-
   // State
   const repos: TempRepo[] = [];
   const simulators = new Map<string, AgentSimulator>();
@@ -382,6 +376,13 @@ export async function createTestHarness(
       initSchema: true,
     });
   }
+
+  const services: SimulatorServices = {
+    eventStore,
+    messageRouter,
+    taskManager,
+    mergeQueue: mergeQueue ?? undefined,
+  };
 
   // Assertion context getter
   const getAssertionContext = (): AssertionContext => ({
