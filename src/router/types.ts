@@ -47,7 +47,8 @@ export interface MessageSender {
 export type MessagePriority = "low" | "normal" | "high" | "urgent";
 
 // Wake action determined by priority
-export type WakeAction = "wake" | "inject" | "interrupt" | "queue";
+// "skip" is returned when agent is stopped/terminated and shouldn't be woken
+export type WakeAction = "wake" | "inject" | "interrupt" | "queue" | "skip";
 
 // Send message request
 export interface SendMessageRequest {

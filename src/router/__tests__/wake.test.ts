@@ -73,6 +73,29 @@ describe("determineWakeAction", () => {
       expect(determineWakeAction("low", true, true)).toBe("queue");
     });
   });
+
+  describe("when agent is stopped/terminated", () => {
+    it("should skip for urgent priority", () => {
+      expect(determineWakeAction("urgent", false, false, true)).toBe("skip");
+    });
+
+    it("should skip for high priority", () => {
+      expect(determineWakeAction("high", false, false, true)).toBe("skip");
+    });
+
+    it("should skip for normal priority", () => {
+      expect(determineWakeAction("normal", false, false, true)).toBe("skip");
+    });
+
+    it("should skip for low priority", () => {
+      expect(determineWakeAction("low", false, false, true)).toBe("skip");
+    });
+
+    it("should skip even if agent has active session (edge case)", () => {
+      // Stopped takes precedence over session state
+      expect(determineWakeAction("urgent", true, true, true)).toBe("skip");
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,6 +186,33 @@ describe("getWakeDecision", () => {
     expect(decision.action).toBe("wake");
     // Without supportsInjection, defaults to true
     expect(decision.canInject).toBe(true);
+  });
+
+  it("should return skip decision for stopped agent", () => {
+    const checker: SessionChecker = {
+      hasActiveSession: vi.fn().mockReturnValue(false),
+      isPrompting: vi.fn().mockReturnValue(false),
+      supportsInjection: vi.fn().mockReturnValue(true),
+      isStopped: vi.fn().mockReturnValue(true),
+    };
+
+    const decision = getWakeDecision("agent-1", "urgent", checker);
+
+    expect(decision.action).toBe("skip");
+    expect(decision.shouldWake).toBe(false);
+    expect(decision.shouldInterrupt).toBe(false);
+  });
+
+  it("should handle missing isStopped (defaults to false)", () => {
+    const checker: SessionChecker = {
+      hasActiveSession: vi.fn().mockReturnValue(false),
+    };
+
+    const decision = getWakeDecision("agent-1", "urgent", checker);
+
+    // Without isStopped, defaults to not stopped
+    expect(decision.action).toBe("wake");
+    expect(decision.shouldWake).toBe(true);
   });
 });
 
