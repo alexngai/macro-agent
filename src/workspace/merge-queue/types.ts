@@ -118,7 +118,8 @@ export type MergeQueueEventType =
   | 'mr:processing'
   | 'mr:merged'
   | 'mr:conflict'
-  | 'mr:abandoned';
+  | 'mr:abandoned'
+  | 'mr:resolved';
 
 /**
  * MergeQueue event payload.
@@ -201,6 +202,22 @@ export interface MergeQueueInterface {
    * @param mrId - Merge request ID
    */
   markAbandoned(mrId: string): void;
+
+  /**
+   * Mark a conflicted merge request as resolved and merged.
+   *
+   * Called after a resolver worker completes and the integrator
+   * performs an inline merge of the resolver's branch.
+   *
+   * @param mrId - Merge request ID (must be in 'conflict' status)
+   * @param mergeCommit - Commit hash from the resolver's inline merge
+   * @param resolverBranch - Branch the resolver worked on (for audit)
+   */
+  markResolverComplete(
+    mrId: string,
+    mergeCommit: string,
+    resolverBranch?: string
+  ): void;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Queries

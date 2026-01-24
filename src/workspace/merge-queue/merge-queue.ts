@@ -338,9 +338,11 @@ export class MergeQueue implements MergeQueueInterface {
   markAbandoned(mrId: string): void {
     const mr = this.getOrThrow(mrId);
 
-    if (mr.status === 'merged') {
+    // Only pending and processing MRs can be abandoned
+    // Terminal states (merged, abandoned, conflict) cannot be abandoned
+    if (mr.status !== 'pending' && mr.status !== 'processing') {
       throw new MergeRequestStateError(
-        `Cannot abandon MR ${mrId}: already merged`
+        `Cannot abandon MR ${mrId}: status is '${mr.status}' (must be 'pending' or 'processing')`
       );
     }
 
@@ -357,6 +359,48 @@ export class MergeQueue implements MergeQueueInterface {
       mrId,
       streamId: mr.streamId,
       taskId: mr.taskId,
+    });
+  }
+
+  /**
+   * Mark a conflicted merge request as resolved and merged.
+   *
+   * Called after a resolver worker completes and the integrator
+   * performs an inline merge of the resolver's branch.
+   *
+   * @param mrId - Merge request ID (must be in 'conflict' status)
+   * @param mergeCommit - Commit hash from the resolver's inline merge
+   * @param resolverBranch - Branch the resolver worked on (for audit)
+   */
+  markResolverComplete(
+    mrId: string,
+    mergeCommit: string,
+    resolverBranch?: string
+  ): void {
+    const mr = this.getOrThrow(mrId);
+
+    if (mr.status !== 'conflict') {
+      throw new MergeRequestStateError(
+        `Cannot mark MR ${mrId} as resolved: status is '${mr.status}' (must be 'conflict')`
+      );
+    }
+
+    const now = Date.now();
+    this.db
+      .prepare(
+        `UPDATE ${this.tableName}
+         SET status = 'merged', completed_at = ?, merge_commit = ?
+         WHERE id = ?`
+      )
+      .run(now, mergeCommit, mrId);
+
+    this.emit('mr:resolved', {
+      mrId,
+      streamId: mr.streamId,
+      taskId: mr.taskId,
+      mergeCommit,
+      resolverTaskId: mr.resolverTaskId,
+      resolverBranch,
     });
   }
 
