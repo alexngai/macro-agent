@@ -301,9 +301,12 @@ export class SudocodeTaskBackend implements TaskBackend {
           const task = this.eventStore.getTask(taskId);
           if (task && task.status !== newStatus) {
             // Only update if the task isn't in a terminal state
+            // Also preserve "assigned" status - it's a macro-agent concept
+            // that will transition to in_progress when start() is called
             if (
               task.status !== "completed" &&
-              task.status !== "failed"
+              task.status !== "failed" &&
+              task.status !== "assigned"
             ) {
               // Emit status change event
               this.eventStore.emit({
@@ -514,15 +517,9 @@ export class SudocodeTaskBackend implements TaskBackend {
       },
     });
 
-    // Optionally update issue status
-    const externalId = this.getTaskExternalId(task);
-    if (externalId && this.config.syncStatus) {
-      try {
-        await this.client.updateIssue(externalId, { status: "in_progress" });
-      } catch {
-        // Ignore errors syncing to sudocode
-      }
-    }
+    // Note: We don't sync to sudocode on assign because "assigned" is a
+    // macro-agent concept (task has a worker but work hasn't started).
+    // Sudocode "in_progress" is synced when start() is called.
   }
 
   async unassign(id: TaskId): Promise<void> {
@@ -758,28 +755,40 @@ export class SudocodeTaskBackend implements TaskBackend {
   }
 
   async listReady(filter?: TaskFilter): Promise<ExtendedTask[]> {
-    // Get ready issues from sudocode (no blocking dependencies)
-    const readyIssues = await this.client.getReadyIssues();
-    const readyIssueIds = new Set(readyIssues.map((i) => i.id));
-
-    // Get pending/assigned tasks
+    // Get pending/assigned tasks with isBlocked computed
     const tasks = await this.list({
       ...filter,
       status: filter?.status ?? ["pending", "assigned"],
       includeBlocked: true, // We'll filter manually
     });
 
-    // A task is ready if:
-    // 1. It has no external_id (not bound to an issue), OR
-    // 2. Its bound issue is in the ready set
-    return tasks.filter((t) => {
-      if (!t.external_id) {
-        // Unbound task - check local blockers only
-        return !t.isBlocked;
+    // Filter to ready tasks
+    // isBlocked already checks both local and sudocode blockers,
+    // respecting local task completion over stale sudocode state.
+    const readyTasks: ExtendedTask[] = [];
+
+    for (const task of tasks) {
+      if (task.isBlocked) {
+        continue;
       }
-      // Bound task - must be in ready issues
-      return readyIssueIds.has(t.external_id);
-    });
+
+      // For bound tasks, also check issue status directly
+      // (excludes tasks bound to issues with "blocked" status)
+      if (task.external_id) {
+        try {
+          const issue = await this.client.getIssue(task.external_id);
+          if (issue && issue.status === "blocked") {
+            continue;
+          }
+        } catch {
+          // If we can't fetch issue, include the task
+        }
+      }
+
+      readyTasks.push(task);
+    }
+
+    return readyTasks;
   }
 
   async getChildren(parentId: TaskId): Promise<ExtendedTask[]> {
@@ -1130,6 +1139,10 @@ export class SudocodeTaskBackend implements TaskBackend {
   /**
    * Convert a Task to ExtendedTask with computed isBlocked field.
    * Checks both local blockers and sudocode issue blockers.
+   *
+   * For sudocode issue blockers, a blocker is considered resolved if:
+   * 1. The issue itself is closed/completed, OR
+   * 2. Any local task bound to that issue is completed (local takes precedence)
    */
   private async toExtendedTask(task: Task): Promise<ExtendedTask> {
     let isBlocked = false;
@@ -1151,7 +1164,20 @@ export class SudocodeTaskBackend implements TaskBackend {
         try {
           const issueBlockers = await this.client.getBlockers(externalId);
           for (const blocker of issueBlockers) {
-            if (!isIssueComplete(blocker.status)) {
+            // Check if any local task bound to this blocking issue is completed
+            // Local task completion takes precedence over issue status
+            const localTasksForBlocker = this.getTasksByIssue(blocker.id);
+            const hasCompletedLocalTask = localTasksForBlocker.some(
+              (taskId) => {
+                const blockerTask = this.eventStore.getTask(taskId);
+                return blockerTask && blockerTask.status === "completed";
+              }
+            );
+
+            // Blocker is unresolved if:
+            // - No local task is completed for this issue, AND
+            // - The issue itself is not complete
+            if (!hasCompletedLocalTask && !isIssueComplete(blocker.status)) {
               isBlocked = true;
               break;
             }
