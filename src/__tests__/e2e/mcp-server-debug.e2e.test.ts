@@ -18,8 +18,14 @@ import * as os from "os";
 import { execSync } from "child_process";
 
 import { createEventStore, type EventStore } from "../../store/event-store.js";
-import { createAgentManager, type AgentManager } from "../../agent/agent-manager.js";
-import { createMessageRouter, type MessageRouter } from "../../router/message-router.js";
+import {
+  createAgentManager,
+  type AgentManager,
+} from "../../agent/agent-manager.js";
+import {
+  createMessageRouter,
+  type MessageRouter,
+} from "../../router/message-router.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Test Configuration
@@ -51,7 +57,12 @@ describe("MCP Server Debug", () => {
     const instanceId = `test-mcp-debug-${Date.now()}`;
     log(`EventStore baseDir: ${tmpDir}, instanceId: ${instanceId}`);
     // Store the path for reference (actual DB will be at tmpDir/instances/instanceId/store.sqlite)
-    eventStoreDbPath = path.join(tmpDir, "instances", instanceId, "store.sqlite");
+    eventStoreDbPath = path.join(
+      tmpDir,
+      "instances",
+      instanceId,
+      "store.sqlite",
+    );
     log(`EventStore DB path: ${eventStoreDbPath}`);
 
     // Create isolated test git repo to avoid polluting real repo
@@ -125,21 +136,30 @@ describe("MCP Server Debug", () => {
 
       for await (const update of agentManager.prompt(
         spawnResult.id,
-        "What MCP tools do you have available? List all tools that start with 'mcp__'. If you have a 'done' tool, describe it."
+        "What MCP tools do you have available? List all tools that start with 'mcp__'. If you have a 'done' tool, describe it.",
       )) {
         updateCount++;
         const updateObj = update as Record<string, unknown>;
         const updateType = updateObj.sessionUpdate as string;
 
         if (updateType === "available_commands_update") {
-          availableCommands = (updateObj.availableCommands ?? []) as AvailableCommand[];
+          availableCommands = (updateObj.availableCommands ??
+            []) as AvailableCommand[];
 
-          log(`\n=== Available Commands (${availableCommands.length} total) ===`);
+          log(
+            `\n=== Available Commands (${availableCommands.length} total) ===`,
+          );
 
           // Categorize tools
-          const mcpTools = availableCommands.filter((c) => c.name.startsWith("mcp__"));
-          const builtinTools = availableCommands.filter((c) => !c.name.startsWith("mcp__") && !c.name.startsWith("/"));
-          const slashCommands = availableCommands.filter((c) => c.name.startsWith("/"));
+          const mcpTools = availableCommands.filter((c) =>
+            c.name.startsWith("mcp__"),
+          );
+          const builtinTools = availableCommands.filter(
+            (c) => !c.name.startsWith("mcp__") && !c.name.startsWith("/"),
+          );
+          const slashCommands = availableCommands.filter((c) =>
+            c.name.startsWith("/"),
+          );
 
           log(`\nMCP Tools (${mcpTools.length}):`);
           if (mcpTools.length === 0) {
@@ -176,9 +196,11 @@ describe("MCP Server Debug", () => {
       log(`\n\nTotal updates received: ${updateCount}`);
 
       // Check for MCP tools
-      const mcpTools = availableCommands.filter((c) => c.name.startsWith("mcp__"));
-      const hasDoneTool = availableCommands.some((c) =>
-        c.name.includes("done") || c.name.includes("macro")
+      const mcpTools = availableCommands.filter((c) =>
+        c.name.startsWith("mcp__"),
+      );
+      const hasDoneTool = availableCommands.some(
+        (c) => c.name.includes("done") || c.name.includes("macro"),
       );
 
       log(`\n=== Summary ===`);
@@ -188,7 +210,9 @@ describe("MCP Server Debug", () => {
       // This test is for debugging - we expect it to fail until MCP is fixed
       if (mcpTools.length === 0) {
         log("\n⚠️  BUG CONFIRMED: No MCP tools available to agent");
-        log("The mcpServers configuration passed to createSession() is not being used");
+        log(
+          "The mcpServers configuration passed to createSession() is not being used",
+        );
       }
 
       // Terminate agent
@@ -198,7 +222,7 @@ describe("MCP Server Debug", () => {
       // For now, just verify we got the available_commands_update
       expect(availableCommands.length).toBeGreaterThan(0);
     },
-    { timeout: 120000 }
+    { timeout: 120000 },
   );
 
   testFn(
@@ -231,13 +255,15 @@ Remember: You MUST call done() when finished.`,
           onUpdate: (update) => {
             const updateObj = update as Record<string, unknown>;
             if (updateObj.sessionUpdate === "agent_message_chunk") {
-              const content = updateObj.content as { text?: string } | undefined;
+              const content = updateObj.content as
+                | { text?: string }
+                | undefined;
               if (content?.text) {
                 process.stdout.write(content.text);
               }
             }
           },
-        }
+        },
       );
 
       log(`\n\n=== promptUntilDone Result ===`);
@@ -257,7 +283,7 @@ Remember: You MUST call done() when finished.`,
         (e) =>
           e.source?.agent_id === spawnResult.id &&
           (e.payload?.status_type === "completed" ||
-           e.payload?.status_type === "failed")
+            e.payload?.status_type === "failed"),
       );
       log(`Status event in EventStore: ${workerDoneEvent ? "YES" : "NO"}`);
       if (workerDoneEvent) {
@@ -282,7 +308,9 @@ Remember: You MUST call done() when finished.`,
         log("\n⚠️  Agent did not call done() even after follow-up prompts");
         log("This indicates the model isn't following done() instructions");
         if (result.exceededMax) {
-          log(`Max follow-ups exceeded (${result.followUpCount} follow-ups sent)`);
+          log(
+            `Max follow-ups exceeded (${result.followUpCount} follow-ups sent)`,
+          );
         }
       } else {
         log("\n✓ Agent successfully called done()!");
@@ -290,7 +318,7 @@ Remember: You MUST call done() when finished.`,
         expect(result.exceededMax).toBe(false);
       }
     },
-    { timeout: 180000 }
+    { timeout: 180000 },
   );
 
   testFn(
@@ -318,7 +346,7 @@ Remember: You MUST call done() when finished.`,
           {
             maxFollowUps: 0, // No follow-ups allowed
             throwOnMaxExceeded: true,
-          }
+          },
         );
       } catch (error) {
         threwError = true;
@@ -339,6 +367,6 @@ Remember: You MUST call done() when finished.`,
 
       log("✓ throwOnMaxExceeded works correctly");
     },
-    { timeout: 120000 }
+    { timeout: 120000 },
   );
 });
