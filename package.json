@@ -15,6 +15,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:e2e-full-agents": "RUN_FULL_AGENT_TESTS=true vitest run --config vitest.e2e.config.ts",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "release:patch": "npm version patch && git push && git push --tags",
@@ -47,7 +48,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "acp-factory": "^0.1.0",
+    "acp-factory": "^0.1.6",
     "better-sqlite3": "^12.5.0",
     "chalk": "^5.6.2",
     "commander": "^14.0.2",

@@ -180,3 +180,169 @@ export const DEFERRED_WORKER: SimulatedBehavior = {
     },
   ],
 };
+
+/**
+ * Worker that emits HELP signal and becomes blocked
+ */
+export const HELP_EMITTING_WORKER: SimulatedBehavior = {
+  onStart: [
+    { type: "log", message: "Starting work" },
+    { type: "write_file", path: "partial.txt", content: "Started but need help" },
+    { type: "commit", message: "Partial progress" },
+    { type: "log", message: "Encountered obstacle, requesting help" },
+    {
+      type: "emit_signal",
+      signal: "HELP",
+      payload: {
+        reason: "Cannot proceed without external input",
+        context: "Need API credentials",
+      },
+    },
+    {
+      type: "done",
+      status: "blocked",
+      summary: "Blocked - waiting for help",
+      details: { helpRequested: true, reason: "Need API credentials" },
+    },
+  ],
+};
+
+/**
+ * Worker that completes with explicit done status (for failure testing)
+ */
+export const EXPLICIT_FAILING_WORKER: SimulatedBehavior = {
+  onStart: [
+    { type: "log", message: "Starting work" },
+    { type: "write_file", path: "attempt.txt", content: "Trying..." },
+    { type: "commit", message: "Initial attempt" },
+    { type: "log", message: "Encountered error" },
+    {
+      type: "done",
+      status: "failed",
+      summary: "Work failed due to error",
+      details: { error: "Simulated failure condition" },
+    },
+  ],
+};
+
+/**
+ * Create a worker that writes to a specific unique file
+ * Useful for multi-worker tests where each worker needs distinct output
+ */
+export function createUniqueFileWorker(
+  workerId: string,
+  content?: string
+): SimulatedBehavior {
+  return {
+    onStart: [
+      { type: "log", message: `Worker ${workerId} starting` },
+      {
+        type: "write_file",
+        path: `output-${workerId}.txt`,
+        content: content || `Content from worker ${workerId}`,
+      },
+      { type: "commit", message: `Add output from worker ${workerId}` },
+      { type: "done", status: "completed", summary: `Worker ${workerId} complete` },
+    ],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolver Workers (for conflict resolution testing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolver worker - resolves conflicts and completes (no MR submission)
+ * Per spec s-bcqm: resolver does NOT submit to merge queue
+ */
+export const RESOLVER_WORKER: SimulatedBehavior = {
+  onStart: [
+    { type: "log", message: "Resolver analyzing conflict" },
+    { type: "write_file", path: "resolved.txt", content: "Conflict resolved" },
+    { type: "commit", message: "Resolve merge conflict" },
+    { type: "log", message: "Conflict resolved, notifying integrator" },
+    {
+      type: "emit_signal",
+      signal: "RESOLVER_DONE",
+      payload: { status: "resolved" },
+    },
+    {
+      type: "done",
+      status: "completed",
+      summary: "Conflict resolved",
+      details: { resolverRole: true },
+    },
+  ],
+};
+
+/**
+ * Resolver worker that fails to resolve the conflict
+ */
+export const FAILING_RESOLVER_WORKER: SimulatedBehavior = {
+  onStart: [
+    { type: "log", message: "Resolver analyzing conflict" },
+    { type: "log", message: "Unable to resolve conflict automatically" },
+    {
+      type: "emit_signal",
+      signal: "RESOLVER_FAILED",
+      payload: { reason: "Complex conflict requires manual intervention" },
+    },
+    {
+      type: "done",
+      status: "failed",
+      summary: "Failed to resolve conflict",
+      details: { resolverRole: true, reason: "Complex conflict" },
+    },
+  ],
+};
+
+/**
+ * Resolver worker that creates a nested conflict (for escalation testing)
+ */
+export const NESTED_CONFLICT_RESOLVER: SimulatedBehavior = {
+  onStart: [
+    { type: "log", message: "Resolver analyzing conflict" },
+    { type: "write_file", path: "shared.ts", content: "// Resolver's version\nexport const value = 'resolver';\n" },
+    { type: "commit", message: "Attempt to resolve conflict" },
+    { type: "log", message: "Resolution complete, but may conflict with concurrent changes" },
+    {
+      type: "emit_signal",
+      signal: "RESOLVER_DONE",
+      payload: { status: "resolved", mayConflict: true },
+    },
+    {
+      type: "done",
+      status: "completed",
+      summary: "Resolution attempted",
+      details: { resolverRole: true },
+    },
+  ],
+};
+
+/**
+ * Create a resolver worker that resolves a specific file conflict
+ */
+export function createResolverWorker(
+  filePath: string,
+  resolvedContent: string,
+  commitMessage: string = "Resolve merge conflict"
+): SimulatedBehavior {
+  return {
+    onStart: [
+      { type: "log", message: `Resolver fixing conflict in ${filePath}` },
+      { type: "write_file", path: filePath, content: resolvedContent },
+      { type: "commit", message: commitMessage },
+      {
+        type: "emit_signal",
+        signal: "RESOLVER_DONE",
+        payload: { status: "resolved", file: filePath },
+      },
+      {
+        type: "done",
+        status: "completed",
+        summary: `Resolved conflict in ${filePath}`,
+        details: { resolverRole: true },
+      },
+    ],
+  };
+}

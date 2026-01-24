@@ -27,6 +27,11 @@ import type { MessagePriority, WakeAction } from "./types.js";
 // =============================================================================
 
 /**
+ * Agent state for wake decisions
+ */
+export type AgentWakeState = "inactive" | "idle" | "busy" | "stopped";
+
+/**
  * Session checker interface
  */
 export interface SessionChecker {
@@ -36,6 +41,8 @@ export interface SessionChecker {
   isPrompting?(agentId: AgentId): boolean;
   /** Check if agent's session supports injection */
   supportsInjection?(agentId: AgentId): boolean;
+  /** Check if agent is stopped/terminated */
+  isStopped?(agentId: AgentId): boolean;
 }
 
 /**
@@ -64,12 +71,20 @@ export interface WakeDecision {
  * - 'high' → Wake if idle, inject if busy
  * - 'normal' → Wake if idle, queue if busy
  * - 'low' → Never wake, just queue
+ *
+ * If agent is stopped, always returns 'skip' (no-op).
  */
 export function determineWakeAction(
   priority: MessagePriority,
   hasActiveSession: boolean,
-  isPrompting: boolean = false
+  isPrompting: boolean = false,
+  isStopped: boolean = false
 ): WakeAction {
+  // If agent is stopped/terminated, skip (no-op)
+  if (isStopped) {
+    return "skip";
+  }
+
   // If no active session
   if (!hasActiveSession) {
     // Low priority never wakes an idle agent
@@ -105,10 +120,12 @@ export function getWakeDecision(
   const hasSession = sessionChecker.hasActiveSession(agentId);
   const isPrompting = sessionChecker.isPrompting?.(agentId) ?? false;
   const supportsInjection = sessionChecker.supportsInjection?.(agentId) ?? true;
+  const isStopped = sessionChecker.isStopped?.(agentId) ?? false;
 
-  const action = determineWakeAction(priority, hasSession, isPrompting);
+  const action = determineWakeAction(priority, hasSession, isPrompting, isStopped);
 
   // If we want to inject but session doesn't support it, fall back to interrupt
+  // (unless action is "skip", which should remain as-is)
   const effectiveAction =
     action === "inject" && !supportsInjection ? "interrupt" : action;
 

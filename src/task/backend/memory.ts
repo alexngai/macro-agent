@@ -302,14 +302,22 @@ export class InMemoryTaskBackend implements TaskBackend {
 
     // Add outputs if provided
     if (outputs) {
-      if (outputs.data) {
+      // Merge summary and data into outputs object
+      const outputsToStore: Record<string, unknown> = {
+        ...(outputs.data ?? {}),
+      };
+      if (outputs.summary !== undefined) {
+        outputsToStore.summary = outputs.summary;
+      }
+
+      if (Object.keys(outputsToStore).length > 0) {
         this.eventStore.emit({
           type: "task",
           source: { agent_id: task.assigned_agent ?? task.created_by },
           payload: {
             task_id: id,
             action: "status_change",
-            details: { outputs: outputs.data },
+            details: { outputs: outputsToStore },
           },
         });
       }
@@ -628,6 +636,9 @@ export class InMemoryTaskBackend implements TaskBackend {
         ? callbackOrTaskId
         : maybeCallback!;
 
+    // Track seen task IDs to distinguish "created" from "updated"
+    const seenTaskIds = new Set<TaskId>();
+
     // Wrap EventStore's onTaskChange
     return this.eventStore.onTaskChange((taskId, task) => {
       // If filtering by taskId, skip non-matching events
@@ -635,9 +646,20 @@ export class InMemoryTaskBackend implements TaskBackend {
         return;
       }
 
+      // Determine event type
+      let eventType: TaskChangeEvent["type"];
+      if (!task) {
+        eventType = "deleted";
+      } else if (seenTaskIds.has(taskId)) {
+        eventType = "updated";
+      } else {
+        eventType = "created";
+        seenTaskIds.add(taskId);
+      }
+
       // Build TaskChangeEvent
       const event: TaskChangeEvent = {
-        type: task ? "updated" : "deleted",
+        type: eventType,
         taskId,
         task: task ? this.toExtendedTask(task) : ({} as ExtendedTask),
       };

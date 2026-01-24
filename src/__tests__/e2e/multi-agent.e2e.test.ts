@@ -4,20 +4,37 @@
  * Comprehensive E2E tests for multi-agent lifecycle, WebSocket ACP multi-client,
  * and inter-agent communication.
  *
- * REQUIRES: RUN_E2E_TESTS=true environment variable (and authenticated Claude Code)
+ * REQUIRES: RUN_FULL_AGENT_TESTS=true environment variable (and authenticated Claude Code)
+ * REQUIRES: RUN_FULL_AGENT_TESTS=true environment variable (and authenticated Claude Code)
  *
  * Run with:
- *   RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  afterAll,
+} from "vitest";
 import { WebSocket } from "ws";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { execSync } from "child_process";
 import { createEventStore, type EventStore } from "../../store/event-store.js";
 import {
   createAgentManager,
   type AgentManager,
 } from "../../agent/agent-manager.js";
-import { createTaskManager, type TaskManager } from "../../task/task-manager.js";
+import {
+  createTaskManager,
+  type TaskManager,
+} from "../../task/task-manager.js";
 import {
   createMessageRouter,
   type MessageRouter,
@@ -31,16 +48,44 @@ import {
 // Test Configuration
 // ─────────────────────────────────────────────────────────────────
 
-const RUN_E2E = !!process.env.RUN_E2E_TESTS;
-const testFn = RUN_E2E ? it : it.skip;
+const RUN_FULL_AGENT = !!process.env.RUN_FULL_AGENT_TESTS;
+const testFn = RUN_FULL_AGENT ? it : it.skip;
 
 // Timeouts for different test types
 const TIMEOUT = {
-  SPAWN: 60000,      // Single agent spawn
+  SPAWN: 60000, // Single agent spawn
   MULTI_SPAWN: 180000, // Multiple agent spawns
-  PROMPT: 90000,     // Agent prompt with response
+  PROMPT: 90000, // Agent prompt with response
   HIERARCHY: 120000, // Hierarchy operations
 };
+
+/**
+ * Create an isolated test git repo to avoid polluting real repo
+ */
+function createTestRepo(prefix: string): { path: string; cleanup: () => void } {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), `multi-agent-${prefix}-`),
+  );
+  const repoPath = path.join(tmpDir, "test-repo");
+  fs.mkdirSync(repoPath);
+  execSync("git init", { cwd: repoPath, stdio: "pipe" });
+  execSync('git config user.email "test@test.com"', {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+  execSync('git config user.name "Test User"', {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+  fs.writeFileSync(path.join(repoPath, "README.md"), "# Test Repo\n");
+  execSync("git add -A", { cwd: repoPath, stdio: "pipe" });
+  execSync('git commit -m "Initial commit"', { cwd: repoPath, stdio: "pipe" });
+
+  return {
+    path: repoPath,
+    cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────
 // ACP Wire Protocol Client
@@ -73,7 +118,10 @@ class ACPTestClient {
 
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Connection timeout")), 10000);
+      const timeout = setTimeout(
+        () => reject(new Error("Connection timeout")),
+        10000,
+      );
 
       this.ws.on("open", () => {
         clearTimeout(timeout);
@@ -110,7 +158,11 @@ class ACPTestClient {
     });
   }
 
-  async request(method: string, params?: unknown, timeoutMs = 30000): Promise<JsonRpcMessage> {
+  async request(
+    method: string,
+    params?: unknown,
+    timeoutMs = 30000,
+  ): Promise<JsonRpcMessage> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -136,20 +188,36 @@ class ACPTestClient {
   }
 
   async newSession(params: { cwd?: string } = {}): Promise<JsonRpcMessage> {
-    return this.request("session/new", {
-      mcpServers: [],
-      ...params,
-    }, 60000);
+    return this.request(
+      "session/new",
+      {
+        mcpServers: [],
+        ...params,
+      },
+      60000,
+    );
   }
 
-  async prompt(sessionId: string, text: string, timeoutMs = 60000): Promise<JsonRpcMessage> {
-    return this.request("session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text }],
-    }, timeoutMs);
+  async prompt(
+    sessionId: string,
+    text: string,
+    timeoutMs = 60000,
+  ): Promise<JsonRpcMessage> {
+    return this.request(
+      "session/prompt",
+      {
+        sessionId,
+        prompt: [{ type: "text", text }],
+      },
+      timeoutMs,
+    );
   }
 
-  async extMethod(method: string, params: unknown, timeoutMs = 30000): Promise<JsonRpcMessage> {
+  async extMethod(
+    method: string,
+    params: unknown,
+    timeoutMs = 30000,
+  ): Promise<JsonRpcMessage> {
     return this.request(method, params, timeoutMs);
   }
 
@@ -199,13 +267,17 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("lifecycle");
 
     // Create services with in-memory storage
     eventStore = await createEventStore({ inMemory: true });
@@ -213,21 +285,21 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     // Start WebSocket server
     testPort = 10000 + Math.floor(Math.random() * 50000);
     server = createWebSocketACPServer(
       { eventStore, agentManager, taskManager },
-      { port: testPort, host: "localhost", path: "/acp" }
+      { port: testPort, host: "localhost", path: "/acp" },
     );
     await server.start();
     log(`Server started on port ${testPort}`);
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -253,6 +325,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
     log("Cleanup complete");
   });
 
@@ -272,7 +345,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         log("✓ Client initialized");
 
         // Create session (spawns head manager)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         expect(sessionResult.error).toBeUndefined();
         expect(sessionResult.result).toBeDefined();
 
@@ -290,7 +363,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         expect(spawnEvents.length).toBeGreaterThanOrEqual(1);
         log(`✓ Spawn events: ${spawnEvents.length}`);
       },
-      { timeout: TIMEOUT.SPAWN }
+      { timeout: TIMEOUT.SPAWN },
     );
 
     testFn(
@@ -303,7 +376,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager session
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const session = sessionResult.result as { sessionId: string };
         log(`✓ Head manager session: ${session.sessionId}`);
 
@@ -341,7 +414,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         expect(children[1].parent).toBe(headManagerId);
         log("✓ Both children have correct parent");
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -354,7 +427,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager (Level 0)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const session = sessionResult.result as { sessionId: string };
         const headManagers = agentManager.listHeadManagers();
         const level0Id = headManagers[0].id;
@@ -383,7 +456,9 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         expect(hierarchy).not.toBeNull();
         expect(hierarchy!.depth).toBe(3);
         expect(hierarchy!.totalAgents).toBe(3);
-        log(`✓ Hierarchy depth: ${hierarchy!.depth}, total: ${hierarchy!.totalAgents}`);
+        log(
+          `✓ Hierarchy depth: ${hierarchy!.depth}, total: ${hierarchy!.totalAgents}`,
+        );
 
         // Verify lineage
         const level1Agent = agentManager.get(level1.agentId);
@@ -393,7 +468,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         expect(level2Agent?.lineage).toEqual([level0Id, level1.agentId]);
         log("✓ Lineages verified correctly");
       },
-      { timeout: TIMEOUT.HIERARCHY }
+      { timeout: TIMEOUT.HIERARCHY },
     );
   });
 
@@ -408,7 +483,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const headManagers = agentManager.listHeadManagers();
         const headId = headManagers[0].id;
         log(`✓ Head manager: ${headId}`);
@@ -446,22 +521,28 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
 
         expect(headAgent?.state).toBe("stopped");
         expect(headAgent?.stop_reason).toBe("completed");
-        log(`✓ Head state: ${headAgent?.state}, reason: ${headAgent?.stop_reason}`);
+        log(
+          `✓ Head state: ${headAgent?.state}, reason: ${headAgent?.stop_reason}`,
+        );
 
         expect(childAgent?.state).toBe("stopped");
         expect(childAgent?.stop_reason).toBe("parent_stopped");
-        log(`✓ Child state: ${childAgent?.state}, reason: ${childAgent?.stop_reason}`);
+        log(
+          `✓ Child state: ${childAgent?.state}, reason: ${childAgent?.stop_reason}`,
+        );
 
         expect(grandchildAgent?.state).toBe("stopped");
         expect(grandchildAgent?.stop_reason).toBe("parent_stopped");
-        log(`✓ Grandchild state: ${grandchildAgent?.state}, reason: ${grandchildAgent?.stop_reason}`);
+        log(
+          `✓ Grandchild state: ${grandchildAgent?.state}, reason: ${grandchildAgent?.stop_reason}`,
+        );
 
         // Verify terminate events
         const terminateEvents = eventStore.query({ type: "terminate" });
         expect(terminateEvents.length).toBeGreaterThanOrEqual(3);
         log(`✓ Terminate events: ${terminateEvents.length}`);
       },
-      { timeout: TIMEOUT.HIERARCHY }
+      { timeout: TIMEOUT.HIERARCHY },
     );
   });
 
@@ -476,7 +557,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const headManagers = agentManager.listHeadManagers();
         const headId = headManagers[0].id;
 
@@ -506,9 +587,11 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         expect(hierarchy.depth).toBe(2);
         expect(hierarchy.hierarchy.agent.id).toBe(headId);
         expect(hierarchy.hierarchy.children.length).toBe(2);
-        log(`✓ Hierarchy: ${hierarchy.totalAgents} agents, depth ${hierarchy.depth}`);
+        log(
+          `✓ Hierarchy: ${hierarchy.totalAgents} agents, depth ${hierarchy.depth}`,
+        );
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
   });
 });
@@ -524,29 +607,33 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("multiclient");
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     testPort = 10000 + Math.floor(Math.random() * 50000);
     server = createWebSocketACPServer(
       { eventStore, agentManager, taskManager },
-      { port: testPort, host: "localhost", path: "/acp" }
+      { port: testPort, host: "localhost", path: "/acp" },
     );
     await server.start();
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -565,6 +652,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
   });
 
   describe("MC: Multi-Client Scenarios", () => {
@@ -588,7 +676,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         expect(server.getConnectionCount()).toBe(3);
         log("✓ 3 clients connected simultaneously");
       },
-      { timeout: TIMEOUT.SPAWN }
+      { timeout: TIMEOUT.SPAWN },
     );
 
     testFn(
@@ -602,8 +690,8 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Create sessions
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
-        const sessionB = await clientB.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
+        const sessionB = await clientB.newSession({ cwd: testRepo.path });
 
         expect(sessionA.error).toBeUndefined();
         expect(sessionB.error).toBeUndefined();
@@ -619,7 +707,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         expect(heads.length).toBeGreaterThanOrEqual(2);
         log(`✓ Head managers: ${heads.length}`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -633,8 +721,8 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Create sessions
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
-        const sessionB = await clientB.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
+        const sessionB = await clientB.newSession({ cwd: testRepo.path });
         log("✓ Both sessions created");
 
         // Disconnect client A
@@ -645,7 +733,10 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         log("✓ Client A disconnected, connection count: 1");
 
         // Client B should still be able to use the hierarchy
-        const hierarchyResult = await clientB.extMethod("_macro/getHierarchy", {});
+        const hierarchyResult = await clientB.extMethod(
+          "_macro/getHierarchy",
+          {},
+        );
         expect(hierarchyResult.error).toBeUndefined();
         log("✓ Client B can still query hierarchy");
 
@@ -654,7 +745,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         expect(agents.length).toBeGreaterThanOrEqual(2);
         log(`✓ Total agents in shared hierarchy: ${agents.length}`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -681,7 +772,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         // Create sessions sequentially (to avoid race conditions)
         const sessions: string[] = [];
         for (const client of newClients) {
-          const result = await client.newSession({ cwd: process.cwd() });
+          const result = await client.newSession({ cwd: testRepo.path });
           expect(result.error).toBeUndefined();
           sessions.push((result.result as { sessionId: string }).sessionId);
         }
@@ -697,7 +788,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         expect(heads.length).toBeGreaterThanOrEqual(clientCount);
         log(`✓ Shared hierarchy has ${heads.length} head managers`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN * 2 }
+      { timeout: TIMEOUT.MULTI_SPAWN * 2 },
     );
 
     testFn(
@@ -711,7 +802,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Client A creates head manager
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const clientAHeadId = heads[0].id;
         log(`✓ Client A head manager: ${clientAHeadId}`);
@@ -737,7 +828,9 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
 
         expect(hierarchy.totalAgents).toBe(2);
         expect(hierarchy.depth).toBe(2);
-        log(`✓ Client B sees hierarchy: ${hierarchy.totalAgents} agents, depth ${hierarchy.depth}`);
+        log(
+          `✓ Client B sees hierarchy: ${hierarchy.totalAgents} agents, depth ${hierarchy.depth}`,
+        );
 
         // Client B can spawn a grandchild under Client A's child
         const grandchildResult = await clientB.extMethod("_macro/spawnAgent", {
@@ -745,7 +838,8 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
           parentId: childId,
         });
         expect(grandchildResult.error).toBeUndefined();
-        const grandchildId = (grandchildResult.result as { agentId: string }).agentId;
+        const grandchildId = (grandchildResult.result as { agentId: string })
+          .agentId;
         log(`✓ Client B spawned grandchild: ${grandchildId}`);
 
         // Verify the cross-client hierarchy
@@ -754,7 +848,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         expect(finalHierarchy!.depth).toBe(3);
         log("✓ Cross-client hierarchy verified: 3 agents, depth 3");
       },
-      { timeout: TIMEOUT.HIERARCHY }
+      { timeout: TIMEOUT.HIERARCHY },
     );
   });
 });
@@ -770,29 +864,33 @@ describe("Part 3: Event Storage E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("events");
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     testPort = 10000 + Math.floor(Math.random() * 50000);
     server = createWebSocketACPServer(
       { eventStore, agentManager, taskManager },
-      { port: testPort, host: "localhost", path: "/acp" }
+      { port: testPort, host: "localhost", path: "/acp" },
     );
     await server.start();
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -811,6 +909,7 @@ describe("Part 3: Event Storage E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
   });
 
   describe("EVT: Event Verification", () => {
@@ -824,7 +923,7 @@ describe("Part 3: Event Storage E2E", () => {
         await client.initialize();
 
         // Create session (generates spawn + status events)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const headId = heads[0].id;
         log("✓ Head manager created");
@@ -832,7 +931,9 @@ describe("Part 3: Event Storage E2E", () => {
         // Verify spawn event
         const spawnEvents = eventStore.query({ type: "spawn" });
         expect(spawnEvents.length).toBeGreaterThanOrEqual(1);
-        const spawnEvent = spawnEvents.find((e) => e.payload.agent_id === headId);
+        const spawnEvent = spawnEvents.find(
+          (e) => e.payload.agent_id === headId,
+        );
         expect(spawnEvent).toBeDefined();
         expect(spawnEvent!.payload.agent_id).toBe(headId);
         log(`✓ Spawn event verified for ${headId}`);
@@ -848,12 +949,14 @@ describe("Part 3: Event Storage E2E", () => {
         // Verify terminate event
         const terminateEvents = eventStore.query({ type: "terminate" });
         expect(terminateEvents.length).toBeGreaterThanOrEqual(1);
-        const termEvent = terminateEvents.find((e) => e.payload.agent_id === headId);
+        const termEvent = terminateEvents.find(
+          (e) => e.payload.agent_id === headId,
+        );
         expect(termEvent).toBeDefined();
         expect(termEvent!.payload.reason).toBe("completed");
         log(`✓ Terminate event verified for ${headId}`);
       },
-      { timeout: TIMEOUT.SPAWN }
+      { timeout: TIMEOUT.SPAWN },
     );
 
     testFn(
@@ -866,7 +969,7 @@ describe("Part 3: Event Storage E2E", () => {
         await client.initialize();
 
         // Create session
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const headId = heads[0].id;
 
@@ -886,7 +989,7 @@ describe("Part 3: Event Storage E2E", () => {
         expect(agent!.state).toBe("stopped");
         log(`✓ VIEW-03: Agent state is ${agent!.state} after terminate`);
       },
-      { timeout: TIMEOUT.SPAWN }
+      { timeout: TIMEOUT.SPAWN },
     );
   });
 });
@@ -902,13 +1005,17 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("messaging");
 
     // Create services with in-memory storage
     eventStore = await createEventStore({ inMemory: true });
@@ -916,21 +1023,21 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     // Start WebSocket server
     testPort = 10000 + Math.floor(Math.random() * 50000);
     server = createWebSocketACPServer(
       { eventStore, agentManager, taskManager },
-      { port: testPort, host: "localhost", path: "/acp" }
+      { port: testPort, host: "localhost", path: "/acp" },
     );
     await server.start();
     log(`Server started on port ${testPort}`);
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -957,6 +1064,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
 
     // Close event store
     await eventStore.close();
+    testRepo?.cleanup();
 
     log("Cleanup complete");
   });
@@ -974,7 +1082,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1020,7 +1128,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         expect(ourMsg).toBeDefined();
         log(`✓ Message event stored: ${ourMsg!.id}`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -1031,7 +1139,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1048,7 +1156,8 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
           task_description: "Receiver agent",
           parentId: headId,
         });
-        const receiverId = (receiverResult.result as { agentId: string }).agentId;
+        const receiverId = (receiverResult.result as { agentId: string })
+          .agentId;
         log(`✓ Agents spawned: sender=${senderId}, receiver=${receiverId}`);
 
         // Send multiple messages
@@ -1085,7 +1194,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         expect(pending.length).toBe(0);
         log(`✓ All messages acknowledged: ${pending.length} pending`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -1096,7 +1205,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1120,7 +1229,9 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
           parentId: headId,
         });
         const sub2Id = (sub2Result.result as { agentId: string }).agentId;
-        log(`✓ Agents spawned: publisher=${publisherId}, sub1=${sub1Id}, sub2=${sub2Id}`);
+        log(
+          `✓ Agents spawned: publisher=${publisherId}, sub1=${sub1Id}, sub2=${sub2Id}`,
+        );
 
         // Subscribe both subscribers to a topic
         const topic = "test-notifications";
@@ -1151,7 +1262,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         expect(pubMessages.length).toBe(0);
         log(`✓ Publisher has no messages (not subscribed)`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -1162,7 +1273,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1181,7 +1292,8 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
           task_description: "Grandchild - Worker",
           parentId: childId,
         });
-        const grandchildId = (grandchildResult.result as { agentId: string }).agentId;
+        const grandchildId = (grandchildResult.result as { agentId: string })
+          .agentId;
         log(`✓ Grandchild spawned: ${grandchildId}`);
 
         // Send message from grandchild to head (ancestor)
@@ -1212,11 +1324,15 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         // (may receive multiple copies due to lineage routing)
         const grandchildMessages = messageRouter.getMessages(grandchildId);
         expect(grandchildMessages.length).toBeGreaterThanOrEqual(1);
-        const expectedMsg = grandchildMessages.find(m => m.content === "Instructions from head to grandchild");
+        const expectedMsg = grandchildMessages.find(
+          (m) => m.content === "Instructions from head to grandchild",
+        );
         expect(expectedMsg).toBeDefined();
-        log(`✓ Grandchild received: "${expectedMsg!.content}" (total: ${grandchildMessages.length})`);
+        log(
+          `✓ Grandchild received: "${expectedMsg!.content}" (total: ${grandchildMessages.length})`,
+        );
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -1227,7 +1343,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1260,13 +1376,13 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
           (e) =>
             e.source.agent_id === childId &&
             e.payload.status_type === "checkpoint" &&
-            e.payload.summary === "50% complete"
+            e.payload.summary === "50% complete",
         );
         expect(checkpointEvent).toBeDefined();
         expect(checkpointEvent!.payload.summary).toBe("50% complete");
         log(`✓ Status event stored: ${checkpointEvent!.payload.summary}`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
   });
 
@@ -1283,7 +1399,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1317,11 +1433,13 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         // Verify worker received the message (task routes to assigned agent)
         const workerMessages = messageRouter.getMessages(workerId);
         expect(workerMessages.length).toBeGreaterThanOrEqual(1);
-        const taskMsg = workerMessages.find(m => m.content === "Instructions for the task");
+        const taskMsg = workerMessages.find(
+          (m) => m.content === "Instructions for the task",
+        );
         expect(taskMsg).toBeDefined();
         log(`✓ Worker received task message: "${taskMsg!.content}"`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
 
     testFn(
@@ -1332,7 +1450,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1360,14 +1478,16 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         expect(ourEvent).toBeDefined();
         expect(ourEvent!.source.agent_id).toBe(headId);
         expect(ourEvent!.payload.content).toBe("Message structure check");
-        log(`✓ Message event verified: id=${ourEvent!.id}, from=${ourEvent!.source.agent_id}`);
+        log(
+          `✓ Message event verified: id=${ourEvent!.id}, from=${ourEvent!.source.agent_id}`,
+        );
 
         // Verify target in event
         expect(ourEvent!.target).toBeDefined();
         expect(ourEvent!.target!.agent_id).toBe(childId);
         log(`✓ Message target verified: ${ourEvent!.target!.agent_id}`);
       },
-      { timeout: TIMEOUT.MULTI_SPAWN }
+      { timeout: TIMEOUT.MULTI_SPAWN },
     );
   });
 });
@@ -1376,10 +1496,12 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
 // Skip Message if E2E not enabled
 // ─────────────────────────────────────────────────────────────────
 
-if (!RUN_E2E) {
+if (!RUN_FULL_AGENT) {
   console.log("\n" + "=".repeat(70));
   console.log("Multi-Agent E2E tests SKIPPED");
   console.log("To run with real agents:");
-  console.log("  RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts");
+  console.log(
+    "  RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts",
+  );
   console.log("=".repeat(70) + "\n");
 }

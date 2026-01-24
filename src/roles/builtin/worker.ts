@@ -65,6 +65,14 @@ export const WorkerRole: RoleDefinition = {
     subscriptions: ["WORK_ASSIGNED", "HEALTH_CHECK"],
     canEmit: ["WORKER_DONE", "MERGE_REQUEST"],
   },
+
+  systemPrompt: `You are a worker agent. After completing your assigned task:
+1. Verify all requirements are met
+2. Commit any changes (if working with files)
+3. Call done() with status "completed" and a summary of what you did
+
+IMPORTANT: You MUST call done() when finished. Example:
+done({ status: "completed", summary: "Created src/greeting.ts with hello function and committed changes" })`,
 };
 
 /**
@@ -112,7 +120,7 @@ export const ResolverWorkerRole: RoleDefinition = {
 
   protocol: {
     subscriptions: ["WORK_ASSIGNED", "HEALTH_CHECK"],
-    canEmit: ["WORKER_DONE", "MERGE_REQUEST"],
+    canEmit: ["WORKER_DONE", "RESOLVER_DONE"],
   },
 
   systemPrompt: `You are a resolver worker. Your job is to:

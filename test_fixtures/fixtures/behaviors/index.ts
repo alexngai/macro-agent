@@ -16,8 +16,16 @@ export {
   MULTI_COMMIT_WORKER,
   BLOCKED_WORKER,
   DEFERRED_WORKER,
+  HELP_EMITTING_WORKER,
+  EXPLICIT_FAILING_WORKER,
   createConflictingWorker,
   createWorker,
+  createUniqueFileWorker,
+  // Resolver workers
+  RESOLVER_WORKER,
+  FAILING_RESOLVER_WORKER,
+  NESTED_CONFLICT_RESOLVER,
+  createResolverWorker,
 } from "./workers.js";
 
 // Coordinators

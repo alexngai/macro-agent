@@ -737,6 +737,22 @@ class DefaultAgentSimulator implements AgentSimulator {
       details,
     });
 
+    // Auto-submit merge request for completed workers
+    if (
+      this.role === "worker" &&
+      status === "completed" &&
+      this.services.mergeQueue &&
+      this.context?.streamId
+    ) {
+      const gitState = this.getGitState();
+      this.services.mergeQueue.submit({
+        streamId: this.context.streamId,
+        taskId: this.context.taskId || this.agentId,
+        workerBranch: gitState.currentBranch,
+        workerAgentId: this.agentId,
+      });
+    }
+
     // Emit terminate event
     this.services.eventStore.emit({
       type: "terminate",

@@ -1,8 +1,12 @@
 /**
  * End-to-end integration tests
  *
- * These tests use real Claude Code processes and require ANTHROPIC_API_KEY.
- * Run manually with: ANTHROPIC_API_KEY=xxx npm test -- src/__tests__/integration.test.ts
+ * These tests use real Claude Code processes and require:
+ * - RUN_FULL_AGENT_TESTS=true environment variable
+ * - ANTHROPIC_API_KEY set for authentication
+ *
+ * Run with:
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/integration.e2e.test.ts
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -19,9 +23,9 @@ import {
 import type { Agent } from "../store/types/index.js";
 import type { AgentLifecycleEvent } from "../agent/types.js";
 
-// Skip all tests if no API key
-const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
-const testFn = hasApiKey ? it : it.skip;
+// Skip all tests if flag not set
+const RUN_FULL_AGENT = !!process.env.RUN_FULL_AGENT_TESTS;
+const testFn = RUN_FULL_AGENT ? it : it.skip;
 
 describe("End-to-End Integration", () => {
   let eventStore: EventStore;
@@ -32,9 +36,9 @@ describe("End-to-End Integration", () => {
   let unsubscribe: () => void;
 
   beforeAll(() => {
-    if (!hasApiKey) {
+    if (!RUN_FULL_AGENT) {
       console.log(
-        "⚠️  Skipping integration tests: ANTHROPIC_API_KEY not set"
+        "⚠️  Skipping integration tests: RUN_FULL_AGENT_TESTS not set"
       );
     }
   });

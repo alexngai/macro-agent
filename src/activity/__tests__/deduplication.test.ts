@@ -194,6 +194,138 @@ describe("ActivityDeduplicator", () => {
       expect(dedup.getStats().totalSlots).toBe(3);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Wake Loop Prevention (E2E scenario from s-1zcx)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("wake loop prevention", () => {
+    it("should prevent 2-agent wake cycle (A→B→A)", () => {
+      // Scenario: Agent A's activity wakes Agent B
+      //           Agent B's activity would wake Agent A
+      //           This could cause infinite loop without deduplication
+
+      // Agent A triggers activity that would wake B
+      const activityFromA = createActivity("task_completed", "agent-a");
+      expect(deduplicator.shouldNotify("agent-b", activityFromA)).toBe(true);
+
+      // Agent B reacts and triggers activity that would wake A
+      const activityFromB = createActivity("task_completed", "agent-b");
+      expect(deduplicator.shouldNotify("agent-a", activityFromB)).toBe(true);
+
+      // If B's wake causes A to emit same type of activity back to B,
+      // it should be suppressed (preventing the loop)
+      const activityFromA2 = createActivity("task_completed", "agent-a");
+      expect(deduplicator.shouldNotify("agent-b", activityFromA2)).toBe(false);
+    });
+
+    it("should prevent 3-agent wake cycle (A→B→C→A)", () => {
+      // Scenario: A wakes B, B wakes C, C would wake A (cycle)
+
+      // A → B
+      expect(
+        deduplicator.shouldNotify("agent-b", createActivity("status", "agent-a"))
+      ).toBe(true);
+
+      // B → C
+      expect(
+        deduplicator.shouldNotify("agent-c", createActivity("status", "agent-b"))
+      ).toBe(true);
+
+      // C → A
+      expect(
+        deduplicator.shouldNotify("agent-a", createActivity("status", "agent-c"))
+      ).toBe(true);
+
+      // Now if A tries to wake B again with same event type, it's suppressed
+      expect(
+        deduplicator.shouldNotify("agent-b", createActivity("status", "agent-a"))
+      ).toBe(false);
+
+      // Same for B → C
+      expect(
+        deduplicator.shouldNotify("agent-c", createActivity("status", "agent-b"))
+      ).toBe(false);
+    });
+
+    it("should allow different event types even in cycle", () => {
+      // A wakes B with "task_completed"
+      expect(
+        deduplicator.shouldNotify(
+          "agent-b",
+          createActivity("task_completed", "agent-a")
+        )
+      ).toBe(true);
+
+      // B wakes A with "status" (different type - allowed)
+      expect(
+        deduplicator.shouldNotify("agent-a", createActivity("status", "agent-b"))
+      ).toBe(true);
+
+      // A can wake B with "status" (different type - allowed)
+      expect(
+        deduplicator.shouldNotify("agent-b", createActivity("status", "agent-a"))
+      ).toBe(true);
+
+      // But A cannot wake B with "task_completed" again (same type - suppressed)
+      expect(
+        deduplicator.shouldNotify(
+          "agent-b",
+          createActivity("task_completed", "agent-a")
+        )
+      ).toBe(false);
+    });
+
+    it("should track suppressed wake attempts for diagnostics", () => {
+      // First round - allowed
+      deduplicator.shouldNotify(
+        "agent-b",
+        createActivity("task_completed", "agent-a")
+      );
+      deduplicator.shouldNotify(
+        "agent-a",
+        createActivity("task_completed", "agent-b")
+      );
+
+      // Second round - suppressed (would be loop)
+      deduplicator.shouldNotify(
+        "agent-b",
+        createActivity("task_completed", "agent-a")
+      );
+      deduplicator.shouldNotify(
+        "agent-a",
+        createActivity("task_completed", "agent-b")
+      );
+
+      const stats = deduplicator.getStats();
+      expect(stats.totalSuppressed).toBe(2);
+    });
+
+    it("should resume allowing wakes after window expires", async () => {
+      const dedup = new ActivityDeduplicator({ windowMs: 50 });
+
+      // Initial wake cycle
+      expect(
+        dedup.shouldNotify("agent-b", createActivity("event", "agent-a"))
+      ).toBe(true);
+      expect(
+        dedup.shouldNotify("agent-a", createActivity("event", "agent-b"))
+      ).toBe(true);
+
+      // Suppressed during window
+      expect(
+        dedup.shouldNotify("agent-b", createActivity("event", "agent-a"))
+      ).toBe(false);
+
+      // Wait for window to expire
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      // Should now allow wake again
+      expect(
+        dedup.shouldNotify("agent-b", createActivity("event", "agent-a"))
+      ).toBe(true);
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

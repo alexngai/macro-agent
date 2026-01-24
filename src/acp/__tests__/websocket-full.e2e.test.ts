@@ -4,12 +4,10 @@
  * These tests spawn REAL Claude Code agents and test the complete
  * multi-client WebSocket ACP flow.
  *
- * REQUIRES: RUN_E2E_TESTS=true environment variable (and authenticated Claude Code)
+ * REQUIRES: RUN_FULL_AGENT_TESTS=true environment variable (and authenticated Claude Code)
  *
  * Run with:
- *   npm run test:e2e
- *   # or directly:
- *   RUN_E2E_TESTS=true npm test -- src/acp/__tests__/websocket-full-e2e.test.ts
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/acp/__tests__/websocket-full.e2e.test.ts
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -184,8 +182,8 @@ class ACPWireClient {
 // Test Setup
 // ─────────────────────────────────────────────────────────────────
 
-const runE2E = !!process.env.RUN_E2E_TESTS;
-const testFn = runE2E ? it : it.skip;
+const RUN_FULL_AGENT = !!process.env.RUN_FULL_AGENT_TESTS;
+const testFn = RUN_FULL_AGENT ? it : it.skip;
 
 describe("WebSocket ACP Full E2E (Real Agents)", () => {
   let eventStore: EventStore;
@@ -197,8 +195,8 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
   const clients: ACPWireClient[] = [];
 
   beforeEach(async () => {
-    if (!runE2E) {
-      console.log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      console.log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
 
@@ -221,7 +219,7 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
   });
 
   afterEach(async () => {
-    if (!runE2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -376,11 +374,11 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
   });
 });
 
-// Log skip reason if RUN_E2E_TESTS not set
-if (!runE2E) {
+// Log skip reason if RUN_FULL_AGENT_TESTS not set
+if (!RUN_FULL_AGENT) {
   console.log("\n" + "=".repeat(60));
   console.log("WebSocket ACP Full E2E tests SKIPPED");
   console.log("To run with real agents:");
-  console.log("  npm run test:e2e");
+  console.log("  RUN_FULL_AGENT_TESTS=true npm run test:e2e");
   console.log("=".repeat(60) + "\n");
 }

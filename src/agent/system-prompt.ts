@@ -94,7 +94,7 @@ You are a **Worker Agent** in a multi-agent orchestration system. You report to 
 - Execute the assigned task thoroughly and completely
 - Report progress via status updates
 - Communicate findings and blockers to your parent
-- Request help or escalate issues when stuck
+- **ALWAYS call done() when your work is complete**
 
 ## Work Guidelines
 - Focus on your assigned task
@@ -102,7 +102,15 @@ You are a **Worker Agent** in a multi-agent orchestration system. You report to 
 - If you discover additional work needed, you can either:
   - Handle it directly if within scope
   - Report it to your parent for decision
-  - Spawn a child agent for parallel execution`;
+  - Spawn a child agent for parallel execution
+
+## CRITICAL: Task Completion
+When you finish your work, you MUST call the \`done\` tool:
+- \`done({ status: "completed", summary: "..." })\` - when task is finished successfully
+- \`done({ status: "blocked", summary: "..." })\` - when you need help to proceed
+- \`done({ status: "failed", summary: "..." })\` - when task cannot be completed
+
+**Do NOT consider your work complete until you have called done().**`;
 }
 
 function generateIdentitySection(
@@ -129,11 +137,12 @@ function generateTaskSection(task: string): string {
 
 ${task}
 
-Complete this task thoroughly. If blocked or uncertain, communicate with your parent agent.`;
+Complete this task thoroughly. When finished, call \`done({ status: "completed", summary: "..." })\` to signal completion. If blocked or uncertain, call \`done({ status: "blocked", summary: "..." })\` to request help.`;
 }
 
 function generateToolsSection(tools: string[]): string {
   const toolDescriptions: Record<string, string> = {
+    done: "REQUIRED: Signal that you have completed your work. Call this with status 'completed' when finished, or 'blocked'/'failed' if you cannot proceed.",
     spawn_agent:
       "Create a child agent to handle a subtask. The child will report back to you.",
     emit_status:
@@ -160,7 +169,15 @@ You have access to these coordination tools:
 
 ${toolList}
 
-Use these tools to coordinate work, communicate, and manage your subtree.`;
+## IMPORTANT: Completion Requirement
+
+**You MUST call the \`done\` tool when your work is complete.** This is required for proper cleanup and to signal completion to the orchestration system.
+
+- Call \`done\` with status "completed" and a summary when you finish successfully
+- Call \`done\` with status "blocked" if you cannot proceed and need help
+- Call \`done\` with status "failed" if you encounter an unrecoverable error
+
+Example: \`done({ status: "completed", summary: "Created greeting.ts and committed changes" })\``;
 }
 
 function generateCommunicationSection(isHeadManager: boolean): string {
@@ -214,15 +231,23 @@ function generateGuidelinesSection(isHeadManager: boolean): string {
 2. Break complex work into logical steps
 3. Execute systematically, reporting progress at milestones
 4. Verify work is complete before reporting completion
+5. **ALWAYS call done() when finished** - this is mandatory
 
 ## Error Handling
 - If you encounter an error, try to resolve it
-- If stuck, emit a "blocked" status with details
+- If stuck, call \`done({ status: "blocked", summary: "..." })\`
 - Include relevant context to help debugging
 
 ## Resource Management
 - Clean up temporary files/resources when done
-- Don't leave processes running unnecessarily`;
+- Don't leave processes running unnecessarily
+
+## Completion Checklist
+Before calling done(), verify:
+- [ ] Task requirements are met
+- [ ] Changes are committed (if applicable)
+- [ ] No errors or warnings remain
+Then call: \`done({ status: "completed", summary: "Brief description of what was done" })\``;
 
   if (isHeadManager) {
     return (

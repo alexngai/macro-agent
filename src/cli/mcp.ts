@@ -40,6 +40,7 @@ async function main() {
   const taskId = process.env.MACRO_TASK_ID;
   const agentCwd = process.env.MACRO_AGENT_CWD || process.cwd();
   const instanceId = process.env.MACRO_INSTANCE_ID;
+  const baseDir = process.env.MACRO_BASE_DIR; // Optional: custom base directory for testing
 
   if (!agentId) {
     console.error("Error: MACRO_AGENT_ID environment variable is required");
@@ -56,7 +57,8 @@ async function main() {
 
   try {
     // Initialize services with shared file-based storage using the same instanceId as the main process
-    const eventStore = await createEventStore({ inMemory: false, instanceId });
+    // If MACRO_BASE_DIR is provided (e.g., for testing), use it to resolve to the correct database location
+    const eventStore = await createEventStore({ inMemory: false, instanceId, baseDir });
     debugLog(`[MCP] EventStore created, path: ${eventStore.instancePath}`);
     const messageRouter = createMessageRouter(eventStore);
     const agentManager = createAgentManager(eventStore, messageRouter);
