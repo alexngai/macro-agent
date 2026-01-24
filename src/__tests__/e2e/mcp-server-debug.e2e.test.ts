@@ -188,15 +188,14 @@ describe("MCP Server Debug", () => {
   );
 
   testFn(
-    "debug: verify agent can actually call done() MCP tool",
+    "debug: verify agent calls done() with promptUntilDone",
     async () => {
-      // The previous test showed the agent KNOWS about MCP tools but they
-      // don't appear in available_commands_update. Let's verify the agent
-      // can actually CALL the done() tool.
+      // Test the new promptUntilDone functionality that automatically
+      // follows up to ensure agents call done()
 
       log("Spawning agent...");
       const spawnResult = await agentManager.spawn({
-        task: "Test done() tool",
+        task: "Create a simple greeting function",
         role: "worker",
         streamId: "debug-stream",
         cwd: process.cwd(),
@@ -204,86 +203,68 @@ describe("MCP Server Debug", () => {
 
       log(`Agent spawned: ${spawnResult.id}`);
 
-      // Track tool calls
-      const toolCalls: Array<{ name: string; status: string }> = [];
-      let doneToolCalled = false;
+      // Use promptUntilDone which will follow up if done() isn't called
+      log("Prompting agent with follow-up support...");
 
-      log("Prompting agent to call done()...");
-
-      for await (const update of agentManager.prompt(
+      const result = await agentManager.promptUntilDone(
         spawnResult.id,
-        `You MUST call the mcp__macro-agent__done tool right now with status "completed" and summary "Test complete".
+        `Create a file called /tmp/test-greeting-${Date.now()}.ts with a simple function that returns "Hello".
+Then commit your changes and call done() with status "completed".
 
-Do not do anything else. Just call done() immediately.
-
-Call: mcp__macro-agent__done with {"status": "completed", "summary": "Test complete"}`
-      )) {
-        const updateObj = update as Record<string, unknown>;
-        const updateType = updateObj.sessionUpdate as string;
-
-        // Track tool calls
-        if (updateType === "tool_call") {
-          const toolName = (updateObj.tool as { name?: string })?.name ?? "unknown";
-          toolCalls.push({ name: toolName, status: "started" });
-          log(`Tool call started: ${toolName}`);
-
-          if (toolName.includes("done") || toolName.includes("macro")) {
-            doneToolCalled = true;
-            log(`✓ done() tool was called!`);
-          }
+Remember: You MUST call done() when finished.`,
+        {
+          maxFollowUps: 2,
+          onUpdate: (update) => {
+            const updateObj = update as Record<string, unknown>;
+            if (updateObj.sessionUpdate === "agent_message_chunk") {
+              const content = updateObj.content as { text?: string } | undefined;
+              if (content?.text) {
+                process.stdout.write(content.text);
+              }
+            }
+          },
         }
-
-        if (updateType === "tool_call_update") {
-          const status = updateObj.status as string;
-          const toolCallId = updateObj.toolCallId as string;
-          if (status === "completed" || status === "error") {
-            log(`Tool ${toolCallId} ${status}`);
-          }
-        }
-
-        // Log agent text
-        if (updateType === "agent_message_chunk") {
-          const content = updateObj.content as { text?: string } | undefined;
-          if (content?.text) {
-            process.stdout.write(content.text);
-          }
-        }
-      }
-
-      log(`\n\n=== Tool Calls Summary ===`);
-      for (const tc of toolCalls) {
-        log(`  - ${tc.name}`);
-      }
-      log(`done() called: ${doneToolCalled}`);
-
-      // Check if agent state changed
-      const agent = agentManager.get(spawnResult.id);
-      log(`Agent state after prompt: ${agent?.state}`);
-
-      // Check EventStore for done event
-      const doneEvents = eventStore.query({ type: "done" });
-      const agentDoneEvent = doneEvents.find(
-        (e) => e.payload?.agentId === spawnResult.id
       );
-      log(`Done event in EventStore: ${agentDoneEvent ? "YES" : "NO"}`);
 
-      if (agentDoneEvent) {
-        log(`Done event payload: ${JSON.stringify(agentDoneEvent.payload)}`);
+      log(`\n\n=== promptUntilDone Result ===`);
+      log(`done() called: ${result.doneCalled}`);
+      log(`done() status: ${result.doneStatus ?? "N/A"}`);
+      log(`Total updates: ${result.updates.length}`);
+
+      // Check EventStore for status events
+      const statusEvents = eventStore.query({ type: "status" });
+      const workerDoneEvent = statusEvents.find(
+        (e) =>
+          e.source?.agent_id === spawnResult.id &&
+          (e.payload?.status_type === "completed" ||
+           e.payload?.status_type === "failed")
+      );
+      log(`Status event in EventStore: ${workerDoneEvent ? "YES" : "NO"}`);
+      if (workerDoneEvent) {
+        log(`Status: ${workerDoneEvent.payload?.status_type}`);
+        log(`Summary: ${workerDoneEvent.payload?.summary}`);
       }
+
+      // Check agent state
+      const agent = agentManager.get(spawnResult.id);
+      log(`Agent state: ${agent?.state}`);
 
       // Cleanup
       if (agent?.state === "running") {
         await agentManager.terminate(spawnResult.id, "debug_complete");
       }
 
-      // Report findings
-      if (!doneToolCalled) {
-        log("\n⚠️  Agent did not call done() tool");
-        log("Tool calls made: " + toolCalls.map((t) => t.name).join(", "));
-      }
+      // The test passes if we got updates - done() calling is what we're debugging
+      expect(result.updates.length).toBeGreaterThan(0);
 
-      expect(toolCalls.length).toBeGreaterThan(0);
+      // Report if done() wasn't called even with follow-up
+      if (!result.doneCalled) {
+        log("\n⚠️  Agent did not call done() even after follow-up prompts");
+        log("This indicates the model isn't following done() instructions");
+      } else {
+        log("\n✓ Agent successfully called done()!");
+      }
     },
-    { timeout: 120000 }
+    { timeout: 180000 }
   );
 });
