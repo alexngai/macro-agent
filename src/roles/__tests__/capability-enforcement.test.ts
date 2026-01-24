@@ -693,4 +693,297 @@ describe("Role Capability Enforcement", () => {
       expect(hasSpawnIntegrator).toBe(false);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Advanced Scenarios: Nested Spawn Capability Enforcement
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("Nested Spawn Capability Enforcement", () => {
+    let harness: TestHarness;
+
+    beforeEach(async () => {
+      harness = await createTestHarness();
+      await harness.createTempRepo({ initialFiles: MINIMAL_PROJECT });
+    });
+
+    afterEach(async () => {
+      if (harness) {
+        await harness.cleanup();
+      }
+    });
+
+    it("ROLE-CAP-NESTED-01: Worker child can spawn grandchild worker", async () => {
+      // Coordinator spawns worker, worker spawns another worker
+      const coordinator = await harness.spawnSimulator({
+        role: "coordinator",
+        behavior: {
+          onStart: [
+            { type: "log", message: "Coordinator spawning worker" },
+            {
+              type: "spawn_child",
+              role: "worker",
+              behavior: {
+                onStart: [
+                  { type: "log", message: "Worker spawning grandchild" },
+                  {
+                    type: "spawn_child",
+                    role: "worker",
+                    behavior: {
+                      onStart: [
+                        { type: "log", message: "Grandchild worker" },
+                        { type: "done", status: "completed" },
+                      ],
+                    },
+                  },
+                  { type: "done", status: "completed" },
+                ],
+              },
+            },
+            { type: "done", status: "completed" },
+          ],
+        },
+      });
+
+      // Wait for ALL simulators including children to complete
+      await harness.waitForAll({ maxIterations: 200 });
+
+      const context = coordinator.getContext();
+      expect(context.children.length).toBe(1);
+
+      // Worker should have spawned grandchild
+      const workerContext = context.children[0].getContext();
+      expect(workerContext.children.length).toBe(1);
+    });
+
+    it("ROLE-CAP-NESTED-02: Worker child CANNOT spawn grandchild monitor", async () => {
+      // Coordinator spawns worker, worker tries to spawn monitor (should fail)
+      const coordinator = await harness.spawnSimulator({
+        role: "coordinator",
+        behavior: {
+          onStart: [
+            {
+              type: "spawn_child",
+              role: "worker",
+              behavior: {
+                onStart: [
+                  { type: "log", message: "Worker attempting to spawn monitor" },
+                  {
+                    type: "spawn_child",
+                    role: "monitor",
+                    behavior: {
+                      onStart: [{ type: "done", status: "completed" }],
+                    },
+                  },
+                  { type: "done", status: "completed" },
+                ],
+              },
+            },
+            { type: "done", status: "completed" },
+          ],
+        },
+      });
+
+      await harness.waitForSimulator(coordinator.agentId, { maxIterations: 200 });
+
+      const context = coordinator.getContext();
+      expect(context.children.length).toBe(1);
+
+      // Worker should have NO children (monitor spawn failed)
+      const workerContext = context.children[0].getContext();
+      expect(workerContext.children.length).toBe(0);
+    });
+
+    it("ROLE-CAP-NESTED-03: Deep hierarchy respects capabilities at each level", async () => {
+      // Coordinator -> Integrator -> Resolver (worker.resolver)
+      // Integrator can spawn workers (for resolvers), but not other integrators
+      const coordinator = await harness.spawnSimulator({
+        role: "coordinator",
+        behavior: {
+          onStart: [
+            {
+              type: "spawn_child",
+              role: "integrator",
+              behavior: {
+                onStart: [
+                  { type: "log", message: "Integrator spawning resolver" },
+                  {
+                    type: "spawn_child",
+                    role: "worker.resolver",
+                    behavior: {
+                      onStart: [
+                        { type: "log", message: "Resolver started" },
+                        { type: "done", status: "completed" },
+                      ],
+                    },
+                  },
+                  { type: "done", status: "completed" },
+                ],
+              },
+            },
+            { type: "done", status: "completed" },
+          ],
+        },
+      });
+
+      // Wait for ALL simulators including children to complete
+      await harness.waitForAll({ maxIterations: 200 });
+
+      const context = coordinator.getContext();
+      expect(context.children.length).toBe(1);
+      expect(context.children[0].role).toBe("integrator");
+
+      const integratorContext = context.children[0].getContext();
+      expect(integratorContext.children.length).toBe(1);
+      expect(integratorContext.children[0].role).toBe("worker.resolver");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Advanced Scenarios: Tool Filtering Validation
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("Tool Filtering Validation", () => {
+    it("ROLE-TOOL-VAL-01: Multiple capabilities required for bash tool", () => {
+      // bash tool should be available to roles with exec.command
+      const workerRole = getBuiltinRole("worker")!;
+      const monitorRole = getBuiltinRole("monitor")!;
+
+      // Worker has exec.command, so bash should be allowed
+      expect(isToolAllowedForRole("bash", workerRole)).toBe(true);
+
+      // Monitor does NOT have exec.command, so bash should NOT be allowed
+      expect(isToolAllowedForRole("bash", monitorRole)).toBe(false);
+    });
+
+    it("ROLE-TOOL-VAL-02: Done tool requires lifecycle.done capability", () => {
+      const workerRole = getBuiltinRole("worker")!;
+      const genericRole = getBuiltinRole("generic")!;
+
+      // Worker has lifecycle.done
+      expect(isToolAllowedForRole("done", workerRole)).toBe(true);
+
+      // Generic has wildcard (all tools)
+      expect(isToolAllowedForRole("done", genericRole)).toBe(true);
+    });
+
+    it("ROLE-TOOL-VAL-03: Monitor gets read tools but not write tools", () => {
+      const monitorRole = getBuiltinRole("monitor")!;
+
+      // Should have read tools
+      expect(isToolAllowedForRole("read", monitorRole)).toBe(true);
+      expect(isToolAllowedForRole("glob", monitorRole)).toBe(true);
+      expect(isToolAllowedForRole("grep", monitorRole)).toBe(true);
+
+      // Should NOT have write tools
+      expect(isToolAllowedForRole("write", monitorRole)).toBe(false);
+      expect(isToolAllowedForRole("edit", monitorRole)).toBe(false);
+    });
+
+    it("ROLE-TOOL-VAL-04: Integrator has merge-related capabilities", () => {
+      const integratorRole = getBuiltinRole("integrator")!;
+
+      // Should have git operations via bash
+      expect(isToolAllowedForRole("bash", integratorRole)).toBe(true);
+
+      // Should have spawn for creating resolvers
+      expect(isToolAllowedForRole("spawn_agent", integratorRole)).toBe(true);
+    });
+
+    it("ROLE-TOOL-VAL-05: Custom role with explicit tool allowlist", () => {
+      // Create a role with explicit tool allowlist
+      const customRole: RoleDefinition = {
+        name: "restricted-reader",
+        displayName: "Restricted Reader",
+        description: "Can only use read and glob",
+        capabilities: ["file.read"],
+        tools: {
+          mode: "allowlist",
+          tools: ["read", "glob"],
+        },
+      };
+
+      // Should have allowed tools
+      expect(isToolAllowedForRole("read", customRole)).toBe(true);
+      expect(isToolAllowedForRole("glob", customRole)).toBe(true);
+
+      // Should NOT have other tools
+      expect(isToolAllowedForRole("grep", customRole)).toBe(false);
+      expect(isToolAllowedForRole("write", customRole)).toBe(false);
+    });
+
+    it("ROLE-TOOL-VAL-06: Custom role with denylist", () => {
+      const customRole: RoleDefinition = {
+        name: "no-bash-worker",
+        displayName: "No Bash Worker",
+        description: "Worker without shell access",
+        capabilities: ["file.read", "file.write", "lifecycle.done"],
+        tools: {
+          mode: "denylist",
+          tools: ["bash"],
+        },
+      };
+
+      // Should have file tools
+      expect(isToolAllowedForRole("read", customRole)).toBe(true);
+      expect(isToolAllowedForRole("write", customRole)).toBe(true);
+
+      // bash should be explicitly denied
+      expect(isToolAllowedForRole("bash", customRole)).toBe(false);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Advanced Scenarios: Role System Consistency
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("Role System Consistency", () => {
+    it("ROLE-CONSIST-01: All builtin roles have required capabilities", () => {
+      const builtinRoles = ["worker", "coordinator", "integrator", "monitor", "generic"];
+
+      for (const roleName of builtinRoles) {
+        const role = getBuiltinRole(roleName);
+        expect(role).toBeDefined();
+        expect(role!.name).toBe(roleName);
+        expect(Array.isArray(role!.capabilities)).toBe(true);
+        expect(role!.capabilities.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("ROLE-CONSIST-02: Worker role can complete tasks (has done capability)", () => {
+      const registry = new DefaultRoleRegistry();
+
+      const hasDone = registry.hasCapability("worker", "lifecycle.done");
+      expect(hasDone).toBe(true);
+    });
+
+    it("ROLE-CONSIST-03: Coordinator has all spawn capabilities", () => {
+      const registry = new DefaultRoleRegistry();
+
+      expect(registry.hasCapability("coordinator", AGENT_CAPABILITIES.SPAWN_WORKER)).toBe(true);
+      expect(registry.hasCapability("coordinator", AGENT_CAPABILITIES.SPAWN_INTEGRATOR)).toBe(true);
+      expect(registry.hasCapability("coordinator", AGENT_CAPABILITIES.SPAWN_MONITOR)).toBe(true);
+    });
+
+    it("ROLE-CONSIST-04: Monitor is read-only (no file.write)", () => {
+      const registry = new DefaultRoleRegistry();
+
+      const hasRead = registry.hasCapability("monitor", "file.read");
+      const hasWrite = registry.hasCapability("monitor", "file.write");
+
+      expect(hasRead).toBe(true);
+      expect(hasWrite).toBe(false);
+    });
+
+    it("ROLE-CONSIST-05: Generic role has wildcard capability", () => {
+      const registry = new DefaultRoleRegistry();
+      const role = registry.resolveRole("generic");
+
+      expect(role.capabilities).toContain("*");
+
+      // Wildcard means all capabilities are granted
+      expect(registry.hasCapability("generic", "file.read")).toBe(true);
+      expect(registry.hasCapability("generic", "agent.spawn.worker")).toBe(true);
+      expect(registry.hasCapability("generic", "any.custom.capability")).toBe(true);
+    });
+  });
 });

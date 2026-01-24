@@ -110,13 +110,17 @@ export class EventStepper {
    * Step all simulators that have pending work
    *
    * Each simulator executes at most one step.
+   * Also steps child simulators spawned via spawn_child behavior.
    */
   async stepAll(): Promise<StepAllResult> {
     const results = new Map<string, StepResult>();
     let waitingCount = 0;
     let doneCount = 0;
 
-    for (const [agentId, simulator] of this.simulators) {
+    // Collect all simulators including children (recursively)
+    const allSimulators = this.collectAllSimulators();
+
+    for (const [agentId, simulator] of allSimulators) {
       if (!simulator.isRunning()) {
         doneCount++;
         continue;
@@ -142,6 +146,34 @@ export class EventStepper {
       doneCount,
       allIdle: results.size === 0,
     };
+  }
+
+  /**
+   * Collect all simulators including children spawned via spawn_child
+   */
+  private collectAllSimulators(): Map<string, AgentSimulator> {
+    const all = new Map<string, AgentSimulator>();
+
+    const collectRecursive = (simulator: AgentSimulator) => {
+      if (all.has(simulator.agentId)) return;
+      all.set(simulator.agentId, simulator);
+
+      // Collect children if the simulator has started
+      try {
+        const context = simulator.getContext();
+        for (const child of context.children) {
+          collectRecursive(child);
+        }
+      } catch {
+        // Simulator not started yet, no children to collect
+      }
+    };
+
+    for (const simulator of this.simulators.values()) {
+      collectRecursive(simulator);
+    }
+
+    return all;
   }
 
   /**
@@ -233,15 +265,16 @@ export class EventStepper {
   }
 
   /**
-   * Wait for a specific simulator to complete
+   * Wait for a specific simulator to complete (searches in all simulators including children)
    */
   async waitForSimulator(
     agentId: string,
     options?: { timeoutMs?: number; maxIterations?: number }
   ): Promise<void> {
     await this.waitForCondition(
-      (simulators) => {
-        const simulator = simulators.get(agentId);
+      () => {
+        const all = this.collectAllSimulators();
+        const simulator = all.get(agentId);
         return !simulator || !simulator.isRunning();
       },
       options
@@ -249,14 +282,15 @@ export class EventStepper {
   }
 
   /**
-   * Wait for all simulators to complete
+   * Wait for all simulators to complete (including children)
    */
   async waitForAll(
     options?: { timeoutMs?: number; maxIterations?: number }
   ): Promise<void> {
     await this.waitForCondition(
-      (simulators) => {
-        for (const simulator of simulators.values()) {
+      () => {
+        const all = this.collectAllSimulators();
+        for (const simulator of all.values()) {
           if (simulator.isRunning()) {
             return false;
           }
@@ -268,10 +302,11 @@ export class EventStepper {
   }
 
   /**
-   * Check if any simulator is running
+   * Check if any simulator is running (including children)
    */
   hasRunningSimulators(): boolean {
-    for (const simulator of this.simulators.values()) {
+    const all = this.collectAllSimulators();
+    for (const simulator of all.values()) {
       if (simulator.isRunning()) {
         return true;
       }
@@ -280,10 +315,11 @@ export class EventStepper {
   }
 
   /**
-   * Check if any simulator has pending work
+   * Check if any simulator has pending work (including children)
    */
   hasPendingWork(): boolean {
-    for (const simulator of this.simulators.values()) {
+    const all = this.collectAllSimulators();
+    for (const simulator of all.values()) {
       if (simulator.isRunning() && simulator.hasPendingSteps()) {
         return true;
       }

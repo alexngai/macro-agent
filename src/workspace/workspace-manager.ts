@@ -27,6 +27,7 @@ import type {
 } from './types.js';
 import type { MergeQueueInterface } from './merge-queue/types.js';
 import { MergeQueue } from './merge-queue/merge-queue.js';
+import { execSync } from 'child_process';
 
 /**
  * Configuration options for DefaultWorkspaceManager.
@@ -169,11 +170,13 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     // Build worktree path
     const worktreePath = this.buildWorktreePath('worker', workerId);
 
-    // Create worktree at the stream's base commit
+    // Create worktree without specifying a branch (creates detached HEAD).
+    // This avoids conflicts with coordinator/other workers on the stream branch.
+    // The worker branch is created later by claimTask() via startTask().
     const worktree = this.adapter.createWorktree({
       agentId: workerId,
       path: worktreePath,
-      branch: this.adapter.getStreamBranchName(streamId),
+      // No branch specified - creates detached HEAD at current HEAD
     });
 
     // Create workspace record
@@ -228,23 +231,51 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     // Build worktree path
     const worktreePath = this.buildWorktreePath('integrator', integratorId);
 
-    // Integrator works on the stream branch directly
+    // Build integrator merge branch name: integrator/<coordinatorId>@<timestamp>
+    // Per s-7ktd spec, integrators get their own merge branch separate from coordinator
+    const timestamp = Date.now();
+    const integratorBranch = `integrator/${stream.agentId}@${timestamp}`;
+    const streamBranchName = this.adapter.getStreamBranchName(streamId);
+
+    // Create worktree without specifying a branch (creates detached HEAD).
+    // This avoids conflicts with coordinator on the stream branch.
     const worktree = this.adapter.createWorktree({
       agentId: integratorId,
       path: worktreePath,
-      branch: this.adapter.getStreamBranchName(streamId),
+      // No branch specified - creates detached HEAD
     });
+
+    // Create and checkout the integrator branch from the stream branch
+    // This gives the integrator its own merge branch per s-7ktd spec
+    try {
+      // Fetch the stream branch commit
+      const streamCommit = execSync(`git rev-parse ${streamBranchName}`, {
+        cwd: this.adapter.repoPath,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      // Create and checkout the integrator branch at the stream commit
+      execSync(`git checkout -b ${integratorBranch} ${streamCommit}`, {
+        cwd: worktree.path,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      console.error(`[WorkspaceManager] Failed to create integrator branch: ${error}`);
+      // Fall back to current state
+    }
 
     // Create workspace record
     const workspace: IntegratorWorkspace = {
       agentId: integratorId,
       path: worktree.path,
-      branch: this.adapter.getStreamBranchName(streamId),
+      branch: integratorBranch,
       streamId,
       role: 'integrator',
       createdAt: worktree.createdAt,
       coordinatorId: stream.agentId,
-      integrationBranch: this.adapter.getStreamBranchName(streamId),
+      integrationBranch: streamBranchName,
     };
 
     // Store workspace
@@ -577,9 +608,11 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     role: 'worker' | 'integrator' | 'coordinator',
     agentId: AgentId
   ): string {
-    // Use a short identifier to keep paths manageable
-    const shortId = agentId.slice(0, 8);
-    return `${this.config.worktreeBaseDir}/${role}-${shortId}`;
+    // Use agentId with a unique suffix to avoid collisions
+    // The full agentId ensures uniqueness even when many workers have similar names
+    // We sanitize the path to remove characters that might cause issues
+    const sanitizedId = agentId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${this.config.worktreeBaseDir}/${role}-${sanitizedId}`;
   }
 }
 

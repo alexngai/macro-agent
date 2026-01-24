@@ -33,7 +33,10 @@ import {
   needsCascadeTermination,
   type CascadeAgentManager,
 } from "../cascade.js";
-import { handleResolverDone, type IntegratorHandlerDeps } from "./integrator.js";
+import {
+  handleResolverDone,
+  type IntegratorHandlerDeps,
+} from "./integrator.js";
 
 // =============================================================================
 // Handler Dependencies
@@ -68,16 +71,18 @@ export interface WorkerHandlerDeps {
  *
  * Processing steps:
  * 1. Commit any uncommitted changes
- * 2. Emit WORKER_DONE signal
- * 3. Emit MERGE_REQUEST signal (stubbed)
- * 4. Signal children to terminate (basic cascade)
- * 5. Return shouldTerminate=true
+ * 1.5. Create checkpoints for task commits (Phase 6)
+ * 2. Handle blocked/deferred status (emit HELP_NEEDED, return shouldTerminate=false)
+ * 3. Emit WORKER_DONE signal (for completed/failed)
+ * 4. Emit MERGE_REQUEST signal and submit to queue
+ * 5. Signal children to terminate (basic cascade)
+ * 6. Return shouldTerminate=true (for completed/failed only)
  */
 export async function handleWorkerDone(
   context: LifecycleContext,
   args: DoneArgs,
   cleanupStatus: CleanupStatus,
-  deps: WorkerHandlerDeps
+  deps: WorkerHandlerDeps,
 ): Promise<DoneHandlerResult> {
   const signalsEmitted: string[] = [];
   const cleanupActions: string[] = [];
@@ -96,7 +101,9 @@ export async function handleWorkerDone(
 
       const commitHash = commitChanges(context.workspacePath, commitMessage);
       if (commitHash) {
-        cleanupActions.push(`Committed ${uncommittedCount} file(s): ${commitHash.slice(0, 8)}`);
+        cleanupActions.push(
+          `Committed ${uncommittedCount} file(s): ${commitHash.slice(0, 8)}`,
+        );
       } else {
         warnings.push("Failed to auto-commit uncommitted changes");
       }
@@ -111,22 +118,88 @@ export async function handleWorkerDone(
     try {
       const checkpoints = deps.dataplane.createCheckpointsForTask(
         context.taskId,
-        context.agentId
+        context.agentId,
       );
       if (checkpoints.length > 0) {
         cleanupActions.push(
-          `Created ${checkpoints.length} checkpoint(s) for task ${context.taskId}`
+          `Created ${checkpoints.length} checkpoint(s) for task ${context.taskId}`,
         );
       }
     } catch (error) {
       warnings.push(
-        `Failed to create checkpoints: ${error instanceof Error ? error.message : "unknown"}`
+        `Failed to create checkpoints: ${error instanceof Error ? error.message : "unknown"}`,
       );
     }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 2: Emit WORKER_DONE signal
+  // Step 2: Handle blocked/deferred status (don't terminate, emit HELP_NEEDED)
+  // Per s-32xs spec: "Agent explicitly blocked → Self-report + wait → Needs help, don't auto-terminate"
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  if (args.status === "blocked") {
+    try {
+      deps.messageRouter.emitStatus({
+        from: { agent_id: context.agentId },
+        status_type: "blocked",
+        summary: args.summary ?? `Worker blocked - needs help`,
+        details: {
+          signal: "HELP_NEEDED",
+          workerId: context.agentId,
+          taskId: context.taskId,
+          parentId: context.parentId,
+          status: args.status,
+          ...args.details,
+        },
+      });
+      signalsEmitted.push("HELP_NEEDED");
+    } catch (error) {
+      warnings.push(
+        `Failed to emit HELP_NEEDED: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+    }
+
+    // Blocked agents should NOT terminate - they wait for help
+    return {
+      shouldTerminate: false,
+      signalsEmitted,
+      cleanupActions,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
+  if (args.status === "deferred") {
+    try {
+      deps.messageRouter.emitStatus({
+        from: { agent_id: context.agentId },
+        status_type: "checkpoint",
+        summary: args.summary ?? `Worker deferred work`,
+        details: {
+          signal: "WORKER_DEFERRED",
+          workerId: context.agentId,
+          taskId: context.taskId,
+          status: args.status,
+          ...args.details,
+        },
+      });
+      signalsEmitted.push("WORKER_DEFERRED");
+    } catch (error) {
+      warnings.push(
+        `Failed to emit WORKER_DEFERRED: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+    }
+
+    // Deferred agents should NOT terminate
+    return {
+      shouldTerminate: false,
+      signalsEmitted,
+      cleanupActions,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step 3: Emit WORKER_DONE signal (for completed/failed)
   // ─────────────────────────────────────────────────────────────────────────────
 
   try {
@@ -145,16 +218,17 @@ export async function handleWorkerDone(
     signalsEmitted.push("WORKER_DONE");
   } catch (error) {
     warnings.push(
-      `Failed to emit WORKER_DONE: ${error instanceof Error ? error.message : "unknown"}`
+      `Failed to emit WORKER_DONE: ${error instanceof Error ? error.message : "unknown"}`,
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 3: Emit completion signal (MERGE_REQUEST or RESOLVER_DONE)
+  // Step 4: Emit MERGE_REQUEST signal and submit to queue
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (args.status === "completed" && context.workspacePath) {
-    const sourceBranch = context.branch ?? getCurrentBranch(context.workspacePath);
+    const sourceBranch =
+      context.branch ?? getCurrentBranch(context.workspacePath);
     const targetBranch = context.integrationBranch ?? "integration";
 
     // Check if this is a resolver worker
@@ -182,7 +256,7 @@ export async function handleWorkerDone(
           });
           signalsEmitted.push("RESOLVER_DONE");
           cleanupActions.push(
-            `Emitted RESOLVER_DONE for resolver branch ${sourceBranch}${context.mrId ? ` (MR: ${context.mrId})` : ""}`
+            `Emitted RESOLVER_DONE for resolver branch ${sourceBranch}${context.mrId ? ` (MR: ${context.mrId})` : ""}`,
           );
 
           // ─────────────────────────────────────────────────────────────────────
@@ -214,40 +288,42 @@ export async function handleWorkerDone(
                   context.mrId,
                   sourceBranch,
                   integratorContext,
-                  integratorDeps
+                  integratorDeps,
                 );
 
                 if (resolverResult.success) {
                   cleanupActions.push(
-                    `Inline merge completed for MR ${context.mrId}: ${resolverResult.mergeCommit?.slice(0, 8)}`
+                    `Inline merge completed for MR ${context.mrId}: ${resolverResult.mergeCommit?.slice(0, 8)}`,
                   );
                 } else if (resolverResult.nestedConflict) {
                   warnings.push(
-                    `Nested conflict on MR ${context.mrId} - escalated to coordinator`
+                    `Nested conflict on MR ${context.mrId} - escalated to coordinator`,
                   );
                 } else {
                   warnings.push(
-                    `Inline merge failed for MR ${context.mrId}: ${resolverResult.error}`
+                    `Inline merge failed for MR ${context.mrId}: ${resolverResult.error}`,
                   );
                 }
               } catch (mergeError) {
                 warnings.push(
-                  `Error during inline merge for MR ${context.mrId}: ${mergeError instanceof Error ? mergeError.message : "unknown"}`
+                  `Error during inline merge for MR ${context.mrId}: ${mergeError instanceof Error ? mergeError.message : "unknown"}`,
                 );
               }
             } else {
               warnings.push(
-                `Cannot perform inline merge: integrator workspace not found for parent ${context.parentId}`
+                `Cannot perform inline merge: integrator workspace not found for parent ${context.parentId}`,
               );
             }
           } else if (!context.mrId) {
             warnings.push("Cannot perform inline merge: no mrId in context");
           } else if (!context.parentId) {
-            warnings.push("Cannot perform inline merge: no parent (integrator) in context");
+            warnings.push(
+              "Cannot perform inline merge: no parent (integrator) in context",
+            );
           }
         } catch (error) {
           warnings.push(
-            `Failed to emit RESOLVER_DONE: ${error instanceof Error ? error.message : "unknown"}`
+            `Failed to emit RESOLVER_DONE: ${error instanceof Error ? error.message : "unknown"}`,
           );
         }
       } else {
@@ -280,14 +356,14 @@ export async function handleWorkerDone(
                 workerAgentId: context.agentId,
               });
               cleanupActions.push(
-                `Submitted merge request ${mrId} to queue for ${sourceBranch} -> ${targetBranch}`
+                `Submitted merge request ${mrId} to queue for ${sourceBranch} -> ${targetBranch}`,
               );
             } catch (queueError) {
               warnings.push(
-                `Failed to submit to merge queue: ${queueError instanceof Error ? queueError.message : "unknown"}`
+                `Failed to submit to merge queue: ${queueError instanceof Error ? queueError.message : "unknown"}`,
               );
               cleanupActions.push(
-                `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission failed)`
+                `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission failed)`,
               );
             }
           } else {
@@ -298,12 +374,12 @@ export async function handleWorkerDone(
                 ? "no streamId"
                 : "no taskId";
             cleanupActions.push(
-              `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (${reason})`
+              `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (${reason})`,
             );
           }
         } catch (error) {
           warnings.push(
-            `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`
+            `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`,
           );
         }
       }
@@ -311,7 +387,7 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 4: Signal descendants to prepare for termination
+  // Step 5: Signal descendants to prepare for termination
   // ─────────────────────────────────────────────────────────────────────────────
   // Note: This is notification only. Actual termination is handled by
   // AgentManager.terminate() which cascades depth-first after done() returns.
@@ -337,12 +413,12 @@ export async function handleWorkerDone(
       // Get ALL descendants (children, grandchildren, etc.)
       const descendants = getAllDescendants(context.agentId, cascadeAdapter);
       const activeDescendants = descendants.filter(
-        (d) => d.state === "running" || d.state === "spawning"
+        (d) => d.state === "running" || d.state === "spawning",
       );
 
       if (activeDescendants.length > 0) {
         cleanupActions.push(
-          `Signaling ${activeDescendants.length} descendant(s) to terminate`
+          `Signaling ${activeDescendants.length} descendant(s) to terminate`,
         );
 
         // Signal all active descendants - notification for cleanup preparation
@@ -368,12 +444,12 @@ export async function handleWorkerDone(
     }
   } catch (error) {
     warnings.push(
-      `Failed to signal descendants: ${error instanceof Error ? error.message : "unknown"}`
+      `Failed to signal descendants: ${error instanceof Error ? error.message : "unknown"}`,
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Return result - shouldTerminate=true for workers
+  // Return result - shouldTerminate=true for completed/failed workers
   // ─────────────────────────────────────────────────────────────────────────────
 
   return {
