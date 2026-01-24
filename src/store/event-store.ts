@@ -134,6 +134,8 @@ export interface EventStore {
   readonly namespace: string;
   /** Path to instance directory (or ':memory:') */
   readonly instancePath: string;
+  /** Base directory for all storage */
+  readonly baseDir: string;
   /** Backend type being used */
   readonly backendType: string;
   /** Peer visibility configuration */
@@ -225,6 +227,9 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   // Resolve instance configuration
   const resolved = resolveInstancePath(config);
   const { instanceId, instancePath, namespace, isNew, isLegacy, backendType } = resolved;
+
+  // Track baseDir for MCP subprocess communication
+  const baseDir = config.baseDir ?? path.join(os.homedir(), '.multiagent');
 
   // Get peer visibility config (default is restrictive)
   const peerVisibility: PeerVisibilityConfig =
@@ -921,6 +926,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     instanceId,
     namespace,
     instancePath,
+    baseDir,
     backendType,
     peerVisibility,
 

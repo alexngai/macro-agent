@@ -4,14 +4,18 @@
  * Comprehensive E2E tests for multi-agent lifecycle, WebSocket ACP multi-client,
  * and inter-agent communication.
  *
- * REQUIRES: RUN_E2E_TESTS=true environment variable (and authenticated Claude Code)
+ * REQUIRES: RUN_FULL_AGENT_TESTS=true environment variable (and authenticated Claude Code)
  *
  * Run with:
- *   RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts
  */
 
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { WebSocket } from "ws";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { execSync } from "child_process";
 import { createEventStore, type EventStore } from "../../store/event-store.js";
 import {
   createAgentManager,
@@ -31,8 +35,8 @@ import {
 // Test Configuration
 // ─────────────────────────────────────────────────────────────────
 
-const RUN_E2E = !!process.env.RUN_E2E_TESTS;
-const testFn = RUN_E2E ? it : it.skip;
+const RUN_FULL_AGENT = !!process.env.RUN_FULL_AGENT_TESTS;
+const testFn = RUN_FULL_AGENT ? it : it.skip;
 
 // Timeouts for different test types
 const TIMEOUT = {
@@ -41,6 +45,26 @@ const TIMEOUT = {
   PROMPT: 90000,     // Agent prompt with response
   HIERARCHY: 120000, // Hierarchy operations
 };
+
+/**
+ * Create an isolated test git repo to avoid polluting real repo
+ */
+function createTestRepo(prefix: string): { path: string; cleanup: () => void } {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `multi-agent-${prefix}-`));
+  const repoPath = path.join(tmpDir, "test-repo");
+  fs.mkdirSync(repoPath);
+  execSync("git init", { cwd: repoPath, stdio: "pipe" });
+  execSync('git config user.email "test@test.com"', { cwd: repoPath, stdio: "pipe" });
+  execSync('git config user.name "Test User"', { cwd: repoPath, stdio: "pipe" });
+  fs.writeFileSync(path.join(repoPath, "README.md"), "# Test Repo\n");
+  execSync("git add -A", { cwd: repoPath, stdio: "pipe" });
+  execSync('git commit -m "Initial commit"', { cwd: repoPath, stdio: "pipe" });
+
+  return {
+    path: repoPath,
+    cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────
 // ACP Wire Protocol Client
@@ -199,13 +223,17 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("lifecycle");
 
     // Create services with in-memory storage
     eventStore = await createEventStore({ inMemory: true });
@@ -213,7 +241,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     // Start WebSocket server
@@ -227,7 +255,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -253,6 +281,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
     log("Cleanup complete");
   });
 
@@ -272,7 +301,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         log("✓ Client initialized");
 
         // Create session (spawns head manager)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         expect(sessionResult.error).toBeUndefined();
         expect(sessionResult.result).toBeDefined();
 
@@ -303,7 +332,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager session
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const session = sessionResult.result as { sessionId: string };
         log(`✓ Head manager session: ${session.sessionId}`);
 
@@ -354,7 +383,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager (Level 0)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const session = sessionResult.result as { sessionId: string };
         const headManagers = agentManager.listHeadManagers();
         const level0Id = headManagers[0].id;
@@ -408,7 +437,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const headManagers = agentManager.listHeadManagers();
         const headId = headManagers[0].id;
         log(`✓ Head manager: ${headId}`);
@@ -476,7 +505,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
         await client.initialize();
 
         // Create head manager
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const headManagers = agentManager.listHeadManagers();
         const headId = headManagers[0].id;
 
@@ -524,17 +553,21 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("multiclient");
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     testPort = 10000 + Math.floor(Math.random() * 50000);
@@ -546,7 +579,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -565,6 +598,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
   });
 
   describe("MC: Multi-Client Scenarios", () => {
@@ -602,8 +636,8 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Create sessions
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
-        const sessionB = await clientB.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
+        const sessionB = await clientB.newSession({ cwd: testRepo.path });
 
         expect(sessionA.error).toBeUndefined();
         expect(sessionB.error).toBeUndefined();
@@ -633,8 +667,8 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Create sessions
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
-        const sessionB = await clientB.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
+        const sessionB = await clientB.newSession({ cwd: testRepo.path });
         log("✓ Both sessions created");
 
         // Disconnect client A
@@ -681,7 +715,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         // Create sessions sequentially (to avoid race conditions)
         const sessions: string[] = [];
         for (const client of newClients) {
-          const result = await client.newSession({ cwd: process.cwd() });
+          const result = await client.newSession({ cwd: testRepo.path });
           expect(result.error).toBeUndefined();
           sessions.push((result.result as { sessionId: string }).sessionId);
         }
@@ -711,7 +745,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
         await Promise.all([clientA.initialize(), clientB.initialize()]);
 
         // Client A creates head manager
-        const sessionA = await clientA.newSession({ cwd: process.cwd() });
+        const sessionA = await clientA.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const clientAHeadId = heads[0].id;
         log(`✓ Client A head manager: ${clientAHeadId}`);
@@ -770,17 +804,21 @@ describe("Part 3: Event Storage E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("events");
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     testPort = 10000 + Math.floor(Math.random() * 50000);
@@ -792,7 +830,7 @@ describe("Part 3: Event Storage E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -811,6 +849,7 @@ describe("Part 3: Event Storage E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+    testRepo?.cleanup();
   });
 
   describe("EVT: Event Verification", () => {
@@ -824,7 +863,7 @@ describe("Part 3: Event Storage E2E", () => {
         await client.initialize();
 
         // Create session (generates spawn + status events)
-        const sessionResult = await client.newSession({ cwd: process.cwd() });
+        const sessionResult = await client.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const headId = heads[0].id;
         log("✓ Head manager created");
@@ -866,7 +905,7 @@ describe("Part 3: Event Storage E2E", () => {
         await client.initialize();
 
         // Create session
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
         const heads = agentManager.listHeadManagers();
         const headId = heads[0].id;
 
@@ -902,13 +941,17 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testRepo: { path: string; cleanup: () => void };
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
+
+    // Create isolated test repo to avoid polluting real repo
+    testRepo = createTestRepo("messaging");
 
     // Create services with in-memory storage
     eventStore = await createEventStore({ inMemory: true });
@@ -916,7 +959,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",
-      defaultCwd: process.cwd(),
+      defaultCwd: testRepo.path,
     });
 
     // Start WebSocket server
@@ -930,7 +973,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -957,6 +1000,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
 
     // Close event store
     await eventStore.close();
+    testRepo?.cleanup();
 
     log("Cleanup complete");
   });
@@ -974,7 +1018,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1031,7 +1075,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1096,7 +1140,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1162,7 +1206,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1227,7 +1271,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1283,7 +1327,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1332,7 +1376,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         clients.push(client);
         await client.connect();
         await client.initialize();
-        await client.newSession({ cwd: process.cwd() });
+        await client.newSession({ cwd: testRepo.path });
 
         // Get head manager
         const heads = agentManager.listHeadManagers();
@@ -1376,10 +1420,10 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
 // Skip Message if E2E not enabled
 // ─────────────────────────────────────────────────────────────────
 
-if (!RUN_E2E) {
+if (!RUN_FULL_AGENT) {
   console.log("\n" + "=".repeat(70));
   console.log("Multi-Agent E2E tests SKIPPED");
   console.log("To run with real agents:");
-  console.log("  RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts");
+  console.log("  RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts");
   console.log("=".repeat(70) + "\n");
 }

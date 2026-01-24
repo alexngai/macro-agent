@@ -1071,6 +1071,7 @@ export function createMCPServer(
       description: DONE_TOOL_INFO.description,
       inputSchema: DoneSchema,
     }, async (args) => {
+      debugLog(`[MCP done] Tool called by agent ${context.agent_id} with args: ${JSON.stringify(args)}`);
       const doneHandler = createDoneHandler(context, {
         eventStore,
         agentManager,

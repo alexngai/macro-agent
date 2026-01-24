@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleWorkerDone } from "../handlers/worker.js";
-import { handleIntegratorDone } from "../handlers/integrator.js";
+import { handleIntegratorDone, handleResolverDone } from "../handlers/integrator.js";
 import { handleMonitorDone } from "../handlers/monitor.js";
 import { handleGenericDone } from "../handlers/generic.js";
 import {
@@ -758,6 +758,155 @@ describe("handlers", () => {
       // Should complete without error
       expect(result.shouldTerminate).toBe(true);
     });
+
+    it("should perform inline merge when resolver completes with mrId and parentId", async () => {
+      mockGetCurrentBranch.mockReturnValue("resolver/mr-123@1700000000");
+
+      // Mock merge queue for the inline merge
+      const mockMergeQueue = {
+        submit: vi.fn(),
+        get: vi.fn().mockReturnValue({
+          id: "mr-123",
+          status: "conflict",
+        }),
+        markResolverComplete: vi.fn(),
+      };
+
+      // Mock successful merge
+      mockAttemptMerge.mockReturnValue({
+        success: true,
+        mergeCommit: "abc123",
+      });
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+        getWorkspacePath: vi.fn().mockReturnValue("/path/to/integrator"),
+      };
+      const context: LifecycleContext = {
+        agentId: "resolver-1",
+        role: "worker.resolver",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/resolver",
+        mrId: "mr-123", // MR being resolved
+        parentId: "integrator-1", // Parent integrator
+        integrationBranch: "integration",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(
+        context,
+        args,
+        cleanupStatus,
+        deps as any,
+      );
+
+      // Should emit RESOLVER_DONE
+      expect(result.signalsEmitted).toContain("RESOLVER_DONE");
+      expect(result.signalsEmitted).not.toContain("MERGE_REQUEST");
+
+      // Should call getWorkspacePath for the parent integrator
+      expect(deps.getWorkspacePath).toHaveBeenCalledWith("integrator-1");
+
+      // Should call markResolverComplete after successful inline merge
+      expect(mockMergeQueue.markResolverComplete).toHaveBeenCalledWith(
+        "mr-123",
+        "abc123",
+        "resolver/mr-123@1700000000",
+      );
+
+      // Should include inline merge action in cleanupActions
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("Inline merge completed")]),
+      );
+    });
+
+    it("should handle inline merge failure gracefully", async () => {
+      mockGetCurrentBranch.mockReturnValue("resolver/mr-123@1700000000");
+
+      const mockMergeQueue = {
+        submit: vi.fn(),
+        get: vi.fn().mockReturnValue({
+          id: "mr-123",
+          status: "conflict",
+        }),
+      };
+
+      // Mock merge failure with nested conflict
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+        getWorkspacePath: vi.fn().mockReturnValue("/path/to/integrator"),
+      };
+      const context: LifecycleContext = {
+        agentId: "resolver-1",
+        role: "worker.resolver",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/resolver",
+        mrId: "mr-123",
+        parentId: "integrator-1",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(
+        context,
+        args,
+        cleanupStatus,
+        deps as any,
+      );
+
+      // Should still emit RESOLVER_DONE
+      expect(result.signalsEmitted).toContain("RESOLVER_DONE");
+
+      // Should have warning about nested conflict
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("Nested conflict")]),
+      );
+    });
+
+    it("should warn when integrator workspace not found for inline merge", async () => {
+      mockGetCurrentBranch.mockReturnValue("resolver/mr-123@1700000000");
+
+      const deps = {
+        ...createMockDeps(),
+        getWorkspacePath: vi.fn().mockReturnValue(null), // No workspace found
+      };
+      const context: LifecycleContext = {
+        agentId: "resolver-1",
+        role: "worker.resolver",
+        taskId: "task-1",
+        workspacePath: "/path/to/resolver",
+        mrId: "mr-123",
+        parentId: "integrator-1",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(
+        context,
+        args,
+        cleanupStatus,
+        deps as any,
+      );
+
+      // Should still emit RESOLVER_DONE
+      expect(result.signalsEmitted).toContain("RESOLVER_DONE");
+
+      // Should have warning about missing workspace
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("workspace not found")]),
+      );
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1043,6 +1192,414 @@ describe("handlers", () => {
           }),
         }),
       );
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Resolver Spawning Tests (spawnResolverWorker via handleIntegratorDone)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    it("should spawn resolver worker when merge conflicts occur", async () => {
+      const mockMergeQueue = {
+        getQueueDepth: vi.fn().mockReturnValueOnce(1).mockReturnValue(0),
+        getNext: vi
+          .fn()
+          .mockReturnValueOnce({
+            id: "mr-1",
+            streamId: "stream-1",
+            workerBranch: "feature/conflict",
+            workerAgentId: "worker-1",
+            taskId: "task-1",
+            status: "pending",
+          })
+          .mockReturnValue(null),
+        markProcessing: vi.fn(),
+        markConflict: vi.fn(),
+      };
+
+      // Mock agentManager with spawn capability
+      const mockAgentManager = {
+        getChildren: vi.fn().mockReturnValue([]),
+        spawn: vi.fn().mockResolvedValue({ id: "resolver-1" }),
+      };
+
+      mockGetCurrentBranch.mockReturnValue("integration");
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file1.ts", "file2.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const deps = {
+        messageRouter: {
+          emitStatus: vi.fn(),
+          getSubscriptions: vi.fn().mockReturnValue([]),
+          unsubscribe: vi.fn(),
+        },
+        agentManager: mockAgentManager,
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+        streamId: "stream-1",
+        branch: "integration",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      await handleIntegratorDone(context, args, cleanupStatus, deps as any);
+
+      // Verify spawn was called with correct parameters
+      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: "worker.resolver",
+          parent: "integrator-1",
+          streamId: "stream-1",
+        }),
+      );
+
+      // Verify resolver was passed to markConflict
+      expect(mockMergeQueue.markConflict).toHaveBeenCalledWith(
+        "mr-1",
+        ["file1.ts", "file2.ts"],
+        "resolver-1",
+      );
+
+      // Verify CONFLICT_DETECTED signal includes resolver info
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            signal: "CONFLICT_DETECTED",
+            resolverSpawned: true,
+            resolverId: "resolver-1",
+          }),
+        }),
+      );
+    });
+
+    it("should handle conflict without resolver when agentManager.spawn fails", async () => {
+      const mockMergeQueue = {
+        getQueueDepth: vi.fn().mockReturnValueOnce(1).mockReturnValue(0),
+        getNext: vi
+          .fn()
+          .mockReturnValueOnce({
+            id: "mr-1",
+            streamId: "stream-1",
+            workerBranch: "feature/conflict",
+            workerAgentId: "worker-1",
+            taskId: "task-1",
+            status: "pending",
+          })
+          .mockReturnValue(null),
+        markProcessing: vi.fn(),
+        markConflict: vi.fn(),
+      };
+
+      // Mock agentManager with spawn that throws
+      const mockAgentManager = {
+        getChildren: vi.fn().mockReturnValue([]),
+        spawn: vi.fn().mockRejectedValue(new Error("Spawn failed")),
+      };
+
+      mockGetCurrentBranch.mockReturnValue("integration");
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file1.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const deps = {
+        messageRouter: {
+          emitStatus: vi.fn(),
+          getSubscriptions: vi.fn().mockReturnValue([]),
+          unsubscribe: vi.fn(),
+        },
+        agentManager: mockAgentManager,
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+        streamId: "stream-1",
+        branch: "integration",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      await handleIntegratorDone(context, args, cleanupStatus, deps as any);
+
+      // Verify markConflict called without resolver ID
+      expect(mockMergeQueue.markConflict).toHaveBeenCalledWith("mr-1", [
+        "file1.ts",
+      ]);
+
+      // Verify CONFLICT_DETECTED signal indicates no resolver
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            signal: "CONFLICT_DETECTED",
+            resolverSpawned: false,
+          }),
+        }),
+      );
+    });
+
+    it("should handle conflict without resolver when no agentManager", async () => {
+      const mockMergeQueue = {
+        getQueueDepth: vi.fn().mockReturnValueOnce(1).mockReturnValue(0),
+        getNext: vi
+          .fn()
+          .mockReturnValueOnce({
+            id: "mr-1",
+            streamId: "stream-1",
+            workerBranch: "feature/conflict",
+            status: "pending",
+          })
+          .mockReturnValue(null),
+        markProcessing: vi.fn(),
+        markConflict: vi.fn(),
+      };
+
+      mockGetCurrentBranch.mockReturnValue("integration");
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file1.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const deps = {
+        messageRouter: {
+          emitStatus: vi.fn(),
+          getSubscriptions: vi.fn().mockReturnValue([]),
+          unsubscribe: vi.fn(),
+        },
+        // No agentManager
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+        streamId: "stream-1",
+        branch: "integration",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      await handleIntegratorDone(context, args, cleanupStatus, deps as any);
+
+      // Should still mark conflict, just without resolver
+      expect(mockMergeQueue.markConflict).toHaveBeenCalledWith("mr-1", [
+        "file1.ts",
+      ]);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // handleResolverDone Tests
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("handleResolverDone", () => {
+    it("should merge resolver branch and mark MR as resolved", async () => {
+      const mockMergeQueue = {
+        get: vi.fn().mockReturnValue({
+          id: "mr-1",
+          status: "conflict",
+        }),
+        markResolverComplete: vi.fn(),
+      };
+
+      mockAttemptMerge.mockReturnValue({
+        success: true,
+        mergeCommit: "abc123",
+      });
+
+      const deps = {
+        messageRouter: {
+          emitStatus: vi.fn(),
+        },
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-1",
+        "resolver/mr-1@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.mergeCommit).toBe("abc123");
+      expect(mockMergeQueue.markResolverComplete).toHaveBeenCalledWith(
+        "mr-1",
+        "abc123",
+        "resolver/mr-1@12345",
+      );
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status_type: "completed",
+          details: expect.objectContaining({
+            signal: "MERGE_COMPLETE",
+            mrId: "mr-1",
+            resolvedVia: "resolver",
+          }),
+        }),
+      );
+    });
+
+    it("should return error when MR not found", async () => {
+      const mockMergeQueue = {
+        get: vi.fn().mockReturnValue(null),
+      };
+
+      const deps = {
+        messageRouter: { emitStatus: vi.fn() },
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-nonexistent",
+        "resolver/mr-nonexistent@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not found");
+    });
+
+    it("should return error when MR not in conflict state", async () => {
+      const mockMergeQueue = {
+        get: vi.fn().mockReturnValue({
+          id: "mr-1",
+          status: "pending", // Not in conflict state
+        }),
+      };
+
+      const deps = {
+        messageRouter: { emitStatus: vi.fn() },
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-1",
+        "resolver/mr-1@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not in conflict state");
+    });
+
+    it("should handle nested conflicts (resolver also conflicts)", async () => {
+      const mockMergeQueue = {
+        get: vi.fn().mockReturnValue({
+          id: "mr-1",
+          status: "conflict",
+        }),
+      };
+
+      mockAttemptMerge.mockReturnValue({
+        success: false,
+        conflicts: ["file1.ts", "file2.ts"],
+      });
+      mockAbortMerge.mockReturnValue(true);
+
+      const deps = {
+        messageRouter: {
+          emitStatus: vi.fn(),
+        },
+        mergeQueue: mockMergeQueue,
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-1",
+        "resolver/mr-1@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.nestedConflict).toBe(true);
+      expect(result.conflictFiles).toEqual(["file1.ts", "file2.ts"]);
+
+      // Should emit CONFLICT_UNRESOLVED for escalation
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status_type: "failed",
+          details: expect.objectContaining({
+            signal: "CONFLICT_UNRESOLVED",
+            reason: "resolver_conflict",
+          }),
+        }),
+      );
+    });
+
+    it("should return error when mergeQueue is not provided", async () => {
+      const deps = {
+        messageRouter: { emitStatus: vi.fn() },
+        // No mergeQueue
+        workspacePath: "/path/to/workspace",
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-1",
+        "resolver/mr-1@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Missing");
+    });
+
+    it("should return error when workspacePath is not provided", async () => {
+      const deps = {
+        messageRouter: { emitStatus: vi.fn() },
+        mergeQueue: { get: vi.fn() },
+        // No workspacePath
+      };
+      const context: LifecycleContext = {
+        agentId: "integrator-1",
+        role: "integrator",
+      };
+
+      const result = await handleResolverDone(
+        "mr-1",
+        "resolver/mr-1@12345",
+        context,
+        deps as any,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Missing");
     });
   });
 

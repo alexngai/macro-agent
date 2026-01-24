@@ -153,6 +153,30 @@ export interface AgentManager {
   ): AsyncIterable<ExtendedSessionUpdate>;
 
   /**
+   * Send a prompt to an agent and automatically follow up to ensure done() is called.
+   * Returns when the agent calls done() or after maxFollowUps attempts.
+   *
+   * @param agentId - Agent ID to prompt
+   * @param message - Initial prompt message
+   * @param options - Follow-up options
+   * @returns Result indicating whether done() was called
+   */
+  promptUntilDone(
+    agentId: AgentId,
+    message: string,
+    options?: {
+      /** Maximum number of follow-up prompts (default: 2) */
+      maxFollowUps?: number;
+      /** Callback for each update during prompting */
+      onUpdate?: (update: ExtendedSessionUpdate) => void;
+    }
+  ): Promise<{
+    doneCalled: boolean;
+    doneStatus?: string;
+    updates: ExtendedSessionUpdate[];
+  }>;
+
+  /**
    * Get the active session for an agent.
    */
   getSession(agentId: AgentId): Session | null;
@@ -173,6 +197,12 @@ export interface AgentManager {
    * Returns false if no session or injection not supported.
    */
   supportsInjection(agentId: AgentId): Promise<boolean>;
+
+  /**
+   * Check if an agent's underlying process is still running.
+   * Returns false if no session or process has exited.
+   */
+  isProcessRunning(agentId: AgentId): boolean;
 
   // ── Permission Handling ─────────────────────────────────────────
 
@@ -341,7 +371,9 @@ export function createAgentManager(
       parentId: parent ?? null,
       isHeadManager: !parent,
       lineage: parentAgent?.lineage ? [...parentAgent.lineage, parent!] : [],
+      role: role ?? "worker",
       mcpTools: [
+        "done", // Listed first - most important tool for completion
         "spawn_agent",
         "emit_status",
         "send_message",
@@ -354,7 +386,13 @@ export function createAgentManager(
       ],
     };
 
-    const systemPrompt = generateSystemPrompt(promptContext);
+    let systemPrompt = generateSystemPrompt(promptContext);
+
+    // Append role-specific system prompt if defined
+    const resolvedRole = roleRegistry.resolveRole(role ?? "worker");
+    if (resolvedRole.systemPrompt) {
+      systemPrompt += `\n\n# Role-Specific Instructions\n\n${resolvedRole.systemPrompt}`;
+    }
 
     eventStore.emit({
       type: "spawn",
@@ -403,6 +441,7 @@ export function createAgentManager(
           { name: "MACRO_TASK_ID", value: taskId },
           { name: "MACRO_AGENT_CWD", value: cwd },
           { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+          { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
         ],
       };
 
@@ -888,6 +927,127 @@ export function createAgentManager(
     }
   }
 
+  /**
+   * Prompt an agent and automatically follow up to ensure done() is called.
+   */
+  async function promptUntilDone(
+    agentId: AgentId,
+    message: string,
+    options?: {
+      maxFollowUps?: number;
+      throwOnMaxExceeded?: boolean;
+      onUpdate?: (update: ExtendedSessionUpdate) => void;
+    }
+  ): Promise<{
+    doneCalled: boolean;
+    doneStatus?: string;
+    exceededMax: boolean;
+    followUpCount: number;
+    updates: ExtendedSessionUpdate[];
+  }> {
+    const maxFollowUps = options?.maxFollowUps ?? 2;
+    const throwOnMaxExceeded = options?.throwOnMaxExceeded ?? false;
+    const onUpdate = options?.onUpdate;
+    const allUpdates: ExtendedSessionUpdate[] = [];
+    let followUpCount = 0;
+
+    // Helper to check if done() was called by looking for status events
+    // The done() MCP tool emits status events with status_type completed/failed
+    // and includes signal: "WORKER_DONE" in the details
+    const checkDoneCalled = async (): Promise<{ called: boolean; status?: string }> => {
+      // Reload from disk to see events from MCP subprocess
+      await eventStore.reload();
+      const statusEvents = eventStore.query({ type: "status" });
+
+      // Look for status events from this agent that indicate completion
+      const agentCompletedStatus = statusEvents.find(
+        (e) =>
+          e.source?.agent_id === agentId &&
+          (e.payload?.status_type === "completed" ||
+           e.payload?.status_type === "failed" ||
+           (e.payload?.details as Record<string, unknown>)?.signal === "WORKER_DONE")
+      );
+
+      if (agentCompletedStatus) {
+        return {
+          called: true,
+          status: agentCompletedStatus.payload?.status_type as string
+        };
+      }
+
+      return { called: false };
+    };
+
+    // Initial prompt
+    for await (const update of prompt(agentId, message)) {
+      allUpdates.push(update);
+      onUpdate?.(update);
+    }
+
+    // Check if done() was called
+    let doneResult = await checkDoneCalled();
+    if (doneResult.called) {
+      return {
+        doneCalled: true,
+        doneStatus: doneResult.status,
+        exceededMax: false,
+        followUpCount: 0,
+        updates: allUpdates,
+      };
+    }
+
+    // Follow-up prompts
+    const followUpMessages = [
+      `Your work appears complete, but you haven't called done() yet. Please call done() now with your completion status.
+
+Example: done({ status: "completed", summary: "Brief description of what you accomplished" })
+
+If you're blocked or need help, call: done({ status: "blocked", summary: "What you need help with" })`,
+
+      `IMPORTANT: You MUST call the done() tool to signal completion. This is required for proper cleanup.
+
+Call done() NOW with status "completed" if your work is finished, or "blocked" if you need assistance.`,
+    ];
+
+    for (let i = 0; i < maxFollowUps; i++) {
+      followUpCount++;
+      const followUpMessage = followUpMessages[Math.min(i, followUpMessages.length - 1)];
+
+      // Send follow-up prompt
+      for await (const update of prompt(agentId, followUpMessage)) {
+        allUpdates.push(update);
+        onUpdate?.(update);
+      }
+
+      // Check again
+      doneResult = await checkDoneCalled();
+      if (doneResult.called) {
+        return {
+          doneCalled: true,
+          doneStatus: doneResult.status,
+          exceededMax: false,
+          followUpCount,
+          updates: allUpdates,
+        };
+      }
+    }
+
+    // done() was never called after max follow-ups
+    if (throwOnMaxExceeded) {
+      throw new Error(
+        `Agent ${agentId} did not call done() after ${maxFollowUps} follow-up attempts. ` +
+        `Total prompts sent: ${1 + followUpCount}. Consider increasing maxFollowUps or investigating agent behavior.`
+      );
+    }
+
+    return {
+      doneCalled: false,
+      exceededMax: true,
+      followUpCount,
+      updates: allUpdates,
+    };
+  }
+
   function getSession(agentId: AgentId): Session | null {
     const activeSession = activeSessions.get(agentId);
     return activeSession?.session ?? null;
@@ -914,6 +1074,14 @@ export function createAgentManager(
     } catch {
       return false;
     }
+  }
+
+  function isProcessRunning(agentId: AgentId): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      return false;
+    }
+    return activeSession.handle.isRunning();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1031,10 +1199,12 @@ export function createAgentManager(
     getOrCreateHeadManager,
     listHeadManagers,
     prompt,
+    promptUntilDone,
     getSession,
     hasActiveSession,
     isPrompting,
     supportsInjection,
+    isProcessRunning,
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,
