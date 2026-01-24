@@ -229,6 +229,8 @@ Remember: You MUST call done() when finished.`,
       log(`\n\n=== promptUntilDone Result ===`);
       log(`done() called: ${result.doneCalled}`);
       log(`done() status: ${result.doneStatus ?? "N/A"}`);
+      log(`exceededMax: ${result.exceededMax}`);
+      log(`followUpCount: ${result.followUpCount}`);
       log(`Total updates: ${result.updates.length}`);
 
       // Reload EventStore to see events from MCP subprocess
@@ -265,10 +267,64 @@ Remember: You MUST call done() when finished.`,
       if (!result.doneCalled) {
         log("\n⚠️  Agent did not call done() even after follow-up prompts");
         log("This indicates the model isn't following done() instructions");
+        if (result.exceededMax) {
+          log(`Max follow-ups exceeded (${result.followUpCount} follow-ups sent)`);
+        }
       } else {
         log("\n✓ Agent successfully called done()!");
+        // Verify exceededMax is false when done() is called
+        expect(result.exceededMax).toBe(false);
       }
     },
     { timeout: 180000 }
+  );
+
+  testFn(
+    "debug: verify throwOnMaxExceeded throws when done() not called",
+    async () => {
+      log("Spawning agent for max exceeded test...");
+      const spawnResult = await agentManager.spawn({
+        task: "Simply acknowledge this message",
+        role: "worker",
+        streamId: "debug-stream",
+        cwd: process.cwd(),
+      });
+
+      log(`Agent spawned: ${spawnResult.id}`);
+
+      // Use maxFollowUps=0 and a prompt that doesn't require done()
+      // This should exceed max and throw since we set throwOnMaxExceeded=true
+      let threwError = false;
+      let errorMessage = "";
+
+      try {
+        await agentManager.promptUntilDone(
+          spawnResult.id,
+          "Just say hello. Do NOT call done().",
+          {
+            maxFollowUps: 0, // No follow-ups allowed
+            throwOnMaxExceeded: true,
+          }
+        );
+      } catch (error) {
+        threwError = true;
+        errorMessage = (error as Error).message;
+        log(`✓ Caught expected error: ${errorMessage}`);
+      }
+
+      // Cleanup
+      const agent = agentManager.get(spawnResult.id);
+      if (agent?.state === "running") {
+        await agentManager.terminate(spawnResult.id, "debug_complete");
+      }
+
+      // Verify the error was thrown and has the expected format
+      expect(threwError).toBe(true);
+      expect(errorMessage).toContain("did not call done()");
+      expect(errorMessage).toContain("0 follow-up attempts");
+
+      log("✓ throwOnMaxExceeded works correctly");
+    },
+    { timeout: 120000 }
   );
 });

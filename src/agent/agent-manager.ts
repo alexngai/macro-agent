@@ -935,16 +935,21 @@ export function createAgentManager(
     message: string,
     options?: {
       maxFollowUps?: number;
+      throwOnMaxExceeded?: boolean;
       onUpdate?: (update: ExtendedSessionUpdate) => void;
     }
   ): Promise<{
     doneCalled: boolean;
     doneStatus?: string;
+    exceededMax: boolean;
+    followUpCount: number;
     updates: ExtendedSessionUpdate[];
   }> {
     const maxFollowUps = options?.maxFollowUps ?? 2;
+    const throwOnMaxExceeded = options?.throwOnMaxExceeded ?? false;
     const onUpdate = options?.onUpdate;
     const allUpdates: ExtendedSessionUpdate[] = [];
+    let followUpCount = 0;
 
     // Helper to check if done() was called by looking for status events
     // The done() MCP tool emits status events with status_type completed/failed
@@ -985,6 +990,8 @@ export function createAgentManager(
       return {
         doneCalled: true,
         doneStatus: doneResult.status,
+        exceededMax: false,
+        followUpCount: 0,
         updates: allUpdates,
       };
     }
@@ -1003,6 +1010,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     ];
 
     for (let i = 0; i < maxFollowUps; i++) {
+      followUpCount++;
       const followUpMessage = followUpMessages[Math.min(i, followUpMessages.length - 1)];
 
       // Send follow-up prompt
@@ -1017,14 +1025,25 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
         return {
           doneCalled: true,
           doneStatus: doneResult.status,
+          exceededMax: false,
+          followUpCount,
           updates: allUpdates,
         };
       }
     }
 
-    // done() was never called
+    // done() was never called after max follow-ups
+    if (throwOnMaxExceeded) {
+      throw new Error(
+        `Agent ${agentId} did not call done() after ${maxFollowUps} follow-up attempts. ` +
+        `Total prompts sent: ${1 + followUpCount}. Consider increasing maxFollowUps or investigating agent behavior.`
+      );
+    }
+
     return {
       doneCalled: false,
+      exceededMax: true,
+      followUpCount,
       updates: allUpdates,
     };
   }
