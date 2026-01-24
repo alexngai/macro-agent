@@ -474,32 +474,13 @@ export class SudocodeTaskBackend implements TaskBackend {
     return this.toExtendedTask(updated);
   }
 
-  async delete(id: TaskId): Promise<void> {
-    const task = this.eventStore.getTask(id);
-    if (!task) {
-      throw new SudocodeTaskBackendError(
-        `Task not found: ${id}`,
-        "TASK_NOT_FOUND",
-        id
-      );
-    }
-
-    // Remove from index if bound to an issue
-    const issueId = this.getIssueForTask(id);
-    if (issueId) {
-      this.removeFromIndex(issueId, id);
-    }
-
-    // Emit deleted event (soft delete - task remains in EventStore but marked deleted)
-    this.eventStore.emit({
-      type: "task",
-      source: { agent_id: task.assigned_agent ?? task.created_by },
-      payload: {
-        task_id: id,
-        action: "status_change",
-        details: { status: "failed", deleted: true },
-      },
-    });
+  async delete(_id: TaskId): Promise<void> {
+    // Tasks are immutable in event-sourced system - no delete operation
+    // This matches InMemoryTaskBackend behavior for backend parity
+    throw new SudocodeTaskBackendError(
+      "Delete operation not supported - tasks are immutable",
+      "NOT_SUPPORTED"
+    );
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1083,13 +1064,11 @@ export class SudocodeTaskBackend implements TaskBackend {
         return;
       }
 
-      // Build TaskChangeEvent (async enrichment handled differently)
+      // Build TaskChangeEvent using sync conversion (checks local blockers only)
       const event: TaskChangeEvent = {
         type: task ? "updated" : "deleted",
         taskId,
-        task: task
-          ? { ...task, isBlocked: false } // Will be enriched asynchronously
-          : ({} as ExtendedTask),
+        task: task ? this.toExtendedTaskSync(task) : ({} as ExtendedTask),
       };
 
       callback(event);
@@ -1180,6 +1159,31 @@ export class SudocodeTaskBackend implements TaskBackend {
         } catch {
           // If we can't fetch blockers, assume not blocked
         }
+      }
+    }
+
+    return {
+      ...task,
+      isBlocked,
+      external_id: this.getTaskExternalId(task),
+    };
+  }
+
+  /**
+   * Synchronous version of toExtendedTask that only checks local blockers.
+   * Used in callbacks where async is not possible.
+   * Note: Does not check sudocode issue blockers - only local task blockers.
+   */
+  private toExtendedTaskSync(task: Task): ExtendedTask {
+    let isBlocked = false;
+
+    // Check local blockers only (sync operation)
+    const localBlockerIds = task.blockers ?? [];
+    for (const blockerId of localBlockerIds) {
+      const blocker = this.eventStore.getTask(blockerId);
+      if (blocker && blocker.status !== "completed") {
+        isBlocked = true;
+        break;
       }
     }
 
