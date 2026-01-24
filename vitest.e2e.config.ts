@@ -5,11 +5,15 @@ export default defineConfig({
     watch: false,
     globals: true,
     environment: "node",
-    // Only run sudocode e2e tests
-    include: ["src/task/backend/sudocode/__tests__/e2e/*.e2e.test.ts"],
+    setupFiles: ["./vitest.setup.ts"],
+    // Run all e2e tests
+    include: [
+      "src/**/*.e2e.test.ts",
+      "src/**/e2e/**/*.test.ts",
+    ],
     // Use forks instead of threads to avoid segfaults with better-sqlite3
     pool: "forks",
-    // Longer timeout for e2e tests that start servers
+    // Longer timeout for e2e tests that start servers or run git operations
     testTimeout: 30000,
     hookTimeout: 30000,
     // Run tests sequentially to avoid server port conflicts

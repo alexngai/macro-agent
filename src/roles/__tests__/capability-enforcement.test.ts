@@ -15,20 +15,20 @@ import {
   filterToolsForRole,
   isToolAllowedForRole,
   getRequiredCapabilityForTool,
-} from "../../../src/roles/registry.js";
+} from "../registry.js";
 import {
   AGENT_CAPABILITIES,
   CAPABILITY_TOOL_MAP,
   getToolsForCapabilities,
-} from "../../../src/roles/capabilities.js";
-import { getBuiltinRole } from "../../../src/roles/builtin/index.js";
-import type { RoleDefinition, Tool } from "../../../src/roles/types.js";
+} from "../capabilities.js";
+import { getBuiltinRole } from "../builtin/index.js";
+import type { RoleDefinition, Tool } from "../types.js";
 
 import {
   createTestHarness,
   type TestHarness,
-} from "../../harness/index.js";
-import { MINIMAL_PROJECT } from "../../fixtures/index.js";
+} from "../../../test_fixtures/harness/index.js";
+import { MINIMAL_PROJECT } from "../../../test_fixtures/fixtures/index.js";
 
 describe("Role Capability Enforcement", () => {
   // ─────────────────────────────────────────────────────────────────────────

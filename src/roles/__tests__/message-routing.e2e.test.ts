@@ -14,26 +14,26 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   createEventStore,
   type EventStore,
-} from "../../../src/store/event-store.js";
+} from "../../store/event-store.js";
 import {
   createMessageRouter,
   type MessageRouter,
-} from "../../../src/router/message-router.js";
+} from "../../router/message-router.js";
 import {
   matchesRole,
   resolveRoleTarget,
-} from "../../../src/router/role-resolver.js";
+} from "../../router/role-resolver.js";
 import {
   matchesBroadcastScope,
   resolveBroadcastTarget,
-} from "../../../src/router/broadcast.js";
-import type { BroadcastScope } from "../../../src/router/types.js";
+} from "../../router/broadcast.js";
+import type { BroadcastScope } from "../../router/types.js";
 
 import {
   createTestHarness,
   type TestHarness,
-} from "../../harness/index.js";
-import { MINIMAL_PROJECT } from "../../fixtures/index.js";
+} from "../../../test_fixtures/harness/index.js";
+import { MINIMAL_PROJECT } from "../../../test_fixtures/fixtures/index.js";
 
 describe("Role-Based Message Routing", () => {
   // ─────────────────────────────────────────────────────────────────────────

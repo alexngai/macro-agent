@@ -11,6 +11,7 @@
  * @see s-bcqm Change Management spec
  */
 
+import { execSync } from "child_process";
 import type { MessageRouter } from "../../router/message-router.js";
 import type { MergeQueueInterface } from "../../workspace/merge-queue/types.js";
 import type {
@@ -19,7 +20,7 @@ import type {
   CleanupStatus,
   DoneHandlerResult,
 } from "../types.js";
-import { attemptMerge, abortMerge } from "../cleanup.js";
+import { attemptMerge, abortMerge, getCurrentBranch } from "../cleanup.js";
 
 // =============================================================================
 // Handler Dependencies
@@ -81,6 +82,8 @@ interface ProcessMergeResult {
   mrId: string;
   success: boolean;
   mergeCommit?: string;
+  /** True if the branch was already merged (no new commit created) */
+  alreadyMerged?: boolean;
   conflicts?: string[];
   error?: string;
 }
@@ -92,21 +95,52 @@ function processSingleMerge(
   mergeQueue: MergeQueueInterface,
   mrId: string,
   workerBranch: string,
-  workspacePath: string
+  workspacePath: string,
+  expectedBranch?: string
 ): ProcessMergeResult {
+  // Verify workspace is on expected branch before merge
+  if (expectedBranch) {
+    const currentBranch = getCurrentBranch(workspacePath);
+    if (currentBranch !== expectedBranch) {
+      // Don't mark as processing if branch is wrong - this is a system error
+      return {
+        mrId,
+        success: false,
+        error: `Workspace is on branch '${currentBranch}', expected '${expectedBranch}'`,
+      };
+    }
+  }
+
   // Mark as processing
   mergeQueue.markProcessing(mrId);
 
   // Attempt the merge
   const mergeResult = attemptMerge(workerBranch, workspacePath);
 
-  if (mergeResult.success && mergeResult.mergeCommit) {
-    mergeQueue.markMerged(mrId, mergeResult.mergeCommit);
-    return {
-      mrId,
-      success: true,
-      mergeCommit: mergeResult.mergeCommit,
-    };
+  if (mergeResult.success) {
+    if (mergeResult.alreadyMerged) {
+      // Branch was already merged - mark as merged with current HEAD
+      // This is a no-op merge but we track it for completeness
+      const currentHead = execSync("git rev-parse HEAD", {
+        cwd: workspacePath,
+        encoding: "utf-8",
+      }).trim();
+      mergeQueue.markMerged(mrId, currentHead);
+      return {
+        mrId,
+        success: true,
+        alreadyMerged: true,
+      };
+    }
+
+    if (mergeResult.mergeCommit) {
+      mergeQueue.markMerged(mrId, mergeResult.mergeCommit);
+      return {
+        mrId,
+        success: true,
+        mergeCommit: mergeResult.mergeCommit,
+      };
+    }
   }
 
   // Merge failed
@@ -137,25 +171,36 @@ function processSingleMerge(
 function processAllPendingMerges(
   streamId: string,
   mergeQueue: MergeQueueInterface,
-  workspacePath: string
-): { processed: number; merged: number; conflicts: number } {
+  workspacePath: string,
+  expectedBranch?: string
+): { processed: number; merged: number; conflicts: number; branchErrors: number } {
   let processed = 0;
   let merged = 0;
   let conflicts = 0;
+  let branchErrors = 0;
 
   // Process queue until empty
   while (true) {
     const next = mergeQueue.getNext(streamId);
     if (!next) break;
 
-    processed++;
     const result = processSingleMerge(
       mergeQueue,
       next.id,
       next.workerBranch,
-      workspacePath
+      workspacePath,
+      expectedBranch
     );
 
+    // Check for branch verification error - if we're on the wrong branch,
+    // no merges will succeed, so break out of the loop to avoid infinite loop
+    // (the MR was never marked as processing, so it would be returned again)
+    if (!result.success && result.error?.includes("expected")) {
+      branchErrors++;
+      break;
+    }
+
+    processed++;
     if (result.success) {
       merged++;
     } else {
@@ -163,7 +208,7 @@ function processAllPendingMerges(
     }
   }
 
-  return { processed, merged, conflicts };
+  return { processed, merged, conflicts, branchErrors };
 }
 
 // =============================================================================
@@ -204,7 +249,9 @@ export async function handleIntegratorDone(
       cleanupActions.push(`Found ${pendingBefore} pending merge request(s) - processing before termination`);
 
       try {
-        const result = processAllPendingMerges(streamId, mergeQueue, workspacePath);
+        // Pass the expected integration branch for verification
+        const expectedBranch = context.branch ?? "integration";
+        const result = processAllPendingMerges(streamId, mergeQueue, workspacePath, expectedBranch);
         cleanupActions.push(
           `Processed ${result.processed} merge request(s): ${result.merged} merged, ${result.conflicts} conflicts`
         );
@@ -212,6 +259,12 @@ export async function handleIntegratorDone(
         if (result.conflicts > 0) {
           warnings.push(
             `${result.conflicts} merge request(s) had conflicts - manual resolution may be required`
+          );
+        }
+
+        if (result.branchErrors > 0) {
+          warnings.push(
+            `${result.branchErrors} merge request(s) skipped due to workspace not being on expected branch '${expectedBranch}'`
           );
         }
       } catch (error) {

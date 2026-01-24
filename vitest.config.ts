@@ -5,9 +5,14 @@ export default defineConfig({
     watch: false,
     globals: true,
     environment: "node",
-    include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
-    // Exclude e2e tests from regular test runs
-    exclude: ["**/node_modules/**", "**/e2e/**"],
+    setupFiles: ["./vitest.setup.ts"],
+    include: ["src/**/*.test.ts", "test_fixtures/**/*.test.ts"],
+    exclude: [
+      "**/node_modules/**",
+      // E2E tests are run separately via vitest.e2e.config.ts
+      "**/*.e2e.test.ts",
+      "**/e2e/**",
+    ],
     // Use forks instead of threads to avoid segfaults with better-sqlite3
     // Native modules can cause memory access issues during thread cleanup
     pool: "forks",

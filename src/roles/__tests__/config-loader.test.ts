@@ -23,12 +23,12 @@ import {
   entryToRoleConfig,
   type RoleConfigFile,
   type RoleConfigEntry,
-} from "../../../src/roles/config-loader.js";
+} from "../config-loader.js";
 
 import {
   DefaultRoleRegistry,
   getBuiltinRole,
-} from "../../../src/roles/index.js";
+} from "../index.js";
 
 describe("Role Config Loader", () => {
   // ─────────────────────────────────────────────────────────────────────────

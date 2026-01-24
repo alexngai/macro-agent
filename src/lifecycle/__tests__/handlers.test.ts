@@ -543,6 +543,9 @@ describe("handlers", () => {
         markMerged: vi.fn(),
       };
 
+      // Mock getCurrentBranch to return expected branch (for branch verification)
+      mockGetCurrentBranch.mockReturnValue("integration");
+
       // Mock successful merge
       mockAttemptMerge.mockReturnValue({
         success: true,
@@ -558,12 +561,14 @@ describe("handlers", () => {
         agentId: "integrator-1",
         role: "integrator",
         streamId: "stream-1",
+        branch: "integration",
       };
       const args: DoneArgs = { status: "completed" };
       const cleanupStatus: CleanupStatus = { ready: true };
 
       const result = await handleIntegratorDone(context, args, cleanupStatus, deps as any);
 
+      expect(mockGetCurrentBranch).toHaveBeenCalledWith("/path/to/workspace");
       expect(mockMergeQueue.markProcessing).toHaveBeenCalledWith("mr-1");
       expect(mockMergeQueue.markMerged).toHaveBeenCalledWith("mr-1", "abc123");
       expect(result.cleanupActions).toEqual(
@@ -588,6 +593,9 @@ describe("handlers", () => {
         markConflict: vi.fn(),
       };
 
+      // Mock getCurrentBranch to return expected branch (for branch verification)
+      mockGetCurrentBranch.mockReturnValue("integration");
+
       // Mock merge with conflicts
       mockAttemptMerge.mockReturnValue({
         success: false,
@@ -604,6 +612,7 @@ describe("handlers", () => {
         agentId: "integrator-1",
         role: "integrator",
         streamId: "stream-1",
+        branch: "integration",
       };
       const args: DoneArgs = { status: "completed" };
       const cleanupStatus: CleanupStatus = { ready: true };
