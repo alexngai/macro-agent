@@ -14,6 +14,15 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { createMCPServer } from "../mcp/mcp-server.js";
+import {
+  createActivityWatcher,
+  subscribeAgentToEvents,
+  MONITOR_DEFAULT_EVENT_TYPES,
+} from "../activity/index.js";
+import {
+  createWakeHandler,
+  createSessionProviderFromAgentManager,
+} from "../agent/wake.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
 const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
@@ -92,6 +101,79 @@ async function main() {
 
     const lineage = agent?.lineage ?? [];
 
+    // Create ActivityWatcher for wait_for_activity MCP tool
+    const sessionProvider = createSessionProviderFromAgentManager(agentManager);
+    const wakeHandler = createWakeHandler(sessionProvider, agentManager);
+    const activityWatcher = createActivityWatcher(
+      {
+        listAgents: () => agentManager.list(),
+        getAgent: (id) => agentManager.get(id),
+      },
+      wakeHandler
+    );
+
+    // Wire EventStore events to ActivityWatcher
+    eventStore.onAgentChange((changedAgentId, changedAgent) => {
+      if (!activityWatcher.isRunning()) return;
+      if (!changedAgent) return; // Agent was deleted
+
+      // Infer event type from agent state
+      const eventType = changedAgent.state === "spawning" ? "agent_spawned"
+        : changedAgent.state === "running" ? "agent_started"
+        : changedAgent.state === "stopped" ? "agent_terminated"
+        : "agent_updated";
+
+      activityWatcher.processActivity({
+        id: `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        type: eventType,
+        source: { agent_id: changedAgentId, role: changedAgent.role },
+        timestamp: Date.now(),
+        details: { state: changedAgent.state },
+      });
+    });
+
+    eventStore.onTaskChange((changedTaskId, task) => {
+      if (!activityWatcher.isRunning()) return;
+      if (!task) return; // Task was deleted
+
+      // Infer event type from task status
+      const eventType = task.status === "pending" ? "task_created"
+        : task.status === "assigned" ? "task_assigned"
+        : task.status === "in_progress" ? "task_started"
+        : task.status === "completed" ? "task_completed"
+        : task.status === "failed" ? "task_failed"
+        : "task_updated";
+
+      activityWatcher.processActivity({
+        id: `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        type: eventType,
+        source: { agent_id: task.assigned_agent ?? undefined, task_id: changedTaskId },
+        timestamp: Date.now(),
+        details: { status: task.status },
+      });
+    });
+
+    // Start the ActivityWatcher
+    activityWatcher.start();
+
+    // Auto-subscribe Monitor agents to health events when they spawn
+    agentManager.onLifecycleEvent((event) => {
+      if (event.type === "spawned") {
+        const spawnedAgent = event.agent;
+        // Check if this is a Monitor agent
+        if (spawnedAgent.role === "monitor" || spawnedAgent.role?.startsWith("monitor.")) {
+          subscribeAgentToEvents(
+            activityWatcher,
+            spawnedAgent.id,
+            MONITOR_DEFAULT_EVENT_TYPES,
+            undefined, // No scope filter - monitor sees all
+            "high"     // High priority for health events
+          );
+          debugLog(`[MCP] Auto-subscribed Monitor ${spawnedAgent.id} to health events`);
+        }
+      }
+    });
+
     // Create MCP server with agent context
     const mcpServer = createMCPServer(
       {
@@ -106,6 +188,7 @@ async function main() {
         agentManager,
         taskManager,
         messageRouter,
+        activityWatcher,
       }
     );
 
@@ -114,12 +197,14 @@ async function main() {
 
     // Handle graceful shutdown
     process.on("SIGINT", async () => {
+      activityWatcher.stop();
       await mcpServer.close();
       await eventStore.close();
       process.exit(0);
     });
 
     process.on("SIGTERM", async () => {
+      activityWatcher.stop();
       await mcpServer.close();
       await eventStore.close();
       process.exit(0);

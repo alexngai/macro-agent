@@ -43,6 +43,12 @@ export interface SessionMapping {
 
   /** When the mapping was last updated */
   updatedAt: number;
+
+  /** Whether the session is currently processing a prompt (for health monitoring) */
+  isProcessing: boolean;
+
+  /** When isProcessing last changed (for health monitoring) */
+  lastProcessingChangeAt: number;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -155,6 +161,12 @@ export interface SpawnAgentRequest {
 
   /** Parent agent ID (defaults to current session's mapped agent) */
   parentId?: AgentId;
+
+  /**
+   * Role for the spawned agent (e.g., 'worker', 'coordinator', 'integrator', 'monitor').
+   * Parent must have the appropriate spawn capability for the requested role.
+   */
+  role?: string;
 
   /** Spawn options */
   options?: {
@@ -686,5 +698,6 @@ export type ACPErrorCode =
   | "FORK_NOT_SUPPORTED"
   | "INVALID_EXTENSION"
   | "PERMISSION_DENIED"
+  | "CAPABILITY_DENIED"
   | "NO_PEER_MANAGER"
   | "PEER_SEND_FAILED";

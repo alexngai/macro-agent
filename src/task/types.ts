@@ -8,6 +8,7 @@ import type {
   Task,
   TaskStatus,
   ArtifactRef,
+  RetryPolicy,
 } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -29,6 +30,9 @@ export interface CreateTaskOptions {
 
   /** Optional input data for the task */
   inputs?: Record<string, unknown>;
+
+  /** Optional retry policy for automatic retries */
+  retryPolicy?: RetryPolicy;
 }
 
 // ─────────────────────────────────────────────────────────────────

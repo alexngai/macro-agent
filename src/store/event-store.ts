@@ -307,12 +307,13 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     };
 
     // Store the event
+    // Note: Use empty object for undefined source to avoid JSON.parse errors in query
     store.setRow('events', event.id, {
       id: event.id,
       version: event.version,
       timestamp: event.timestamp,
       type: event.type,
-      source: JSON.stringify(event.source),
+      source: JSON.stringify(event.source ?? {}),
       target: event.target ? JSON.stringify(event.target) : '',
       payload: JSON.stringify(event.payload),
       metadata: event.metadata ? JSON.stringify(event.metadata) : '',
@@ -336,12 +337,18 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       if (!row.id) continue;
 
       // Parse raw event data
+      // Handle legacy data where source might be stored as "undefined" string
+      const sourceStr = row.source as string;
+      const parsedSource = sourceStr && sourceStr !== 'undefined'
+        ? JSON.parse(sourceStr)
+        : {};
+
       const rawEvent = {
         id: row.id as string,
         version: row.version as number | undefined,
         timestamp: row.timestamp as number,
         type: row.type as string,
-        source: JSON.parse(row.source as string),
+        source: parsedSource,
         target: row.target ? JSON.parse(row.target as string) : undefined,
         payload: JSON.parse(row.payload as string),
         metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
@@ -1067,6 +1074,7 @@ function applySpawnEvent(
     task: string;
     task_id?: TaskId;
     parent?: AgentId | null;
+    role?: string;
     config?: Record<string, unknown>;
     cwd?: string;
   };
@@ -1094,11 +1102,13 @@ function applySpawnEvent(
     stop_reason: '',
     task: payload.task,
     task_id: payload.task_id ?? '',
+    role: payload.role ?? '',
     config: JSON.stringify(payload.config ?? {}),
     cwd: payload.cwd ?? process.cwd(),
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
+    last_activity_at: event.timestamp,
   });
 
   const agent = rowToAgent(store.getRow('agents', agentId));
@@ -1122,6 +1132,7 @@ function applyTerminateEvent(
     state: 'stopped',
     stop_reason: payload.reason,
     stopped_at: event.timestamp,
+    last_activity_at: event.timestamp,
   });
 
   const agent = rowToAgent(store.getRow('agents', agentId));
@@ -1141,15 +1152,22 @@ function applyStatusEvent(
 
   const payload = event.payload as { status_type: string };
 
+  // Handle specific status types
   if (payload.status_type === 'started') {
     store.setPartialRow('agents', agentId, {
       state: 'running',
       started_at: event.timestamp,
+      last_activity_at: event.timestamp,
     });
-
-    const agent = rowToAgent(store.getRow('agents', agentId));
-    notify(agentId, agent);
+  } else {
+    // Always update last_activity_at on any status event
+    store.setPartialRow('agents', agentId, {
+      last_activity_at: event.timestamp,
+    });
   }
+
+  const agent = rowToAgent(store.getRow('agents', agentId));
+  notify(agentId, agent);
 }
 
 /**
@@ -1231,6 +1249,7 @@ function applyTaskEvent(
         description: string;
         parent_task?: TaskId;
         inputs?: Record<string, unknown>;
+        retryPolicy?: unknown;
       };
       store.setRow('tasks', taskId, {
         id: taskId,
@@ -1239,6 +1258,7 @@ function applyTaskEvent(
         assigned_agent: '',
         parent_task: details.parent_task ?? '',
         subtasks: JSON.stringify([]),
+        blockers: JSON.stringify([]),
         created_at: event.timestamp,
         started_at: 0,
         completed_at: 0,
@@ -1247,6 +1267,10 @@ function applyTaskEvent(
         outputs: JSON.stringify({}),
         artifacts: JSON.stringify([]),
         agent_history: JSON.stringify([]),
+        retry_policy: details.retryPolicy
+          ? JSON.stringify(details.retryPolicy)
+          : '',
+        retry_state: '',
       });
       break;
     }
@@ -1294,6 +1318,8 @@ function applyTaskEvent(
         artifacts?: unknown[];
         description?: string;
         subtask_added?: TaskId;
+        retryState?: unknown;
+        agent_id?: AgentId | null;
       };
       const updates: Record<string, unknown> = {};
 
@@ -1335,6 +1361,15 @@ function applyTaskEvent(
         updates.subtasks = JSON.stringify(subtasks);
       }
 
+      if (details.retryState !== undefined) {
+        updates.retry_state = JSON.stringify(details.retryState);
+      }
+
+      // Allow clearing the assigned agent (for retry)
+      if (details.agent_id === null) {
+        updates.assigned_agent = '';
+      }
+
       if (Object.keys(updates).length > 0) {
         store.setPartialRow('tasks', taskId, updates as Record<string, string | number | boolean>);
       }
@@ -1352,6 +1387,35 @@ function applyTaskEvent(
         status: 'failed',
         completed_at: event.timestamp,
       });
+      break;
+    }
+    case 'blocker_added': {
+      const details = payload.details as { blocker_id: TaskId };
+      const existing = store.getRow('tasks', taskId);
+      const blockers = existing.blockers
+        ? JSON.parse(existing.blockers as string)
+        : [];
+      if (!blockers.includes(details.blocker_id)) {
+        blockers.push(details.blocker_id);
+        store.setPartialRow('tasks', taskId, {
+          blockers: JSON.stringify(blockers),
+        });
+      }
+      break;
+    }
+    case 'blocker_removed': {
+      const details = payload.details as { blocker_id: TaskId };
+      const existing = store.getRow('tasks', taskId);
+      const blockers = existing.blockers
+        ? JSON.parse(existing.blockers as string)
+        : [];
+      const idx = blockers.indexOf(details.blocker_id);
+      if (idx >= 0) {
+        blockers.splice(idx, 1);
+        store.setPartialRow('tasks', taskId, {
+          blockers: JSON.stringify(blockers),
+        });
+      }
       break;
     }
   }
@@ -1374,11 +1438,13 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     stop_reason: stopReason ? (stopReason as Agent['stop_reason']) : undefined,
     task: row.task as string,
     task_id: (row.task_id as string) || undefined,
+    role: (row.role as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
     cwd: (row.cwd as string) || process.cwd(),
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,
+    last_activity_at: (row.last_activity_at as number) || undefined,
   };
 }
 
@@ -1393,6 +1459,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     assigned_agent: (row.assigned_agent as string) || undefined,
     parent_task: (row.parent_task as string) || undefined,
     subtasks: row.subtasks ? JSON.parse(row.subtasks as string) : undefined,
+    blockers: row.blockers ? JSON.parse(row.blockers as string) : undefined,
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     completed_at: (row.completed_at as number) || undefined,
@@ -1401,5 +1468,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     outputs: row.outputs ? JSON.parse(row.outputs as string) : undefined,
     artifacts: row.artifacts ? JSON.parse(row.artifacts as string) : undefined,
     agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
+    retryPolicy: row.retry_policy ? JSON.parse(row.retry_policy as string) : undefined,
+    retryState: row.retry_state ? JSON.parse(row.retry_state as string) : undefined,
   };
 }

@@ -249,6 +249,35 @@ export interface EventQueryParams {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Context Injection
+// ─────────────────────────────────────────────────────────────────
+
+export interface InjectContextRequest {
+  /** The context message to inject */
+  content: string;
+
+  /** If true, interrupts current work immediately instead of queueing */
+  urgent?: boolean;
+
+  /** Optional reason for the injection (for audit logs) */
+  reason?: string;
+}
+
+export interface InjectContextResponse {
+  /** Whether the injection succeeded */
+  success: boolean;
+
+  /** The method used: inject, interrupt, message, or queued */
+  method?: "inject" | "interrupt" | "message" | "queued";
+
+  /** Error message if failed */
+  error?: string;
+
+  /** Additional notes */
+  note?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────
 

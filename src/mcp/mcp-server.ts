@@ -19,6 +19,30 @@ import type { PeerManager } from "../peer/peer-manager.js";
 import type { ToolContext, HierarchyNode } from "./types.js";
 import { MCPToolError } from "./types.js";
 import type { Agent, AgentId } from "../store/types/index.js";
+import {
+  DoneSchema,
+  createDoneHandler,
+  DONE_TOOL_INFO,
+} from "./tools/done.js";
+import type { ActivityWatcher } from "../activity/watcher.js";
+import {
+  WaitForActivitySchema,
+  createWaitForActivityHandler,
+  WAIT_FOR_ACTIVITY_TOOL_INFO,
+} from "./tools/wait_for_activity.js";
+import {
+  InjectContextSchema,
+  createInjectContextHandler,
+  formatInjectContextResult,
+  INJECT_CONTEXT_TOOL_INFO,
+} from "./tools/inject_context.js";
+import type { TaskToolProvider } from "../task/backend/types.js";
+import type { RoleRegistry, RoleDefinition } from "../roles/types.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
+import {
+  isToolAllowedForRole,
+  getRequiredCapabilityForTool,
+} from "../roles/registry.js";
 
 // Debug logging to file (since stderr doesn't show up from MCP subprocess)
 const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
@@ -52,6 +76,12 @@ export interface MCPServices {
   messageRouter: MessageRouter;
   /** Optional peer manager for inter-macro-agent communication */
   peerManager?: PeerManager;
+  /** Optional activity watcher for event-driven waking */
+  activityWatcher?: ActivityWatcher;
+  /** Optional task tool provider for backend-specific task tools */
+  taskToolProvider?: TaskToolProvider;
+  /** Optional role registry for role-based tool filtering */
+  roleRegistry?: RoleRegistry;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -228,7 +258,43 @@ export function createMCPServer(
   config: MCPServerConfig = {}
 ): MCPServerInstance {
   const { name = "macro-agent-mcp", version = "1.0.0" } = config;
-  const { eventStore, agentManager, taskManager, messageRouter, peerManager } = services;
+  const { eventStore, agentManager, taskManager, messageRouter, peerManager, activityWatcher, taskToolProvider, roleRegistry = new DefaultRoleRegistry() } = services;
+
+  // Get excluded tools from tool provider (if any)
+  const excludedTools = new Set(taskToolProvider?.getExcludedTools?.() ?? []);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Role-Based Tool Filtering
+  // ─────────────────────────────────────────────────────────────────
+
+  // Get agent's role and resolve it
+  const agent = eventStore.getAgent(context.agent_id);
+  const agentRole = agent?.role ?? "worker"; // Default to worker if no role
+  const resolvedRole: RoleDefinition = roleRegistry.resolveRole(agentRole);
+
+  debugLog(`[MCP] Agent ${context.agent_id} has role '${agentRole}'`);
+  debugLog(`[MCP] Resolved role capabilities: ${resolvedRole.capabilities?.join(", ") ?? "none"}`);
+
+  /**
+   * Check if a tool should be registered based on role permissions
+   */
+  function shouldRegisterTool(toolName: string): boolean {
+    // Check backend exclusions first
+    if (excludedTools.has(toolName)) {
+      return false;
+    }
+
+    // Check role-based permissions
+    const allowed = isToolAllowedForRole(toolName, resolvedRole);
+    if (!allowed) {
+      const requiredCapability = getRequiredCapabilityForTool(toolName);
+      debugLog(
+        `[MCP] Tool '${toolName}' not allowed for role '${agentRole}'` +
+          (requiredCapability ? ` (requires: ${requiredCapability})` : "")
+      );
+    }
+    return allowed;
+  }
 
   // Create MCP server
   const server = new McpServer(
@@ -244,10 +310,11 @@ export function createMCPServer(
   // Tool: spawn_agent
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("spawn_agent", {
-    description: "Spawn a child agent to work on a subtask",
-    inputSchema: SpawnAgentSchema,
-  }, async (args) => {
+  if (shouldRegisterTool("spawn_agent")) {
+    server.registerTool("spawn_agent", {
+      description: "Spawn a child agent to work on a subtask",
+      inputSchema: SpawnAgentSchema,
+    }, async (args) => {
     try {
       // Diagnostic logging to help debug parent-not-found issues
       // First, reload from SQLite to ensure we have the latest data
@@ -294,13 +361,15 @@ export function createMCPServer(
         "SPAWN_FAILED"
       );
     }
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Tool: emit_status
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("emit_status", {
+  if (shouldRegisterTool("emit_status")) {
+    server.registerTool("emit_status", {
     description: "Report a status milestone (started, checkpoint, completed, failed, blocked)",
     inputSchema: EmitStatusSchema,
   }, async (args) => {
@@ -348,48 +417,52 @@ export function createMCPServer(
         },
       ],
     };
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Tool: send_message
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("send_message", {
-    description: "Send a message to another agent, task, or topic",
-    inputSchema: SendMessageSchema,
-  }, async (args) => {
-    try {
-      const result = await messageRouter.send({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: args.to,
-        content: args.content,
-        correlation_id: args.correlation_id,
-      });
+  if (shouldRegisterTool("send_message")) {
+    server.registerTool("send_message", {
+      description: "Send a message to another agent, task, or topic",
+      inputSchema: SendMessageSchema,
+    }, async (args) => {
+      try {
+        const result = await messageRouter.send({
+          from: { agent_id: context.agent_id, task_id: context.task_id },
+          to: args.to,
+          content: args.content,
+          correlation_id: args.correlation_id,
+        });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              message_id: result.id,
-              delivered_to: 1, // Direct message always delivered to 1 recipient
-            }),
-          },
-        ],
-      };
-    } catch (error) {
-      throw new MCPToolError(
-        `Failed to send message: ${error}`,
-        "ROUTING_FAILED"
-      );
-    }
-  });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                message_id: result.id,
+                delivered_to: 1, // Direct message always delivered to 1 recipient
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to send message: ${error}`,
+          "ROUTING_FAILED"
+        );
+      }
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Tool: check_messages
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("check_messages", {
+  if (shouldRegisterTool("check_messages")) {
+    server.registerTool("check_messages", {
     description: "Check pending messages in your inbox (includes both internal and peer messages)",
     inputSchema: CheckMessagesSchema,
   }, async (args) => {
@@ -461,13 +534,15 @@ export function createMCPServer(
         },
       ],
     };
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: query_index
+  // Tool: query_index (always allowed - observability)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("query_index", {
+  if (shouldRegisterTool("query_index")) {
+    server.registerTool("query_index", {
     description: "Search for agents and tasks",
     inputSchema: QueryIndexSchema,
   }, async (args) => {
@@ -556,127 +631,133 @@ export function createMCPServer(
         },
       ],
     };
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: get_hierarchy
+  // Tool: get_hierarchy (always allowed - observability)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("get_hierarchy", {
-    description: "View the agent hierarchy tree",
-    inputSchema: GetHierarchySchema,
-  }, async (args) => {
-    // Determine root
-    let rootId: AgentId;
-    if (args.root) {
-      rootId = args.root;
-    } else {
-      // Use caller's root (walk up lineage)
-      rootId = context.lineage.length > 0 ? context.lineage[0] : context.agent_id;
-    }
+  if (shouldRegisterTool("get_hierarchy")) {
+    server.registerTool("get_hierarchy", {
+      description: "View the agent hierarchy tree",
+      inputSchema: GetHierarchySchema,
+    }, async (args) => {
+      // Determine root
+      let rootId: AgentId;
+      if (args.root) {
+        rootId = args.root;
+      } else {
+        // Use caller's root (walk up lineage)
+        rootId = context.lineage.length > 0 ? context.lineage[0] : context.agent_id;
+      }
 
-    const hierarchy = agentManager.getHierarchy(rootId);
-    if (!hierarchy) {
-      throw new MCPToolError(
-        `Agent not found: ${rootId}`,
-        "AGENT_NOT_FOUND"
-      );
-    }
+      const hierarchy = agentManager.getHierarchy(rootId);
+      if (!hierarchy) {
+        throw new MCPToolError(
+          `Agent not found: ${rootId}`,
+          "AGENT_NOT_FOUND"
+        );
+      }
 
-    // Convert to output format with depth limit
-    function buildNode(node: { agent: Agent; children: Array<{ agent: Agent; children: any[] }> }, currentDepth: number): HierarchyNode {
-      const shouldIncludeChildren = args.depth === undefined || currentDepth < args.depth;
+      // Convert to output format with depth limit
+      function buildNode(node: { agent: Agent; children: Array<{ agent: Agent; children: any[] }> }, currentDepth: number): HierarchyNode {
+        const shouldIncludeChildren = args.depth === undefined || currentDepth < args.depth;
+
+        return {
+          agent_id: node.agent.id,
+          task: node.agent.task ?? "No task",
+          state: node.agent.state,
+          children: shouldIncludeChildren
+            ? node.children.map((c) => buildNode(c, currentDepth + 1))
+            : [],
+        };
+      }
+
+      const tree = buildNode(hierarchy.root, 1);
 
       return {
-        agent_id: node.agent.id,
-        task: node.agent.task ?? "No task",
-        state: node.agent.state,
-        children: shouldIncludeChildren
-          ? node.children.map((c) => buildNode(c, currentDepth + 1))
-          : [],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              tree,
+              depth: hierarchy.depth,
+              total_agents: hierarchy.totalAgents,
+            }),
+          },
+        ],
       };
-    }
-
-    const tree = buildNode(hierarchy.root, 1);
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            tree,
-            depth: hierarchy.depth,
-            total_agents: hierarchy.totalAgents,
-          }),
-        },
-      ],
-    };
-  });
-
-  // ─────────────────────────────────────────────────────────────────
-  // Tool: get_agent_summary
-  // ─────────────────────────────────────────────────────────────────
-
-  server.registerTool("get_agent_summary", {
-    description: "Get detailed summary of a specific agent",
-    inputSchema: GetAgentSummarySchema,
-  }, async (args) => {
-    const agent = agentManager.get(args.agent_id);
-    if (!agent) {
-      throw new MCPToolError(
-        `Agent not found: ${args.agent_id}`,
-        "AGENT_NOT_FOUND"
-      );
-    }
-
-    // Get children count
-    const children = agentManager.getChildren(args.agent_id);
-
-    // Get recent status from events
-    const statusEvents = eventStore.query({
-      type: "status",
-      source_agent_id: args.agent_id,
-      limit: 1,
     });
-
-    const recentStatus = statusEvents.length > 0
-      ? {
-          type: statusEvents[0].payload.status_type as string,
-          summary: statusEvents[0].payload.summary as string,
-          timestamp: statusEvents[0].timestamp,
-        }
-      : undefined;
-
-    // Use stopped_at, started_at, or created_at as last activity
-    const lastActivity = agent.stopped_at ?? agent.started_at ?? agent.created_at;
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            id: agent.id,
-            session_id: agent.session_id,
-            task: agent.task ?? "No task",
-            state: agent.state,
-            parent: agent.parent,
-            children_count: children.length,
-            last_activity: lastActivity,
-            recent_status: recentStatus,
-          }),
-        },
-      ],
-    };
-  });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: stop_agent
+  // Tool: get_agent_summary (always allowed - observability)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("stop_agent", {
-    description: "Stop a child agent in your subtree",
-    inputSchema: StopAgentSchema,
-  }, async (args) => {
+  if (shouldRegisterTool("get_agent_summary")) {
+    server.registerTool("get_agent_summary", {
+      description: "Get detailed summary of a specific agent",
+      inputSchema: GetAgentSummarySchema,
+    }, async (args) => {
+      const agent = agentManager.get(args.agent_id);
+      if (!agent) {
+        throw new MCPToolError(
+          `Agent not found: ${args.agent_id}`,
+          "AGENT_NOT_FOUND"
+        );
+      }
+
+      // Get children count
+      const children = agentManager.getChildren(args.agent_id);
+
+      // Get recent status from events
+      const statusEvents = eventStore.query({
+        type: "status",
+        source_agent_id: args.agent_id,
+        limit: 1,
+      });
+
+      const recentStatus = statusEvents.length > 0
+        ? {
+            type: statusEvents[0].payload.status_type as string,
+            summary: statusEvents[0].payload.summary as string,
+            timestamp: statusEvents[0].timestamp,
+          }
+        : undefined;
+
+      // Use stopped_at, started_at, or created_at as last activity
+      const lastActivity = agent.stopped_at ?? agent.started_at ?? agent.created_at;
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              id: agent.id,
+              session_id: agent.session_id,
+              task: agent.task ?? "No task",
+              state: agent.state,
+              parent: agent.parent,
+              children_count: children.length,
+              last_activity: lastActivity,
+              recent_status: recentStatus,
+            }),
+          },
+        ],
+      };
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: stop_agent (requires agent.terminate capability)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (shouldRegisterTool("stop_agent")) {
+    server.registerTool("stop_agent", {
+      description: "Stop a child agent in your subtree",
+      inputSchema: StopAgentSchema,
+    }, async (args) => {
     const targetAgent = agentManager.get(args.agent_id);
     if (!targetAgent) {
       throw new MCPToolError(
@@ -729,91 +810,97 @@ export function createMCPServer(
         },
       ],
     };
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: create_task
+  // Tool: create_task (requires task.create capability)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("create_task", {
-    description: "Create a new task",
-    inputSchema: CreateTaskSchema,
-  }, async (args) => {
-    try {
-      const task = taskManager.create({
-        description: args.description,
-        created_by: context.agent_id,
-        parent_task: args.parent_task,
-        inputs: args.inputs,
-      });
+  if (shouldRegisterTool("create_task")) {
+    server.registerTool("create_task", {
+      description: "Create a new task",
+      inputSchema: CreateTaskSchema,
+    }, async (args) => {
+      try {
+        const task = taskManager.create({
+          description: args.description,
+          created_by: context.agent_id,
+          parent_task: args.parent_task,
+          inputs: args.inputs,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                task_id: task.id,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to create task: ${error}`,
+          "INVALID_INPUT"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: get_task (always allowed - observability)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (shouldRegisterTool("get_task")) {
+    server.registerTool("get_task", {
+      description: "Get details of a specific task",
+      inputSchema: GetTaskSchema,
+    }, async (args) => {
+      const task = taskManager.get(args.task_id);
+      if (!task) {
+        throw new MCPToolError(
+          `Task not found: ${args.task_id}`,
+          "TASK_NOT_FOUND"
+        );
+      }
+
+      // Use completed_at, started_at, or created_at as last update
+      const updatedAt = task.completed_at ?? task.started_at ?? task.created_at;
 
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              task_id: task.id,
+              id: task.id,
+              description: task.description,
+              status: task.status,
+              assigned_agent: task.assigned_agent,
+              parent_task: task.parent_task,
+              subtasks: task.subtasks ?? [],
+              inputs: task.inputs,
+              outputs: task.outputs,
+              artifacts: task.artifacts,
+              created_at: task.created_at,
+              updated_at: updatedAt,
             }),
           },
         ],
       };
-    } catch (error) {
-      throw new MCPToolError(
-        `Failed to create task: ${error}`,
-        "INVALID_INPUT"
-      );
-    }
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: get_task
+  // Tool: send_peer_message (requires msg.send capability)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("get_task", {
-    description: "Get details of a specific task",
-    inputSchema: GetTaskSchema,
-  }, async (args) => {
-    const task = taskManager.get(args.task_id);
-    if (!task) {
-      throw new MCPToolError(
-        `Task not found: ${args.task_id}`,
-        "TASK_NOT_FOUND"
-      );
-    }
-
-    // Use completed_at, started_at, or created_at as last update
-    const updatedAt = task.completed_at ?? task.started_at ?? task.created_at;
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            id: task.id,
-            description: task.description,
-            status: task.status,
-            assigned_agent: task.assigned_agent,
-            parent_task: task.parent_task,
-            subtasks: task.subtasks ?? [],
-            inputs: task.inputs,
-            outputs: task.outputs,
-            artifacts: task.artifacts,
-            created_at: task.created_at,
-            updated_at: updatedAt,
-          }),
-        },
-      ],
-    };
-  });
-
-  // ─────────────────────────────────────────────────────────────────
-  // Tool: send_peer_message
-  // ─────────────────────────────────────────────────────────────────
-
-  server.registerTool("send_peer_message", {
-    description: "Send a fire-and-forget message to another macro-agent (peer)",
-    inputSchema: SendPeerMessageSchema,
-  }, async (args) => {
+  if (shouldRegisterTool("send_peer_message")) {
+    server.registerTool("send_peer_message", {
+      description: "Send a fire-and-forget message to another macro-agent (peer)",
+      inputSchema: SendPeerMessageSchema,
+    }, async (args) => {
     if (!peerManager || !peerManager.hasTransport()) {
       throw new MCPToolError(
         "Peer communication not available - no transport registered",
@@ -845,91 +932,267 @@ export function createMCPServer(
         "ROUTING_FAILED"
       );
     }
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: send_peer_request
+  // Tool: send_peer_request (always allowed - needs response)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("send_peer_request", {
-    description: "Send a request to another macro-agent (peer) and wait for response",
-    inputSchema: SendPeerRequestSchema,
-  }, async (args) => {
-    if (!peerManager || !peerManager.hasTransport()) {
-      throw new MCPToolError(
-        "Peer communication not available - no transport registered",
-        "NO_PEER_TRANSPORT"
-      );
-    }
+  if (shouldRegisterTool("send_peer_request")) {
+    server.registerTool("send_peer_request", {
+      description: "Send a request to another macro-agent (peer) and wait for response",
+      inputSchema: SendPeerRequestSchema,
+    }, async (args) => {
+      if (!peerManager || !peerManager.hasTransport()) {
+        throw new MCPToolError(
+          "Peer communication not available - no transport registered",
+          "NO_PEER_TRANSPORT"
+        );
+      }
 
-    try {
-      const response = await peerManager.sendRequest(context.agent_id, args.to, {
-        method: args.method,
-        params: args.params,
-        timeout: args.timeout,
+      try {
+        const response = await peerManager.sendRequest(context.agent_id, args.to, {
+          method: args.method,
+          params: args.params,
+          timeout: args.timeout,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(response),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to send peer request: ${error}`,
+          "ROUTING_FAILED"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: respond_to_peer_request (always allowed - needs to respond)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (shouldRegisterTool("respond_to_peer_request")) {
+    server.registerTool("respond_to_peer_request", {
+      description: "Respond to an incoming peer request",
+      inputSchema: RespondToPeerRequestSchema,
+    }, async (args) => {
+      if (!peerManager) {
+        throw new MCPToolError(
+          "Peer communication not available - no transport registered",
+          "NO_PEER_TRANSPORT"
+        );
+      }
+
+      try {
+        peerManager.respondToRequest(context.agent_id, args.request_id, {
+          result: args.result,
+          error: args.error,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes("not found")) {
+          throw new MCPToolError(
+            `Request not found: ${args.request_id}`,
+            "PEER_REQUEST_NOT_FOUND"
+          );
+        }
+        throw new MCPToolError(
+          `Failed to respond to peer request: ${error}`,
+          "INVALID_INPUT"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: wait_for_activity (always allowed - observability)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (activityWatcher && shouldRegisterTool("wait_for_activity")) {
+    server.registerTool(WAIT_FOR_ACTIVITY_TOOL_INFO.name, {
+      description: WAIT_FOR_ACTIVITY_TOOL_INFO.description,
+      inputSchema: WaitForActivitySchema,
+    }, async (args) => {
+      const handler = createWaitForActivityHandler(context, { activityWatcher });
+
+      try {
+        const result = await handler(args as {
+          event_types?: string[];
+          timeout_ms?: number;
+          scope?: {
+            subtree?: string;
+            role?: string;
+            target_agent?: string;
+          };
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to wait for activity: ${error instanceof Error ? error.message : error}`,
+          "WAIT_FAILED"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: done (requires lifecycle.done capability)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (shouldRegisterTool("done")) {
+    server.registerTool(DONE_TOOL_INFO.name, {
+      description: DONE_TOOL_INFO.description,
+      inputSchema: DoneSchema,
+    }, async (args) => {
+      const doneHandler = createDoneHandler(context, {
+        eventStore,
+        agentManager,
+        messageRouter,
+        taskManager,
       });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(response),
-          },
-        ],
-      };
+      try {
+        const result = await doneHandler(args as {
+          status: "completed" | "failed" | "blocked" | "deferred";
+          summary?: string;
+          details?: Record<string, unknown>;
+          task_id?: string;
+        });
+
+        // If shouldTerminate is true, schedule termination after this tool returns
+        // The agent will be terminated after the tool execution completes
+        if (result.shouldTerminate) {
+          // Schedule termination via agentManager
+          // We use setImmediate to ensure the tool response is sent first
+          setImmediate(async () => {
+            try {
+              await agentManager.terminate(context.agent_id, "completed");
+            } catch (error) {
+              debugLog(`[MCP done] Failed to terminate agent ${context.agent_id}: ${error}`);
+            }
+          });
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to execute done: ${error instanceof Error ? error.message : error}`,
+          "INVALID_INPUT"
+        );
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tool: inject_context (always allowed - parent-to-child communication)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (shouldRegisterTool("inject_context")) {
+    server.registerTool(INJECT_CONTEXT_TOOL_INFO.name, {
+      description: INJECT_CONTEXT_TOOL_INFO.description,
+      inputSchema: InjectContextSchema,
+    }, async (args) => {
+    const handler = createInjectContextHandler(
+      { agentManager, messageRouter },
+      context.agent_id
+    );
+
+    try {
+      const result = await handler(args as {
+        target_agent_id: string;
+        content: string;
+        urgent?: boolean;
+        reason?: string;
+      });
+
+      return formatInjectContextResult(result);
     } catch (error) {
       throw new MCPToolError(
-        `Failed to send peer request: ${error}`,
+        `Failed to inject context: ${error instanceof Error ? error.message : error}`,
         "ROUTING_FAILED"
       );
     }
-  });
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
-  // Tool: respond_to_peer_request
+  // Task Tool Provider (dynamic tools from backend)
   // ─────────────────────────────────────────────────────────────────
 
-  server.registerTool("respond_to_peer_request", {
-    description: "Respond to an incoming peer request",
-    inputSchema: RespondToPeerRequestSchema,
-  }, async (args) => {
-    if (!peerManager) {
-      throw new MCPToolError(
-        "Peer communication not available - no transport registered",
-        "NO_PEER_TRANSPORT"
-      );
-    }
-
-    try {
-      peerManager.respondToRequest(context.agent_id, args.request_id, {
-        result: args.result,
-        error: args.error,
-      });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-            }),
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes("not found")) {
-        throw new MCPToolError(
-          `Request not found: ${args.request_id}`,
-          "PEER_REQUEST_NOT_FOUND"
-        );
+  if (taskToolProvider) {
+    const providerTools = taskToolProvider.getTools();
+    let registeredCount = 0;
+    for (const tool of providerTools) {
+      // Check role permissions for each dynamic tool
+      if (!shouldRegisterTool(tool.name)) {
+        continue;
       }
-      throw new MCPToolError(
-        `Failed to respond to peer request: ${error}`,
-        "INVALID_INPUT"
-      );
+
+      // Use z.record for flexible input since tool providers define their own schemas
+      // The actual validation is done by the tool handler
+      server.registerTool(tool.name, {
+        description: tool.description,
+        inputSchema: {
+          params: z.record(z.string(), z.unknown()).optional()
+            .describe("Tool parameters (validated by the tool handler)"),
+        },
+      }, async (args: { params?: Record<string, unknown> }) => {
+        try {
+          // Pass the params to the handler, or an empty object if not provided
+          const result = await tool.handler(args.params ?? args);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(result),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new MCPToolError(
+            `Failed to execute ${tool.name}: ${error instanceof Error ? error.message : error}`,
+            "INVALID_INPUT"
+          );
+        }
+      });
+      registeredCount++;
     }
-  });
+    debugLog(`[MCP] Registered ${registeredCount}/${providerTools.length} tools from task tool provider (filtered by role)`);
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Server Lifecycle

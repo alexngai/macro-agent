@@ -639,4 +639,177 @@ describe("TaskManager", () => {
       expect(VALID_STATUS_TRANSITIONS.failed).toContain("pending");
     });
   });
+
+  describe("Retry Support", () => {
+    describe("create() with retryPolicy", () => {
+      it("should create task with retry policy", () => {
+        const task = taskManager.create({
+          description: "Retriable task",
+          created_by: "agent_1",
+          retryPolicy: {
+            maxRetries: 3,
+            retryOn: ["failed", "stalled"],
+            backoffMs: 1000,
+            backoffMultiplier: 2,
+            maxBackoffMs: 60000,
+          },
+        });
+
+        expect(task.retryPolicy).toBeDefined();
+        expect(task.retryPolicy?.maxRetries).toBe(3);
+        expect(task.retryPolicy?.retryOn).toEqual(["failed", "stalled"]);
+      });
+
+      it("should create task without retry policy by default", () => {
+        const task = taskManager.create({
+          description: "Non-retriable task",
+          created_by: "agent_1",
+        });
+
+        expect(task.retryPolicy).toBeUndefined();
+      });
+    });
+
+    describe("prepareForRetry()", () => {
+      it("should reset task status to pending", () => {
+        const task = taskManager.create({
+          description: "Failed task",
+          created_by: "agent_1",
+          retryPolicy: {
+            maxRetries: 3,
+            retryOn: ["failed"],
+            backoffMs: 1000,
+            backoffMultiplier: 2,
+            maxBackoffMs: 60000,
+          },
+        });
+
+        taskManager.assign(task.id, "worker_1");
+        taskManager.updateStatus(task.id, "in_progress");
+        taskManager.updateStatus(task.id, "failed");
+
+        taskManager.prepareForRetry(task.id, "Connection timeout");
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.status).toBe("pending");
+      });
+
+      it("should increment retry state attempt count", () => {
+        const task = taskManager.create({
+          description: "Failed task",
+          created_by: "agent_1",
+          retryPolicy: {
+            maxRetries: 3,
+            retryOn: ["failed"],
+            backoffMs: 1000,
+            backoffMultiplier: 2,
+            maxBackoffMs: 60000,
+          },
+        });
+
+        taskManager.assign(task.id, "worker_1");
+        taskManager.updateStatus(task.id, "in_progress");
+        taskManager.updateStatus(task.id, "failed");
+
+        taskManager.prepareForRetry(task.id, "Connection timeout");
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.retryState?.attemptCount).toBe(1);
+        expect(updated?.retryState?.lastError).toBe("Connection timeout");
+      });
+
+      it("should accumulate retry attempts", () => {
+        const task = taskManager.create({
+          description: "Flaky task",
+          created_by: "agent_1",
+          retryPolicy: {
+            maxRetries: 5,
+            retryOn: ["failed"],
+            backoffMs: 1000,
+            backoffMultiplier: 2,
+            maxBackoffMs: 60000,
+          },
+        });
+
+        // First attempt + retry
+        taskManager.assign(task.id, "worker_1");
+        taskManager.updateStatus(task.id, "in_progress");
+        taskManager.updateStatus(task.id, "failed");
+        taskManager.prepareForRetry(task.id, "Error 1");
+
+        // Second attempt + retry
+        taskManager.assign(task.id, "worker_2");
+        taskManager.updateStatus(task.id, "in_progress");
+        taskManager.updateStatus(task.id, "failed");
+        taskManager.prepareForRetry(task.id, "Error 2");
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.retryState?.attemptCount).toBe(2);
+        expect(updated?.retryState?.lastError).toBe("Error 2");
+      });
+
+      it("should set nextRetryAt if provided", () => {
+        const task = taskManager.create({
+          description: "Failed task",
+          created_by: "agent_1",
+        });
+
+        const nextRetryAt = Date.now() + 5000;
+        taskManager.prepareForRetry(task.id, "Error", nextRetryAt);
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.retryState?.nextRetryAt).toBe(nextRetryAt);
+      });
+
+      it("should throw for non-existent task", () => {
+        expect(() => {
+          taskManager.prepareForRetry("nonexistent");
+        }).toThrow(TaskManagerError);
+      });
+
+      it("should clear assigned agent", () => {
+        const task = taskManager.create({
+          description: "Failed task",
+          created_by: "agent_1",
+        });
+
+        taskManager.assign(task.id, "worker_1");
+        taskManager.updateStatus(task.id, "in_progress");
+        taskManager.updateStatus(task.id, "failed");
+
+        taskManager.prepareForRetry(task.id);
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.assigned_agent).toBeUndefined();
+      });
+    });
+
+    describe("updateRetryState()", () => {
+      it("should update retry state", () => {
+        const task = taskManager.create({
+          description: "Test task",
+          created_by: "agent_1",
+        });
+
+        taskManager.updateRetryState(task.id, {
+          attemptCount: 2,
+          lastAttemptAt: Date.now(),
+          lastError: "Some error",
+        });
+
+        const updated = taskManager.get(task.id);
+        expect(updated?.retryState?.attemptCount).toBe(2);
+        expect(updated?.retryState?.lastError).toBe("Some error");
+      });
+
+      it("should throw for non-existent task", () => {
+        expect(() => {
+          taskManager.updateRetryState("nonexistent", {
+            attemptCount: 1,
+            lastAttemptAt: Date.now(),
+          });
+        }).toThrow(TaskManagerError);
+      });
+    });
+  });
 });

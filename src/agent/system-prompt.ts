@@ -6,6 +6,7 @@
  */
 
 import type { SystemPromptContext } from "./types.js";
+import { generateCoordinatorSignalHandlingSection } from "./prompts/coordinator-signals.js";
 
 /**
  * Generate a system prompt for an agent
@@ -46,6 +47,11 @@ export function generateSystemPrompt(context: SystemPromptContext): string {
 
   // ── Guidelines Section ────────────────────────────────────────
   sections.push(generateGuidelinesSection(isHeadManager));
+
+  // ── Role-Specific Sections ───────────────────────────────────
+  if (context.role === "coordinator") {
+    sections.push(generateCoordinatorSignalHandlingSection());
+  }
 
   return sections.join("\n\n");
 }

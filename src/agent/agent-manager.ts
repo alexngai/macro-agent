@@ -38,7 +38,46 @@ import type {
   AgentConfig,
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
+import type { RoleRegistry, Capability } from "../roles/types.js";
+import { AGENT_CAPABILITIES } from "../roles/capabilities.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
 import { generateSystemPrompt } from "./system-prompt.js";
+import type { WorkspaceManager, Workspace } from "../workspace/types.js";
+import {
+  terminateWithChangeConsolidation,
+  type WorkspaceProvider,
+  type CascadeAgentManager,
+} from "../lifecycle/cascade.js";
+import type { HealthCheckService } from "../monitor/health-check-service.js";
+
+// ─────────────────────────────────────────────────────────────────
+// Helper Functions
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Map a child role name to the required spawn capability.
+ * Handles subroles like "worker.resolver" by checking base role.
+ */
+function getSpawnCapability(childRole: string): Capability {
+  // Extract base role (e.g., "worker.resolver" -> "worker")
+  const baseRole = childRole.split(".")[0];
+
+  switch (baseRole) {
+    case "worker":
+      return AGENT_CAPABILITIES.SPAWN_WORKER;
+    case "integrator":
+      return AGENT_CAPABILITIES.SPAWN_INTEGRATOR;
+    case "monitor":
+      return AGENT_CAPABILITIES.SPAWN_MONITOR;
+    case "coordinator":
+      // Coordinators require special handling - typically only other coordinators
+      // or system-level agents can spawn coordinators
+      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+    default:
+      // For custom roles, check against the custom spawn capability
+      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // AgentManager Interface
@@ -123,6 +162,18 @@ export interface AgentManager {
    */
   hasActiveSession(agentId: AgentId): boolean;
 
+  /**
+   * Check if an agent is currently processing a prompt.
+   * Returns false if no session or session is idle.
+   */
+  isPrompting(agentId: AgentId): boolean;
+
+  /**
+   * Check if an agent's session supports context injection.
+   * Returns false if no session or injection not supported.
+   */
+  supportsInjection(agentId: AgentId): Promise<boolean>;
+
   // ── Permission Handling ─────────────────────────────────────────
 
   /**
@@ -177,6 +228,28 @@ export interface AgentManagerConfig {
 
   /** Default working directory */
   defaultCwd?: string;
+
+  /**
+   * Optional WorkspaceManager for workspace isolation.
+   * When provided, agents with workspace-enabled roles will get
+   * isolated git worktrees.
+   */
+  workspaceManager?: WorkspaceManager;
+
+  /**
+   * Optional RoleRegistry for capability enforcement.
+   * When provided, spawn operations will check if the parent agent
+   * has the required capability to spawn the requested child role.
+   * Defaults to DefaultRoleRegistry if not provided.
+   */
+  roleRegistry?: RoleRegistry;
+
+  /**
+   * Optional HealthCheckService for monitoring coordinator health.
+   * When provided, health checks will automatically start/stop
+   * with coordinator agent lifecycle.
+   */
+  healthCheckService?: HealthCheckService;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -192,10 +265,16 @@ export function createAgentManager(
     defaultPermissionMode = "auto-approve",
     defaultAgentType = "claude-code",
     defaultCwd = process.cwd(),
+    workspaceManager,
+    roleRegistry = new DefaultRoleRegistry(),
+    healthCheckService,
   } = config;
 
   // Active sessions tracked in memory
   const activeSessions = new Map<AgentId, ActiveSession>();
+
+  // Agent workspace mappings (agentId → workspace)
+  const agentWorkspaces = new Map<AgentId, Workspace>();
 
   // Lifecycle event listeners
   const lifecycleListeners = new Set<AgentLifecycleCallback>();
@@ -215,6 +294,11 @@ export function createAgentManager(
       topics = [],
       config: agentConfig,
       agentType = defaultAgentType,
+      // Workspace-related fields (Phase 2)
+      role,
+      streamId,
+      streamConfig,
+      dataplaneTaskId,
     } = options;
 
     // Generate IDs upfront (including session_id so we can persist before starting MCP)
@@ -229,6 +313,20 @@ export function createAgentManager(
         throw new AgentManagerError(
           `Parent agent not found: ${parent}`,
           "AGENT_NOT_FOUND",
+          parent
+        );
+      }
+
+      // Check spawn capability
+      const childRole = role ?? "worker";
+      const requiredCapability = getSpawnCapability(childRole);
+      const parentRole = parentAgent.role ?? "worker";
+
+      if (!roleRegistry.hasCapability(parentRole, requiredCapability)) {
+        throw new AgentManagerError(
+          `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
+            `Required capability: ${requiredCapability}`,
+          "CAPABILITY_DENIED",
           parent
         );
       }
@@ -267,6 +365,7 @@ export function createAgentManager(
         task,
         task_id: taskId,
         parent: parent ?? null,
+        role: role ?? undefined,
         config: agentConfig ?? {},
         cwd,
       },
@@ -346,6 +445,7 @@ export function createAgentManager(
         task_id: taskId,
         subscribe_parent: subscribeParent,
         additional_topics: topics,
+        role: role ?? undefined,
       });
 
       // Track active session
@@ -361,15 +461,69 @@ export function createAgentManager(
       // Get the agent from materialized view
       const agent = eventStore.getAgent(agentId)!;
 
+      // ─────────────────────────────────────────────────────────────────
+      // Workspace Creation (Phase 2)
+      // ─────────────────────────────────────────────────────────────────
+      let workspace: Workspace | undefined;
+      let resolvedStreamId = streamId;
+
+      if (workspaceManager && role) {
+        try {
+          workspace = await createWorkspaceForRole(
+            workspaceManager,
+            agentId,
+            role,
+            {
+              streamId,
+              streamConfig,
+              dataplaneTaskId,
+              cwd,
+            }
+          );
+
+          if (workspace) {
+            agentWorkspaces.set(agentId, workspace);
+            resolvedStreamId = workspace.streamId;
+
+            // Register with parent coordinator if applicable
+            if (
+              parent &&
+              (role === "worker" || role === "integrator")
+            ) {
+              const parentWorkspace = agentWorkspaces.get(parent);
+              if (parentWorkspace?.role === "coordinator") {
+                workspaceManager.registerChildWorkspace(
+                  parent,
+                  agentId,
+                  workspace.path
+                );
+              }
+            }
+          }
+        } catch (wsError) {
+          console.error(
+            `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`
+          );
+          // Continue without workspace - don't fail the spawn
+        }
+      }
+
       // Notify lifecycle listeners
       notifyLifecycle({ type: "spawned", agent });
       notifyLifecycle({ type: "started", agent });
+
+      // Start health monitoring for coordinators
+      if (healthCheckService && role === "coordinator") {
+        healthCheckService.startForCoordinator(agentId);
+      }
 
       return {
         id: agentId,
         session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
         agent,
         session,
+        workspace,
+        streamId: resolvedStreamId,
       };
     } catch (error) {
       // Clean up the spawn event we already emitted
@@ -414,6 +568,26 @@ export function createAgentManager(
       activeSessions.delete(agentId);
     }
 
+    // Stop health monitoring for coordinators
+    if (healthCheckService && agent.role === "coordinator") {
+      healthCheckService.stopForCoordinator(agentId);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Workspace Cleanup (Phase 2)
+    // ─────────────────────────────────────────────────────────────────
+    if (workspaceManager && agentWorkspaces.has(agentId)) {
+      try {
+        workspaceManager.deallocateWorkspace(agentId);
+        agentWorkspaces.delete(agentId);
+      } catch (wsError) {
+        console.error(
+          `[AgentManager] Failed to deallocate workspace for ${agentId}: ${wsError}`
+        );
+        // Continue with termination even if workspace cleanup fails
+      }
+    }
+
     // Emit terminate event
     eventStore.emit({
       type: "terminate",
@@ -452,10 +626,39 @@ export function createAgentManager(
     notifyLifecycle({ type: "stopped", agent: updatedAgent, reason });
 
     // Terminate child agents when parent stops (always cascade)
+    // Use change consolidation to merge child branches back to parent before terminating
     const children = getChildren(agentId);
+    const parentWorkspace = agentWorkspaces.get(agentId);
+
     for (const child of children) {
       if (child.state === "running" || child.state === "spawning") {
-        await terminate(child.id, "parent_stopped");
+        // Create workspace provider for change consolidation
+        const workspaceProvider: WorkspaceProvider | undefined = parentWorkspace
+          ? {
+              getWorkspace: (id: AgentId) => agentWorkspaces.get(id) ?? null,
+            }
+          : undefined;
+
+        // Create cascade adapter for termination
+        const cascadeAdapter: CascadeAgentManager = {
+          getChildren: (id) =>
+            getChildren(id).map((c) => ({
+              id: c.id,
+              state: c.state,
+              parent: c.parent,
+            })),
+          terminate: async (id, terminateReason) => {
+            await terminate(id, terminateReason as AgentStopReason);
+          },
+        };
+
+        // Use terminateWithChangeConsolidation to merge changes before terminating
+        await terminateWithChangeConsolidation(
+          child.id,
+          agentId,
+          cascadeAdapter,
+          workspaceProvider
+        );
       }
     }
   }
@@ -694,6 +897,25 @@ export function createAgentManager(
     return activeSessions.has(agentId);
   }
 
+  function isPrompting(agentId: AgentId): boolean {
+    const activeSession = activeSessions.get(agentId);
+    return activeSession?.isPrompting ?? false;
+  }
+
+  async function supportsInjection(agentId: AgentId): Promise<boolean> {
+    const session = getSession(agentId);
+    if (!session) {
+      return false;
+    }
+    // Check if the session supports injection
+    // Uses acp-factory's supportsInject() which returns cached/estimated result
+    try {
+      return session.supportsInject();
+    } catch {
+      return false;
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Permission Handling
   // ─────────────────────────────────────────────────────────────────
@@ -774,6 +996,11 @@ export function createAgentManager(
   // ─────────────────────────────────────────────────────────────────
 
   async function close(): Promise<void> {
+    // Stop all health checks
+    if (healthCheckService) {
+      healthCheckService.stopAll();
+    }
+
     // Close all active sessions
     const closePromises: Promise<void>[] = [];
     for (const [agentId, session] of activeSessions) {
@@ -806,9 +1033,101 @@ export function createAgentManager(
     prompt,
     getSession,
     hasActiveSession,
+    isPrompting,
+    supportsInjection,
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,
     close,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Workspace Creation Helper (Phase 2)
+// ─────────────────────────────────────────────────────────────────
+
+interface CreateWorkspaceOptions {
+  streamId?: string;
+  streamConfig?: import("../workspace/types.js").StreamConfig;
+  dataplaneTaskId?: string;
+  cwd: string;
+}
+
+/**
+ * Create a workspace for an agent based on their role.
+ *
+ * @param workspaceManager - WorkspaceManager instance
+ * @param agentId - Agent ID
+ * @param role - Agent role (e.g., 'worker', 'coordinator', 'integrator')
+ * @param options - Additional options
+ * @returns Created workspace or undefined
+ */
+async function createWorkspaceForRole(
+  workspaceManager: WorkspaceManager,
+  agentId: AgentId,
+  role: string,
+  options: CreateWorkspaceOptions
+): Promise<Workspace | undefined> {
+  const { streamId, streamConfig, dataplaneTaskId } = options;
+
+  switch (role) {
+    case "coordinator": {
+      // Coordinators create a new integration stream
+      if (!streamConfig) {
+        console.warn(
+          `[AgentManager] Coordinator ${agentId} spawn missing streamConfig, skipping workspace`
+        );
+        return undefined;
+      }
+
+      const newStreamId = workspaceManager.createIntegrationStream(
+        agentId,
+        streamConfig
+      );
+
+      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+    }
+
+    case "integrator": {
+      // Integrators join an existing stream
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] Integrator ${agentId} spawn missing streamId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+    }
+
+    case "worker":
+    case "worker.resolver": {
+      // Workers need streamId and either dataplaneTaskId or create a new task
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] Worker ${agentId} spawn missing streamId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      // Use provided task ID or skip (task should be created separately)
+      const taskId = dataplaneTaskId;
+      if (!taskId) {
+        console.warn(
+          `[AgentManager] Worker ${agentId} spawn missing dataplaneTaskId, skipping workspace`
+        );
+        return undefined;
+      }
+
+      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+    }
+
+    case "monitor":
+      // Monitors don't need workspaces
+      return undefined;
+
+    default:
+      // Unknown role - no workspace
+      return undefined;
+  }
 }

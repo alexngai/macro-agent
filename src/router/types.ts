@@ -15,6 +15,26 @@ export interface MessageTarget {
   agent_id?: AgentId; // Direct to agent
   task_id?: TaskId; // To task's assigned agent
   topic?: string; // To topic subscribers
+  // Extended channel types (Phase 5)
+  broadcast?: BroadcastTarget; // Fan-out to all or scoped agents
+  role?: RoleTarget; // Fan-out to agents by role
+}
+
+// Broadcast target configuration
+export interface BroadcastTarget {
+  /** Scope of broadcast: 'all', 'coordinators', 'workers', 'monitors' */
+  scope?: BroadcastScope;
+}
+
+// Broadcast scope options
+export type BroadcastScope = "all" | "coordinators" | "workers" | "monitors";
+
+// Role target configuration
+export interface RoleTarget {
+  /** Role name to target (e.g., "worker", "integrator", "monitor") */
+  role: string;
+  /** Optional: scope to specific coordinator's agents */
+  coordinatorId?: AgentId;
 }
 
 // Message sender identification
@@ -23,12 +43,19 @@ export interface MessageSender {
   task_id?: TaskId; // Optional task context
 }
 
+// Message priority levels
+export type MessagePriority = "low" | "normal" | "high" | "urgent";
+
+// Wake action determined by priority
+export type WakeAction = "wake" | "inject" | "interrupt" | "queue";
+
 // Send message request
 export interface SendMessageRequest {
   from: MessageSender;
   to: MessageTarget;
   content: string;
   correlation_id?: string; // For threading/reply tracking
+  priority?: MessagePriority; // Default: 'normal'
 }
 
 // Sent message result
@@ -64,7 +91,8 @@ export type ChannelType =
   | "lineage" // Messages from ancestors (child subscribes to receive from parents)
   | "subtree" // Events from descendants (parent subscribes to receive from children)
   | "topic" // Topic-based pub/sub
-  | "broadcast"; // System-wide broadcasts
+  | "broadcast" // System-wide broadcasts
+  | "role"; // Role-based pub/sub (Phase 5)
 
 // Channel specification
 export interface Channel {
@@ -79,6 +107,8 @@ export interface DefaultSubscriptionOptions {
   task_id?: TaskId;
   subscribe_parent?: boolean; // Default true - parent subscribes to child's subtree
   additional_topics?: string[];
+  /** Agent's role for auto-subscription to role channel */
+  role?: string;
 }
 
 // Status types for agent lifecycle

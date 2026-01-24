@@ -242,9 +242,11 @@ describe("WebSocket ACP Integration", () => {
         await client.connect();
         expect(client.isConnected).toBe(true);
         client.close();
-        await new Promise((r) => setTimeout(r, 20));
+        await client.waitForClose();
       }
 
+      // Allow time for server to process the last close event
+      await new Promise((r) => setTimeout(r, 50));
       expect(server.getConnectionCount()).toBe(0);
     });
   });

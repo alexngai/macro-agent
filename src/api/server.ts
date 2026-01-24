@@ -40,7 +40,14 @@ import type {
   WSSubscribeMessage,
   WSAgentUpdate,
   WSTaskUpdate,
+  InjectContextRequest,
+  InjectContextResponse,
 } from "./types.js";
+import {
+  injectContext,
+  type InjectionDeps,
+} from "../steering/index.js";
+import type { AgentId } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Server Configuration
@@ -608,6 +615,77 @@ export function createAPIServer(
     res.json(response);
   });
 
+  // POST /api/agents/:id/inject - Inject context into agent session
+  app.post("/api/agents/:id/inject", async (req: Request, res: Response) => {
+    const id = req.params.id as AgentId;
+    const body = req.body as InjectContextRequest;
+
+    // Validate content
+    if (!body.content) {
+      return sendError(res, 400, "MISSING_CONTENT", "Content is required");
+    }
+
+    // Check agent exists
+    const agent = agentManager.get(id);
+    if (!agent) {
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
+    }
+
+    // Create injection deps
+    const injectionDeps: InjectionDeps = {
+      getSession(agentId: AgentId) {
+        const session = agentManager.getSession(agentId);
+        if (!session) return null;
+        return {
+          inject: async (content: string) => session.inject(content),
+          supportsInject: () => session.supportsInject(),
+          checkInjectSupport: async () => session.supportsInject(),
+          interruptWith: (content: string) => session.interruptWith(content),
+        };
+      },
+      isPrompting(agentId: AgentId) {
+        return agentManager.isPrompting(agentId);
+      },
+      async sendMessage(
+        _fromAgentId: AgentId | undefined,
+        toAgentId: AgentId,
+        content: string,
+        priority: "high"
+      ) {
+        await services.messageRouter.send({
+          from: { agent_id: "__human__" as AgentId },
+          to: { agent_id: toAgentId },
+          content,
+          priority,
+        });
+      },
+    };
+
+    try {
+      const result = await injectContext(injectionDeps, id, body.content, {
+        urgent: body.urgent,
+        allowInterrupt: true,
+        source: { type: "human" },
+        reason: body.reason,
+      });
+
+      const response: InjectContextResponse = {
+        success: result.success,
+        method: result.method,
+        error: result.error,
+        note: result.note,
+      };
+
+      if (result.success) {
+        res.json(response);
+      } else {
+        res.status(500).json(response);
+      }
+    } catch (error) {
+      sendError(res, 500, "INJECTION_FAILED", `Failed to inject context: ${error}`);
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────
   // HTTP Server
   // ─────────────────────────────────────────────────────────────────
@@ -822,11 +900,11 @@ export function createAPIServer(
  * @returns Express app
  */
 export function createAPIApp(
-  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager">,
+  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter">,
   config: { cors?: boolean } = {}
 ): Express {
   const { cors = true } = config;
-  const { agentManager, taskManager } = services;
+  const { agentManager, taskManager, messageRouter } = services;
 
   // Create shared state
   const state = createAPISharedState();
@@ -1242,6 +1320,77 @@ export function createAPIApp(
     };
 
     res.json(response);
+  });
+
+  // POST /api/agents/:id/inject - Inject context into agent session
+  app.post("/api/agents/:id/inject", async (req: Request, res: Response) => {
+    const id = req.params.id as AgentId;
+    const body = req.body as InjectContextRequest;
+
+    // Validate content
+    if (!body.content) {
+      return sendError(res, 400, "MISSING_CONTENT", "Content is required");
+    }
+
+    // Check agent exists
+    const agent = agentManager.get(id);
+    if (!agent) {
+      return sendError(res, 404, "AGENT_NOT_FOUND", `Agent not found: ${id}`);
+    }
+
+    // Create injection deps
+    const injectionDeps: InjectionDeps = {
+      getSession(agentId: AgentId) {
+        const session = agentManager.getSession(agentId);
+        if (!session) return null;
+        return {
+          inject: async (content: string) => session.inject(content),
+          supportsInject: () => session.supportsInject(),
+          checkInjectSupport: async () => session.supportsInject(),
+          interruptWith: (content: string) => session.interruptWith(content),
+        };
+      },
+      isPrompting(agentId: AgentId) {
+        return agentManager.isPrompting(agentId);
+      },
+      async sendMessage(
+        _fromAgentId: AgentId | undefined,
+        toAgentId: AgentId,
+        content: string,
+        priority: "high"
+      ) {
+        await messageRouter.send({
+          from: { agent_id: "__human__" as AgentId },
+          to: { agent_id: toAgentId },
+          content,
+          priority,
+        });
+      },
+    };
+
+    try {
+      const result = await injectContext(injectionDeps, id, body.content, {
+        urgent: body.urgent,
+        allowInterrupt: true,
+        source: { type: "human" },
+        reason: body.reason,
+      });
+
+      const response: InjectContextResponse = {
+        success: result.success,
+        method: result.method,
+        error: result.error,
+        note: result.note,
+      };
+
+      if (result.success) {
+        res.json(response);
+      } else {
+        res.status(500).json(response);
+      }
+    } catch (error) {
+      sendError(res, 500, "INJECTION_FAILED", `Failed to inject context: ${error}`);
+    }
   });
 
   return app;

@@ -5,11 +5,37 @@ A multi-agent orchestration system for spawning and managing hierarchical Claude
 ## Features
 
 - **Hierarchical Agent Management** - Head manager spawns and coordinates child agents
+- **Role-Based Agents** - Worker, Integrator, Coordinator, and Monitor roles with distinct capabilities
+- **Workspace Isolation** - Each worker gets isolated git worktrees to prevent conflicts
+- **Merge Queue** - Serialized integration of worker changes with conflict resolution
 - **Event-Sourced State** - All state changes persisted via append-only event log
 - **Real-time Communication** - WebSocket subscriptions for live updates
 - **MCP Tool Integration** - Agents communicate via Model Context Protocol tools
 - **Task Lifecycle** - Create, assign, and track tasks across agents
-- **Message Routing** - Parent-child and topic-based message delivery
+- **Message Routing** - Direct, broadcast, and role-based message delivery with priority
+- **Context Injection** - Push context into running agents without waiting for message checks
+- **Sudocode Integration** - Optional issue tracking with dependency management
+
+## Sudocode Integration
+
+macro-agent can integrate with [sudocode](https://github.com/sudocode-ai/sudocode) for external issue tracking:
+
+```bash
+# Enable sudocode backend
+export MACRO_TASK_BACKEND=sudocode
+export SUDOCODE_PROJECT_PATH=/path/to/project
+
+# Start macro-agent
+npx multiagent start
+```
+
+With sudocode enabled:
+- Tasks are bound to sudocode issues via `external_id`
+- Blocking relationships come from sudocode's issue links
+- `listReady()` returns only tasks with no incomplete blockers
+- Task status can sync with issue status
+
+See [docs/sudocode-integration.md](docs/sudocode-integration.md) for full documentation.
 
 ## Installation
 
@@ -114,6 +140,66 @@ server.listen(3000);
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Role System
+
+Agents are assigned roles that determine their capabilities:
+
+| Role | Purpose | Key Capabilities |
+|------|---------|------------------|
+| **Worker** | Execute tasks in isolated workspace | File I/O, git operations, task completion |
+| **Integrator** | Manage merge queue and resolve conflicts | Merge operations, branch management |
+| **Coordinator** | Orchestrate workers and manage tasks | Spawn agents, assign tasks, broadcast |
+| **Monitor** | Health monitoring and alerts | Read-only access, activity watching |
+
+```typescript
+// Spawn a worker agent
+const worker = await agentManager.spawn({
+  task: 'Implement feature X',
+  role: 'worker',
+  parent: headManagerId,
+});
+```
+
+## Workspace Isolation
+
+Each worker operates in an isolated git worktree:
+
+```
+Main Repository
+├── .worktrees/
+│   ├── worker-01/  → feature/task-123 (Worker A)
+│   ├── worker-02/  → feature/task-456 (Worker B)
+│   └── worker-03/  → feature/task-789 (Worker C)
+└── integration     → Merge queue target
+```
+
+- Workers cannot affect each other's work
+- Changes merge through the queue in order
+- Conflicts detected and resolved by Integrator
+
+## Context Injection
+
+Push context into running agents without waiting for message checks:
+
+```typescript
+// Via API
+await fetch('/api/agents/{agentId}/inject', {
+  method: 'POST',
+  body: JSON.stringify({
+    content: 'Priority change: pause current work',
+    urgent: true,
+  }),
+});
+
+// Via MCP tool (agent-to-agent)
+await injectContext(deps, targetAgentId, 'Build is failing', {
+  urgent: true,
+  reason: 'CI failure detected',
+});
+```
+
+Fallback chain: `inject()` → `interruptWith()` → high-priority message
+
 ## API Reference
 
 ### REST Endpoints
@@ -125,6 +211,7 @@ server.listen(3000);
 | `/api/agents` | GET | List all agents |
 | `/api/agents/:id` | GET | Get agent details |
 | `/api/agents/:id/hierarchy` | GET | Get agent hierarchy |
+| `/api/agents/:id/inject` | POST | Inject context into agent |
 | `/api/tasks` | GET | List all tasks |
 | `/api/tasks/:id` | GET | Get task details |
 | `/api/events` | GET | List events |
@@ -151,6 +238,10 @@ server.listen(3000);
 | `stop_agent` | Terminate an agent |
 | `create_task` | Create a new task |
 | `get_task` | Get task details |
+| `list_ready_tasks` | List tasks with no blockers |
+| `done` | Signal task completion (role-specific) |
+| `inject_context` | Inject context into another agent |
+| `wait_for_activity` | Wait for system events (Monitor) |
 
 ## ACP Mode (Agent Communication Protocol)
 
@@ -288,9 +379,16 @@ npm run build
 # Run tests
 npm test
 
-# Run integration tests (requires ANTHROPIC_API_KEY)
-ANTHROPIC_API_KEY=xxx npm test -- src/__tests__/integration.test.ts
+# Run E2E tests (requires ANTHROPIC_API_KEY)
+RUN_E2E_TESTS=true ANTHROPIC_API_KEY=xxx npm run test:e2e
 ```
+
+## Documentation
+
+- [Architecture Overview](docs/architecture.md) - Full system architecture
+- [Configuration Reference](docs/configuration.md) - Environment variables and config options
+- [Sudocode Integration](docs/sudocode-integration.md) - External issue tracking
+- [Troubleshooting Guide](docs/troubleshooting.md) - Common issues and solutions
 
 ## License
 

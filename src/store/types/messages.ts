@@ -22,7 +22,8 @@ export type SubscriptionType =
   | "lineage"
   | "subtree"
   | "topic"
-  | "broadcast";
+  | "broadcast"
+  | "role";
 
 // Subscription record
 export interface Subscription {

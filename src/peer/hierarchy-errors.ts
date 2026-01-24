@@ -112,14 +112,14 @@ const ERROR_CODE_TO_NAME: Record<HierarchyErrorCode, HierarchyErrorName> = {
  */
 export class HierarchyError extends Error {
   /** Numeric error code */
-  readonly code: HierarchyErrorCode;
+  readonly errorCode: HierarchyErrorCode;
   /** Additional error data */
   readonly data?: unknown;
 
   constructor(code: HierarchyErrorCode, message: string, data?: unknown) {
     super(message);
     this.name = "HierarchyError";
-    this.code = code;
+    this.errorCode = code;
     this.data = data;
   }
 
@@ -127,7 +127,7 @@ export class HierarchyError extends Error {
    * Get the error name (e.g., "CAPABILITY_DENIED")
    */
   get errorName(): HierarchyErrorName {
-    return ERROR_CODE_TO_NAME[this.code];
+    return ERROR_CODE_TO_NAME[this.errorCode];
   }
 
   /**
@@ -135,7 +135,7 @@ export class HierarchyError extends Error {
    */
   toResponseError(): { code: number; message: string; data?: unknown } {
     return {
-      code: this.code,
+      code: this.errorCode,
       message: this.errorName,
       data: this.data,
     };

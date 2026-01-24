@@ -35,6 +35,8 @@ export class SessionMapper {
       isMounted: false,
       createdAt: now,
       updatedAt: now,
+      isProcessing: false,
+      lastProcessingChangeAt: now,
     };
 
     this.mappings.set(acpSessionId, mapping);
@@ -185,6 +187,43 @@ export class SessionMapper {
       }
     }
     return sessions;
+  }
+
+  /**
+   * Update the processing status of a session
+   *
+   * Called when a prompt starts (isProcessing=true) or ends (isProcessing=false).
+   * Used by health monitoring to detect idle vs active sessions.
+   *
+   * @param acpSessionId - The ACP session ID
+   * @param isProcessing - Whether the session is currently processing a prompt
+   */
+  setProcessing(acpSessionId: ACPSessionId, isProcessing: boolean): void {
+    const mapping = this.mappings.get(acpSessionId);
+    if (mapping && mapping.isProcessing !== isProcessing) {
+      mapping.isProcessing = isProcessing;
+      mapping.lastProcessingChangeAt = Date.now();
+      mapping.updatedAt = Date.now();
+    }
+  }
+
+  /**
+   * Get the session status for an agent (for health monitoring)
+   *
+   * @param agentId - The agent ID to get session status for
+   * @returns Session status or undefined if no session mapped
+   */
+  getSessionStatus(agentId: AgentId): { isProcessing: boolean; sessionId: ACPSessionId; lastProcessingChangeAt: number } | undefined {
+    for (const [sessionId, mapping] of this.mappings) {
+      if (mapping.agentId === agentId) {
+        return {
+          isProcessing: mapping.isProcessing,
+          sessionId,
+          lastProcessingChangeAt: mapping.lastProcessingChangeAt,
+        };
+      }
+    }
+    return undefined;
   }
 
   /**

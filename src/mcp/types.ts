@@ -340,7 +340,8 @@ export type MCPToolErrorCode =
   | "ROUTING_FAILED"
   | "NOT_IN_SUBTREE"
   | "NO_PEER_TRANSPORT"
-  | "PEER_REQUEST_NOT_FOUND";
+  | "PEER_REQUEST_NOT_FOUND"
+  | "WAIT_FAILED";
 
 // ─────────────────────────────────────────────────────────────────
 // Peer Communication Tool Types

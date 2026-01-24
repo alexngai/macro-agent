@@ -17,6 +17,7 @@ import type { TaskManager } from "../task/task-manager.js";
 import type { MessageRouter } from "../router/message-router.js";
 import type { PeerManager } from "../peer/peer-manager.js";
 import type { CapabilityManager } from "../peer/capability-manager.js";
+import type { ActivityWatcher } from "../activity/watcher.js";
 import { setupACPWebSocket } from "../acp/websocket-server.js";
 import { createAPIApp, setupAPIWebSocket } from "../api/server.js";
 
@@ -31,6 +32,8 @@ export interface CombinedServerServices {
   messageRouter: MessageRouter;
   peerManager?: PeerManager;
   capabilityManager?: CapabilityManager;
+  /** Optional activity watcher for event-driven waking */
+  activityWatcher?: ActivityWatcher;
 }
 
 export interface CombinedServerConfig {
