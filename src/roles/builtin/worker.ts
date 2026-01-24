@@ -112,7 +112,7 @@ export const ResolverWorkerRole: RoleDefinition = {
 
   protocol: {
     subscriptions: ["WORK_ASSIGNED", "HEALTH_CHECK"],
-    canEmit: ["WORKER_DONE", "MERGE_REQUEST"],
+    canEmit: ["WORKER_DONE", "RESOLVER_DONE"],
   },
 
   systemPrompt: `You are a resolver worker. Your job is to:

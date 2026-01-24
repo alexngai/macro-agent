@@ -450,6 +450,108 @@ describe("handlers", () => {
 
       expect(mockMergeQueue.submit).not.toHaveBeenCalled();
     });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Resolver Worker Tests (worker.resolver role)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    it("should emit RESOLVER_DONE instead of MERGE_REQUEST for resolver workers", async () => {
+      mockGetCurrentBranch.mockReturnValue("resolver/mr-123@1700000000");
+
+      const mockMergeQueue = {
+        submit: vi.fn(),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "resolver-1",
+        role: "worker.resolver", // Resolver role
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+        mrId: "mr-123", // MR being resolved
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should emit RESOLVER_DONE, not MERGE_REQUEST
+      expect(result.signalsEmitted).toContain("RESOLVER_DONE");
+      expect(result.signalsEmitted).not.toContain("MERGE_REQUEST");
+
+      // Should NOT submit to merge queue
+      expect(mockMergeQueue.submit).not.toHaveBeenCalled();
+
+      // Verify RESOLVER_DONE signal details
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status_type: "completed",
+          details: expect.objectContaining({
+            signal: "RESOLVER_DONE",
+            mrId: "mr-123",
+            resolverBranch: "resolver/mr-123@1700000000",
+            resolverId: "resolver-1",
+          }),
+        })
+      );
+    });
+
+    it("should not emit RESOLVER_DONE for regular workers", async () => {
+      mockGetCurrentBranch.mockReturnValue("worker/agent-1/task-1@123");
+
+      const mockMergeQueue = {
+        submit: vi.fn().mockReturnValue("mr-456"),
+      };
+
+      const deps = {
+        ...createMockDeps(),
+        mergeQueue: mockMergeQueue,
+      };
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker", // Regular worker role
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should emit MERGE_REQUEST, not RESOLVER_DONE
+      expect(result.signalsEmitted).toContain("MERGE_REQUEST");
+      expect(result.signalsEmitted).not.toContain("RESOLVER_DONE");
+
+      // Should submit to merge queue
+      expect(mockMergeQueue.submit).toHaveBeenCalled();
+    });
+
+    it("should handle resolver without mrId gracefully", async () => {
+      mockGetCurrentBranch.mockReturnValue("resolver/mr-123@1700000000");
+
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "resolver-1",
+        role: "worker.resolver",
+        taskId: "task-1",
+        workspacePath: "/path/to/workspace",
+        // No mrId - edge case
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should still emit RESOLVER_DONE
+      expect(result.signalsEmitted).toContain("RESOLVER_DONE");
+      // Should complete without error
+      expect(result.shouldTerminate).toBe(true);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────

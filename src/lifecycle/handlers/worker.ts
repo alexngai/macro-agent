@@ -33,6 +33,7 @@ import {
   needsCascadeTermination,
   type CascadeAgentManager,
 } from "../cascade.js";
+import { handleResolverDone, type IntegratorHandlerDeps } from "./integrator.js";
 
 // =============================================================================
 // Handler Dependencies
@@ -53,6 +54,9 @@ export interface WorkerHandlerDeps {
 
   /** Merge queue for submitting merge requests (optional) */
   mergeQueue?: MergeQueueInterface;
+
+  /** Get workspace path for an agent (for resolver → integrator inline merge) */
+  getWorkspacePath?: (agentId: string) => string | undefined;
 }
 
 // =============================================================================
@@ -146,65 +150,162 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 3: Emit MERGE_REQUEST signal and submit to queue
+  // Step 3: Emit completion signal (MERGE_REQUEST or RESOLVER_DONE)
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (args.status === "completed" && context.workspacePath) {
     const sourceBranch = context.branch ?? getCurrentBranch(context.workspacePath);
     const targetBranch = context.integrationBranch ?? "integration";
 
-    if (sourceBranch) {
-      try {
-        // Emit the signal for notification
-        deps.messageRouter.emitStatus({
-          from: { agent_id: context.agentId },
-          status_type: "checkpoint",
-          summary: `Merge request for branch ${sourceBranch}`,
-          details: {
-            signal: "MERGE_REQUEST",
-            sourceBranch,
-            targetBranch,
-            taskId: context.taskId,
-            workerId: context.agentId,
-          },
-        });
-        signalsEmitted.push("MERGE_REQUEST");
+    // Check if this is a resolver worker
+    const isResolver = context.role === "worker.resolver";
 
-        // Submit to actual merge queue if available
-        if (deps.mergeQueue && context.streamId && context.taskId) {
-          try {
-            const mrId = deps.mergeQueue.submit({
-              streamId: context.streamId,
+    if (sourceBranch) {
+      if (isResolver) {
+        // ───────────────────────────────────────────────────────────────────────
+        // Resolver workers emit RESOLVER_DONE instead of MERGE_REQUEST
+        // They do NOT submit to the merge queue - integrator merges inline
+        // ───────────────────────────────────────────────────────────────────────
+        try {
+          deps.messageRouter.emitStatus({
+            from: { agent_id: context.agentId },
+            status_type: "completed",
+            summary: `Resolver completed${context.mrId ? ` for MR ${context.mrId}` : ""}`,
+            details: {
+              signal: "RESOLVER_DONE",
+              mrId: context.mrId,
+              resolverBranch: sourceBranch,
+              resolverId: context.agentId,
               taskId: context.taskId,
-              workerBranch: sourceBranch,
-              workerAgentId: context.agentId,
-            });
-            cleanupActions.push(
-              `Submitted merge request ${mrId} to queue for ${sourceBranch} -> ${targetBranch}`
-            );
-          } catch (queueError) {
-            warnings.push(
-              `Failed to submit to merge queue: ${queueError instanceof Error ? queueError.message : "unknown"}`
-            );
-            cleanupActions.push(
-              `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission failed)`
-            );
-          }
-        } else {
-          // No queue configured or missing required context
-          const reason = !deps.mergeQueue
-            ? "no queue configured"
-            : !context.streamId
-              ? "no streamId"
-              : "no taskId";
+              status: args.status,
+            },
+          });
+          signalsEmitted.push("RESOLVER_DONE");
           cleanupActions.push(
-            `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (${reason})`
+            `Emitted RESOLVER_DONE for resolver branch ${sourceBranch}${context.mrId ? ` (MR: ${context.mrId})` : ""}`
+          );
+
+          // ─────────────────────────────────────────────────────────────────────
+          // Trigger inline merge on behalf of integrator (parent)
+          // ─────────────────────────────────────────────────────────────────────
+          if (context.mrId && context.parentId && deps.getWorkspacePath) {
+            const integratorWorkspace = deps.getWorkspacePath(context.parentId);
+
+            if (integratorWorkspace) {
+              // Build integrator context for the inline merge
+              const integratorContext: LifecycleContext = {
+                agentId: context.parentId,
+                role: "integrator",
+                workspacePath: integratorWorkspace,
+                streamId: context.streamId,
+                branch: context.integrationBranch ?? "integration",
+              };
+
+              // Build integrator deps
+              const integratorDeps: IntegratorHandlerDeps = {
+                messageRouter: deps.messageRouter,
+                mergeQueue: deps.mergeQueue,
+                workspacePath: integratorWorkspace,
+                agentManager: deps.agentManager,
+              };
+
+              try {
+                const resolverResult = await handleResolverDone(
+                  context.mrId,
+                  sourceBranch,
+                  integratorContext,
+                  integratorDeps
+                );
+
+                if (resolverResult.success) {
+                  cleanupActions.push(
+                    `Inline merge completed for MR ${context.mrId}: ${resolverResult.mergeCommit?.slice(0, 8)}`
+                  );
+                } else if (resolverResult.nestedConflict) {
+                  warnings.push(
+                    `Nested conflict on MR ${context.mrId} - escalated to coordinator`
+                  );
+                } else {
+                  warnings.push(
+                    `Inline merge failed for MR ${context.mrId}: ${resolverResult.error}`
+                  );
+                }
+              } catch (mergeError) {
+                warnings.push(
+                  `Error during inline merge for MR ${context.mrId}: ${mergeError instanceof Error ? mergeError.message : "unknown"}`
+                );
+              }
+            } else {
+              warnings.push(
+                `Cannot perform inline merge: integrator workspace not found for parent ${context.parentId}`
+              );
+            }
+          } else if (!context.mrId) {
+            warnings.push("Cannot perform inline merge: no mrId in context");
+          } else if (!context.parentId) {
+            warnings.push("Cannot perform inline merge: no parent (integrator) in context");
+          }
+        } catch (error) {
+          warnings.push(
+            `Failed to emit RESOLVER_DONE: ${error instanceof Error ? error.message : "unknown"}`
           );
         }
-      } catch (error) {
-        warnings.push(
-          `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`
-        );
+      } else {
+        // ───────────────────────────────────────────────────────────────────────
+        // Regular workers emit MERGE_REQUEST and submit to queue
+        // ───────────────────────────────────────────────────────────────────────
+        try {
+          // Emit the signal for notification
+          deps.messageRouter.emitStatus({
+            from: { agent_id: context.agentId },
+            status_type: "checkpoint",
+            summary: `Merge request for branch ${sourceBranch}`,
+            details: {
+              signal: "MERGE_REQUEST",
+              sourceBranch,
+              targetBranch,
+              taskId: context.taskId,
+              workerId: context.agentId,
+            },
+          });
+          signalsEmitted.push("MERGE_REQUEST");
+
+          // Submit to actual merge queue if available
+          if (deps.mergeQueue && context.streamId && context.taskId) {
+            try {
+              const mrId = deps.mergeQueue.submit({
+                streamId: context.streamId,
+                taskId: context.taskId,
+                workerBranch: sourceBranch,
+                workerAgentId: context.agentId,
+              });
+              cleanupActions.push(
+                `Submitted merge request ${mrId} to queue for ${sourceBranch} -> ${targetBranch}`
+              );
+            } catch (queueError) {
+              warnings.push(
+                `Failed to submit to merge queue: ${queueError instanceof Error ? queueError.message : "unknown"}`
+              );
+              cleanupActions.push(
+                `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (queue submission failed)`
+              );
+            }
+          } else {
+            // No queue configured or missing required context
+            const reason = !deps.mergeQueue
+              ? "no queue configured"
+              : !context.streamId
+                ? "no streamId"
+                : "no taskId";
+            cleanupActions.push(
+              `MERGE_REQUEST emitted for ${sourceBranch} -> ${targetBranch} (${reason})`
+            );
+          }
+        } catch (error) {
+          warnings.push(
+            `Failed to emit MERGE_REQUEST: ${error instanceof Error ? error.message : "unknown"}`
+          );
+        }
       }
     }
   }

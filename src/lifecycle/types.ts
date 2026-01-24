@@ -114,6 +114,9 @@ export interface LifecycleContext {
 
   /** Stream ID for the agent's workspace (used by integrators for merge queue) */
   streamId?: string;
+
+  /** Merge request ID (for resolver workers to track which MR they're resolving) */
+  mrId?: string;
 }
 
 /**

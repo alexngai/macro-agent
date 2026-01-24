@@ -29,7 +29,13 @@ import { handleGenericDone, type GenericHandlerDeps } from "./generic.js";
 // =============================================================================
 
 export { handleWorkerDone, type WorkerHandlerDeps } from "./worker.js";
-export { handleIntegratorDone, type IntegratorHandlerDeps } from "./integrator.js";
+export {
+  handleIntegratorDone,
+  handleResolverDone,
+  type IntegratorHandlerDeps,
+  type PendingResolver,
+  type HandleResolverDoneResult,
+} from "./integrator.js";
 export { handleMonitorDone, type MonitorHandlerDeps } from "./monitor.js";
 export { handleGenericDone, type GenericHandlerDeps } from "./generic.js";
 
@@ -63,22 +69,24 @@ export function createHandlerRegistry(
 ): DoneHandlerRegistry {
   const registry: DoneHandlerRegistry = new Map();
 
-  // Worker handler - include merge queue for queue submission
+  // Worker handler - include merge queue for queue submission and getWorkspacePath for resolver inline merge
   const workerDeps: WorkerHandlerDeps = {
     messageRouter: deps.messageRouter,
     agentManager: deps.agentManager,
     mergeQueue: deps.mergeQueue,
+    getWorkspacePath: deps.getWorkspacePath,
   };
   registry.set("worker", (context, args, cleanupStatus) =>
     handleWorkerDone(context, args, cleanupStatus, workerDeps)
   );
 
-  // Integrator handler - include merge queue and workspace path resolver
+  // Integrator handler - include merge queue, workspace path resolver, and agent manager
   registry.set("integrator", (context, args, cleanupStatus) => {
     const integratorDeps: IntegratorHandlerDeps = {
       messageRouter: deps.messageRouter,
       mergeQueue: deps.mergeQueue,
       workspacePath: deps.getWorkspacePath?.(context.agentId),
+      agentManager: deps.agentManager,
     };
     return handleIntegratorDone(context, args, cleanupStatus, integratorDeps);
   });
