@@ -12,6 +12,8 @@ import type {
   TaskStatus,
   AgentId,
   ArtifactRef,
+  RetryPolicy,
+  RetryState,
 } from "../store/types/index.js";
 import type {
   CreateTaskOptions,
@@ -88,6 +90,32 @@ export interface TaskManager {
    * Update task metadata (outputs, artifacts, description).
    */
   update(taskId: TaskId, updates: UpdateTaskOptions): void;
+
+  // ── Retry Support ─────────────────────────────────────────────
+
+  /**
+   * Prepare a failed/stalled task for retry.
+   *
+   * Resets task status to 'pending', updates retry state,
+   * and optionally clears the assigned agent.
+   *
+   * @param taskId - The task to prepare for retry
+   * @param error - Optional error message from the failure
+   * @param nextRetryAt - Optional timestamp for when retry should occur
+   */
+  prepareForRetry(
+    taskId: TaskId,
+    error?: string,
+    nextRetryAt?: number
+  ): void;
+
+  /**
+   * Update the retry state of a task.
+   *
+   * @param taskId - The task to update
+   * @param retryState - The new retry state
+   */
+  updateRetryState(taskId: TaskId, retryState: RetryState): void;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -100,7 +128,8 @@ export function createTaskManager(eventStore: EventStore): TaskManager {
   // ─────────────────────────────────────────────────────────────────
 
   function create(options: CreateTaskOptions): Task {
-    const { description, created_by, parent_task, inputs } = options;
+    const { description, created_by, parent_task, inputs, retryPolicy } =
+      options;
 
     const taskId = `task_${nanoid(12)}`;
 
@@ -127,6 +156,7 @@ export function createTaskManager(eventStore: EventStore): TaskManager {
           description,
           parent_task,
           inputs,
+          retryPolicy,
         },
       },
     });
@@ -402,6 +432,72 @@ export function createTaskManager(eventStore: EventStore): TaskManager {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // Retry Support
+  // ─────────────────────────────────────────────────────────────────
+
+  function prepareForRetry(
+    taskId: TaskId,
+    error?: string,
+    nextRetryAt?: number
+  ): void {
+    const task = eventStore.getTask(taskId);
+    if (!task) {
+      throw new TaskManagerError(
+        `Task not found: ${taskId}`,
+        "TASK_NOT_FOUND",
+        taskId,
+      );
+    }
+
+    // Calculate new retry state
+    const newRetryState: RetryState = {
+      attemptCount: (task.retryState?.attemptCount ?? 0) + 1,
+      lastAttemptAt: Date.now(),
+      lastError: error,
+      nextRetryAt,
+    };
+
+    // Emit event to reset task to pending and update retry state
+    eventStore.emit({
+      type: "task",
+      source: { agent_id: task.assigned_agent ?? task.created_by },
+      payload: {
+        task_id: taskId,
+        action: "status_change",
+        details: {
+          status: "pending",
+          retryState: newRetryState,
+          // Clear assigned agent so it can be reassigned
+          agent_id: null,
+        },
+      },
+    });
+  }
+
+  function updateRetryState(taskId: TaskId, retryState: RetryState): void {
+    const task = eventStore.getTask(taskId);
+    if (!task) {
+      throw new TaskManagerError(
+        `Task not found: ${taskId}`,
+        "TASK_NOT_FOUND",
+        taskId,
+      );
+    }
+
+    eventStore.emit({
+      type: "task",
+      source: { agent_id: task.assigned_agent ?? task.created_by },
+      payload: {
+        task_id: taskId,
+        action: "status_change",
+        details: {
+          retryState,
+        },
+      },
+    });
+  }
+
   return {
     create,
     createSubtask,
@@ -413,5 +509,7 @@ export function createTaskManager(eventStore: EventStore): TaskManager {
     unassign,
     updateStatus,
     update,
+    prepareForRetry,
+    updateRetryState,
   };
 }

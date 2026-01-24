@@ -30,6 +30,63 @@ export interface ArtifactRef {
   description?: string;
 }
 
+// =============================================================================
+// Retry Policy Types
+// =============================================================================
+
+/**
+ * Configuration for task retry behavior
+ */
+export interface RetryPolicy {
+  /**
+   * Maximum number of retry attempts
+   * Default: 0 (no retry)
+   */
+  maxRetries: number;
+
+  /**
+   * Which conditions trigger a retry
+   * - 'failed': Task explicitly failed
+   * - 'stalled': Agent became unresponsive
+   */
+  retryOn: ("failed" | "stalled")[];
+
+  /**
+   * Initial backoff delay in milliseconds
+   * Default: 1000 (1 second)
+   */
+  backoffMs: number;
+
+  /**
+   * Multiplier for exponential backoff
+   * Default: 2
+   */
+  backoffMultiplier: number;
+
+  /**
+   * Maximum backoff delay in milliseconds
+   * Default: 60000 (1 minute)
+   */
+  maxBackoffMs: number;
+}
+
+/**
+ * Current state of retry attempts for a task
+ */
+export interface RetryState {
+  /** Number of retry attempts made */
+  attemptCount: number;
+
+  /** When the last attempt was made */
+  lastAttemptAt: Timestamp;
+
+  /** Error from the last failed attempt */
+  lastError?: string;
+
+  /** When the next retry is scheduled (if waiting) */
+  nextRetryAt?: Timestamp;
+}
+
 // Agent assignment history entry
 export interface AgentHistoryEntry {
   agent_id: AgentId;
@@ -55,4 +112,10 @@ export interface Task {
   outputs?: Record<string, unknown>;
   artifacts?: ArtifactRef[];
   agent_history?: AgentHistoryEntry[];
+
+  /** Retry policy for this task */
+  retryPolicy?: RetryPolicy;
+
+  /** Current retry state */
+  retryState?: RetryState;
 }

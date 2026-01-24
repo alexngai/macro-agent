@@ -308,6 +308,9 @@ export class MacroAgent implements Agent {
     // Extract message content from prompt blocks
     const messageContent = this.extractMessageContent(params.prompt);
 
+    // Mark session as processing (for health monitoring)
+    this.sessionMapper.setProcessing(acpSessionId, true);
+
     try {
       // Stream responses from the agent
       for await (const update of this.agentManager.prompt(
@@ -345,6 +348,9 @@ export class MacroAgent implements Agent {
       return {
         stopReason: "end_turn",
       };
+    } finally {
+      // Mark session as not processing (for health monitoring)
+      this.sessionMapper.setProcessing(acpSessionId, false);
     }
   }
 

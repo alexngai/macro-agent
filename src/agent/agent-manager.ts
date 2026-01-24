@@ -48,6 +48,7 @@ import {
   type WorkspaceProvider,
   type CascadeAgentManager,
 } from "../lifecycle/cascade.js";
+import type { HealthCheckService } from "../monitor/health-check-service.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -242,6 +243,13 @@ export interface AgentManagerConfig {
    * Defaults to DefaultRoleRegistry if not provided.
    */
   roleRegistry?: RoleRegistry;
+
+  /**
+   * Optional HealthCheckService for monitoring coordinator health.
+   * When provided, health checks will automatically start/stop
+   * with coordinator agent lifecycle.
+   */
+  healthCheckService?: HealthCheckService;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -259,6 +267,7 @@ export function createAgentManager(
     defaultCwd = process.cwd(),
     workspaceManager,
     roleRegistry = new DefaultRoleRegistry(),
+    healthCheckService,
   } = config;
 
   // Active sessions tracked in memory
@@ -503,6 +512,11 @@ export function createAgentManager(
       notifyLifecycle({ type: "spawned", agent });
       notifyLifecycle({ type: "started", agent });
 
+      // Start health monitoring for coordinators
+      if (healthCheckService && role === "coordinator") {
+        healthCheckService.startForCoordinator(agentId);
+      }
+
       return {
         id: agentId,
         session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
@@ -552,6 +566,11 @@ export function createAgentManager(
         // Ignore errors during cleanup
       }
       activeSessions.delete(agentId);
+    }
+
+    // Stop health monitoring for coordinators
+    if (healthCheckService && agent.role === "coordinator") {
+      healthCheckService.stopForCoordinator(agentId);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -977,6 +996,11 @@ export function createAgentManager(
   // ─────────────────────────────────────────────────────────────────
 
   async function close(): Promise<void> {
+    // Stop all health checks
+    if (healthCheckService) {
+      healthCheckService.stopAll();
+    }
+
     // Close all active sessions
     const closePromises: Promise<void>[] = [];
     for (const [agentId, session] of activeSessions) {

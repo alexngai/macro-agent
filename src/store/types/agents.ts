@@ -41,4 +41,6 @@ export interface Agent {
   created_at: Timestamp;
   started_at?: Timestamp;
   stopped_at?: Timestamp;
+  /** Last time this agent emitted an event (for health monitoring) */
+  last_activity_at?: Timestamp;
 }
