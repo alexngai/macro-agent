@@ -174,6 +174,12 @@ export interface AgentManager {
    */
   supportsInjection(agentId: AgentId): Promise<boolean>;
 
+  /**
+   * Check if an agent's underlying process is still running.
+   * Returns false if no session or process has exited.
+   */
+  isProcessRunning(agentId: AgentId): boolean;
+
   // ── Permission Handling ─────────────────────────────────────────
 
   /**
@@ -403,6 +409,7 @@ export function createAgentManager(
           { name: "MACRO_TASK_ID", value: taskId },
           { name: "MACRO_AGENT_CWD", value: cwd },
           { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+          { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
         ],
       };
 
@@ -916,6 +923,14 @@ export function createAgentManager(
     }
   }
 
+  function isProcessRunning(agentId: AgentId): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      return false;
+    }
+    return activeSession.handle.isRunning();
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Permission Handling
   // ─────────────────────────────────────────────────────────────────
@@ -1035,6 +1050,7 @@ export function createAgentManager(
     hasActiveSession,
     isPrompting,
     supportsInjection,
+    isProcessRunning,
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,

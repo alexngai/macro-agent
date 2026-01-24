@@ -4,10 +4,10 @@
  * Comprehensive E2E tests for multi-agent lifecycle, WebSocket ACP multi-client,
  * and inter-agent communication.
  *
- * REQUIRES: RUN_E2E_TESTS=true environment variable (and authenticated Claude Code)
+ * REQUIRES: RUN_FULL_AGENT_TESTS=true environment variable (and authenticated Claude Code)
  *
  * Run with:
- *   RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts
+ *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts
  */
 
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
@@ -31,8 +31,8 @@ import {
 // Test Configuration
 // ─────────────────────────────────────────────────────────────────
 
-const RUN_E2E = !!process.env.RUN_E2E_TESTS;
-const testFn = RUN_E2E ? it : it.skip;
+const RUN_FULL_AGENT = !!process.env.RUN_FULL_AGENT_TESTS;
+const testFn = RUN_FULL_AGENT ? it : it.skip;
 
 // Timeouts for different test types
 const TIMEOUT = {
@@ -202,8 +202,8 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
 
@@ -227,7 +227,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -527,7 +527,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
@@ -546,7 +546,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -773,7 +773,7 @@ describe("Part 3: Event Storage E2E", () => {
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
@@ -792,7 +792,7 @@ describe("Part 3: Event Storage E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     for (const client of clients) {
       client.close();
@@ -905,8 +905,8 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
-    if (!RUN_E2E) {
-      log("⚠️  Skipping: RUN_E2E_TESTS not set");
+    if (!RUN_FULL_AGENT) {
+      log("⚠️  Skipping: RUN_FULL_AGENT_TESTS not set");
       return;
     }
 
@@ -930,7 +930,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   });
 
   afterEach(async () => {
-    if (!RUN_E2E) return;
+    if (!RUN_FULL_AGENT) return;
 
     // Close all clients
     for (const client of clients) {
@@ -1376,10 +1376,10 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
 // Skip Message if E2E not enabled
 // ─────────────────────────────────────────────────────────────────
 
-if (!RUN_E2E) {
+if (!RUN_FULL_AGENT) {
   console.log("\n" + "=".repeat(70));
   console.log("Multi-Agent E2E tests SKIPPED");
   console.log("To run with real agents:");
-  console.log("  RUN_E2E_TESTS=true npm test -- src/__tests__/e2e/multi-agent.e2e.test.ts");
+  console.log("  RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/e2e/multi-agent.e2e.test.ts");
   console.log("=".repeat(70) + "\n");
 }
