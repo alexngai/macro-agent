@@ -8,10 +8,13 @@
  */
 
 import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 import type { EventStore } from "../../../src/store/event-store.js";
 import type { TaskManager } from "../../../src/task/task-manager.js";
 import type { MessageRouter } from "../../../src/router/message-router.js";
 import type { AgentSimulator } from "../simulator/types.js";
+import type { MergeQueueInterface, MergeRequestStatus } from "../../../src/workspace/merge-queue/types.js";
 
 /**
  * Assertion error with additional context
@@ -35,6 +38,10 @@ export interface AssertionContext {
   messageRouter: MessageRouter;
   simulators: Map<string, AgentSimulator>;
   repoPath: string;
+  /** Merge queue (optional, for merge-related assertions) */
+  mergeQueue?: MergeQueueInterface;
+  /** Map of agent IDs to worktree paths */
+  worktrees?: Map<string, string>;
 }
 
 /**
@@ -397,6 +404,349 @@ export function assertExecutedStep(
         stepType,
         executedSteps: log.map((e) => e.step.type),
       }
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Merge Queue Assertions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Assert that a merge request has a specific status
+ */
+export function assertMergeRequestStatus(
+  context: AssertionContext,
+  mrId: string,
+  expectedStatus: MergeRequestStatus
+): void {
+  if (!context.mergeQueue) {
+    throw new HarnessAssertionError(
+      "MergeQueue not available in context - ensure harness is configured with merge queue support",
+      { mrId, expectedStatus }
+    );
+  }
+
+  const mr = context.mergeQueue.get(mrId);
+
+  if (!mr) {
+    throw new HarnessAssertionError(
+      `Merge request ${mrId} not found`,
+      { mrId, expectedStatus }
+    );
+  }
+
+  if (mr.status !== expectedStatus) {
+    throw new HarnessAssertionError(
+      `Expected merge request ${mrId} to have status "${expectedStatus}", but actual status is "${mr.status}"`,
+      { mrId, expectedStatus, actualStatus: mr.status }
+    );
+  }
+}
+
+/**
+ * Assert that a merge request for a task exists and has specific status
+ */
+export function assertTaskMergeRequestStatus(
+  context: AssertionContext,
+  taskId: string,
+  expectedStatus: MergeRequestStatus
+): void {
+  if (!context.mergeQueue) {
+    throw new HarnessAssertionError(
+      "MergeQueue not available in context - ensure harness is configured with merge queue support",
+      { taskId, expectedStatus }
+    );
+  }
+
+  const mr = context.mergeQueue.getByTask(taskId);
+
+  if (!mr) {
+    throw new HarnessAssertionError(
+      `No merge request found for task ${taskId}`,
+      { taskId, expectedStatus }
+    );
+  }
+
+  if (mr.status !== expectedStatus) {
+    throw new HarnessAssertionError(
+      `Expected merge request for task ${taskId} to have status "${expectedStatus}", but actual status is "${mr.status}"`,
+      { taskId, mrId: mr.id, expectedStatus, actualStatus: mr.status }
+    );
+  }
+}
+
+/**
+ * Assert merge queue depth for a stream
+ */
+export function assertMergeQueueDepth(
+  context: AssertionContext,
+  streamId: string,
+  expectedDepth: number
+): void {
+  if (!context.mergeQueue) {
+    throw new HarnessAssertionError(
+      "MergeQueue not available in context - ensure harness is configured with merge queue support",
+      { streamId, expectedDepth }
+    );
+  }
+
+  const actualDepth = context.mergeQueue.getQueueDepth(streamId);
+
+  if (actualDepth !== expectedDepth) {
+    throw new HarnessAssertionError(
+      `Expected merge queue for stream ${streamId} to have depth ${expectedDepth}, but actual depth is ${actualDepth}`,
+      { streamId, expectedDepth, actualDepth }
+    );
+  }
+}
+
+/**
+ * Assert that a merge request has a merge commit (successfully merged)
+ */
+export function assertMergeRequestMerged(
+  context: AssertionContext,
+  mrId: string
+): void {
+  if (!context.mergeQueue) {
+    throw new HarnessAssertionError(
+      "MergeQueue not available in context - ensure harness is configured with merge queue support",
+      { mrId }
+    );
+  }
+
+  const mr = context.mergeQueue.get(mrId);
+
+  if (!mr) {
+    throw new HarnessAssertionError(
+      `Merge request ${mrId} not found`,
+      { mrId }
+    );
+  }
+
+  if (mr.status !== "merged") {
+    throw new HarnessAssertionError(
+      `Expected merge request ${mrId} to be merged, but status is "${mr.status}"`,
+      { mrId, status: mr.status }
+    );
+  }
+
+  if (!mr.mergeCommit) {
+    throw new HarnessAssertionError(
+      `Merge request ${mrId} is marked as merged but has no merge commit`,
+      { mrId, status: mr.status }
+    );
+  }
+}
+
+/**
+ * Assert that a merge request has conflicts
+ */
+export function assertMergeRequestConflict(
+  context: AssertionContext,
+  mrId: string,
+  expectedFiles?: string[]
+): void {
+  if (!context.mergeQueue) {
+    throw new HarnessAssertionError(
+      "MergeQueue not available in context - ensure harness is configured with merge queue support",
+      { mrId }
+    );
+  }
+
+  const mr = context.mergeQueue.get(mrId);
+
+  if (!mr) {
+    throw new HarnessAssertionError(
+      `Merge request ${mrId} not found`,
+      { mrId }
+    );
+  }
+
+  if (mr.status !== "conflict") {
+    throw new HarnessAssertionError(
+      `Expected merge request ${mrId} to have conflicts, but status is "${mr.status}"`,
+      { mrId, status: mr.status }
+    );
+  }
+
+  if (expectedFiles && mr.conflictFiles) {
+    const missing = expectedFiles.filter(f => !mr.conflictFiles!.includes(f));
+    const extra = mr.conflictFiles.filter(f => !expectedFiles.includes(f));
+
+    if (missing.length > 0 || extra.length > 0) {
+      throw new HarnessAssertionError(
+        `Merge request ${mrId} conflict files do not match expected`,
+        {
+          mrId,
+          expectedFiles,
+          actualFiles: mr.conflictFiles,
+          missing,
+          extra,
+        }
+      );
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worktree Assertions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Assert that a worktree exists at a specific path
+ */
+export function assertWorktreeExists(
+  context: AssertionContext,
+  worktreePath: string
+): void {
+  // Check directory exists
+  if (!fs.existsSync(worktreePath)) {
+    throw new HarnessAssertionError(
+      `Expected worktree at "${worktreePath}" to exist, but directory not found`,
+      { worktreePath }
+    );
+  }
+
+  // Check it's a valid git worktree (has .git file or directory)
+  const gitPath = path.join(worktreePath, ".git");
+  if (!fs.existsSync(gitPath)) {
+    throw new HarnessAssertionError(
+      `Directory "${worktreePath}" exists but is not a valid git worktree (no .git)`,
+      { worktreePath }
+    );
+  }
+}
+
+/**
+ * Assert that an agent has a worktree
+ */
+export function assertAgentHasWorktree(
+  context: AssertionContext,
+  agentId: string
+): void {
+  if (!context.worktrees) {
+    throw new HarnessAssertionError(
+      "Worktrees not available in context - ensure harness is configured with workspace support",
+      { agentId }
+    );
+  }
+
+  const worktreePath = context.worktrees.get(agentId);
+
+  if (!worktreePath) {
+    throw new HarnessAssertionError(
+      `No worktree registered for agent ${agentId}`,
+      { agentId, registeredAgents: Array.from(context.worktrees.keys()) }
+    );
+  }
+
+  assertWorktreeExists(context, worktreePath);
+}
+
+/**
+ * Assert that a worktree is on a specific branch
+ */
+export function assertWorktreeBranch(
+  context: AssertionContext,
+  worktreePath: string,
+  expectedBranch: string
+): void {
+  assertWorktreeExists(context, worktreePath);
+
+  try {
+    const actualBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: worktreePath,
+      encoding: "utf8",
+    }).trim();
+
+    if (actualBranch !== expectedBranch) {
+      throw new HarnessAssertionError(
+        `Expected worktree at "${worktreePath}" to be on branch "${expectedBranch}", but actual branch is "${actualBranch}"`,
+        { worktreePath, expectedBranch, actualBranch }
+      );
+    }
+  } catch (error) {
+    if (error instanceof HarnessAssertionError) throw error;
+    throw new HarnessAssertionError(
+      `Failed to check branch for worktree at "${worktreePath}": ${error}`,
+      { worktreePath, error: String(error) }
+    );
+  }
+}
+
+/**
+ * Assert that a worktree has a clean working tree
+ */
+export function assertWorktreeClean(
+  context: AssertionContext,
+  worktreePath: string
+): void {
+  assertWorktreeExists(context, worktreePath);
+
+  try {
+    const status = execSync("git status --porcelain", {
+      cwd: worktreePath,
+      encoding: "utf8",
+    }).trim();
+
+    if (status.length > 0) {
+      throw new HarnessAssertionError(
+        `Expected worktree at "${worktreePath}" to be clean, but found uncommitted changes`,
+        { worktreePath, uncommittedFiles: status.split("\n") }
+      );
+    }
+  } catch (error) {
+    if (error instanceof HarnessAssertionError) throw error;
+    throw new HarnessAssertionError(
+      `Failed to check status for worktree at "${worktreePath}": ${error}`,
+      { worktreePath, error: String(error) }
+    );
+  }
+}
+
+/**
+ * Assert that a file exists in a worktree
+ */
+export function assertWorktreeFileExists(
+  context: AssertionContext,
+  worktreePath: string,
+  filePath: string
+): void {
+  assertWorktreeExists(context, worktreePath);
+
+  const fullPath = path.join(worktreePath, filePath);
+  if (!fs.existsSync(fullPath)) {
+    throw new HarnessAssertionError(
+      `Expected file "${filePath}" to exist in worktree "${worktreePath}", but it was not found`,
+      { worktreePath, filePath }
+    );
+  }
+}
+
+/**
+ * Assert that a file in a worktree contains specific content
+ */
+export function assertWorktreeFileContains(
+  context: AssertionContext,
+  worktreePath: string,
+  filePath: string,
+  content: string | RegExp
+): void {
+  assertWorktreeFileExists(context, worktreePath, filePath);
+
+  const fullPath = path.join(worktreePath, filePath);
+  const fileContent = fs.readFileSync(fullPath, "utf8");
+
+  const matches =
+    typeof content === "string"
+      ? fileContent.includes(content)
+      : content.test(fileContent);
+
+  if (!matches) {
+    throw new HarnessAssertionError(
+      `Expected file "${filePath}" in worktree "${worktreePath}" to contain ${content}, but it did not`,
+      { worktreePath, filePath, pattern: String(content), actualContent: fileContent }
     );
   }
 }

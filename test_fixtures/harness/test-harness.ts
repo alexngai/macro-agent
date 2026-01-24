@@ -35,7 +35,23 @@ import {
   assertCommitCount,
   assertSimulatorComplete,
   assertExecutedStep,
+  assertMergeRequestStatus,
+  assertTaskMergeRequestStatus,
+  assertMergeQueueDepth,
+  assertMergeRequestMerged,
+  assertMergeRequestConflict,
+  assertWorktreeExists,
+  assertAgentHasWorktree,
+  assertWorktreeBranch,
+  assertWorktreeClean,
+  assertWorktreeFileExists,
+  assertWorktreeFileContains,
 } from "./assertions/index.js";
+import { MergeQueue, type MergeQueueConfig } from "../../src/workspace/merge-queue/merge-queue.js";
+import type { MergeQueueInterface, MergeRequestStatus, SubmitMergeRequestOptions } from "../../src/workspace/merge-queue/types.js";
+import Database from "better-sqlite3";
+import * as fs from "fs";
+import * as path from "path";
 
 /**
  * Options for creating a test harness
@@ -43,6 +59,12 @@ import {
 export interface TestHarnessOptions {
   /** Use in-memory EventStore (default: true) */
   inMemory?: boolean;
+
+  /** Enable merge queue support (default: false) */
+  withMergeQueue?: boolean;
+
+  /** Enable workspace/worktree tracking (default: false) */
+  withWorkspaces?: boolean;
 }
 
 /**
@@ -91,6 +113,12 @@ export interface TestHarness {
   /** Services bundle for simulators */
   readonly services: SimulatorServices;
 
+  /** MergeQueue for coordinating worker merges (if enabled) */
+  readonly mergeQueue: MergeQueueInterface | null;
+
+  /** Map of agent IDs to worktree paths (if enabled) */
+  readonly worktrees: Map<string, string>;
+
   // ─────────────────────────────────────────────────────────────────────────
   // Repository Management
   // ─────────────────────────────────────────────────────────────────────────
@@ -104,6 +132,62 @@ export interface TestHarness {
    * Get the primary test repository (first one created)
    */
   getRepo(): TempRepo | undefined;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Worktree Management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a worktree for an agent from a bare repo
+   * Requires withWorkspaces option and a bare repo
+   */
+  createWorktreeForAgent(
+    agentId: string,
+    branch: string,
+    options?: { baseBranch?: string; streamId?: string }
+  ): string;
+
+  /**
+   * Remove a worktree for an agent
+   */
+  removeWorktree(agentId: string): void;
+
+  /**
+   * Get worktree path for an agent
+   */
+  getWorktreePath(agentId: string): string | undefined;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Merge Queue Operations
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Submit a merge request to the queue
+   * Requires withMergeQueue option
+   */
+  submitMergeRequest(options: SubmitMergeRequestOptions): string;
+
+  /**
+   * Process the next merge request in queue for a stream
+   * Returns the merge request ID if one was processed
+   */
+  processNextMergeRequest(
+    streamId: string,
+    options?: { simulateConflict?: boolean; conflictFiles?: string[] }
+  ): string | null;
+
+  /**
+   * Process all pending merge requests for a stream
+   */
+  processAllMergeRequests(
+    streamId: string,
+    options?: { simulateConflicts?: Map<string, string[]> }
+  ): string[];
+
+  /**
+   * Get merge queue depth for a stream
+   */
+  getMergeQueueDepth(streamId: string): number;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Simulator Management
@@ -210,6 +294,47 @@ export interface TestHarness {
   assertExecutedStep(agentId: string, stepType: string): void;
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Merge Queue Assertions
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Assert merge request status */
+  assertMergeRequestStatus(mrId: string, status: MergeRequestStatus): void;
+
+  /** Assert merge request for task has specific status */
+  assertTaskMergeRequestStatus(taskId: string, status: MergeRequestStatus): void;
+
+  /** Assert merge queue depth for a stream */
+  assertMergeQueueDepth(streamId: string, depth: number): void;
+
+  /** Assert merge request is merged */
+  assertMergeRequestMerged(mrId: string): void;
+
+  /** Assert merge request has conflicts */
+  assertMergeRequestConflict(mrId: string, expectedFiles?: string[]): void;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Worktree Assertions
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Assert worktree exists at path */
+  assertWorktreeExists(worktreePath: string): void;
+
+  /** Assert agent has a worktree */
+  assertAgentHasWorktree(agentId: string): void;
+
+  /** Assert worktree is on specific branch */
+  assertWorktreeBranch(worktreePath: string, branch: string): void;
+
+  /** Assert worktree has clean working tree */
+  assertWorktreeClean(worktreePath: string): void;
+
+  /** Assert file exists in worktree */
+  assertWorktreeFileExists(worktreePath: string, filePath: string): void;
+
+  /** Assert file in worktree contains content */
+  assertWorktreeFileContains(worktreePath: string, filePath: string, content: string | RegExp): void;
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Cleanup
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -225,7 +350,7 @@ export interface TestHarness {
 export async function createTestHarness(
   options: TestHarnessOptions = {}
 ): Promise<TestHarness> {
-  const { inMemory = true } = options;
+  const { inMemory = true, withMergeQueue = false, withWorkspaces = false } = options;
 
   // Initialize services
   const eventStore = await createEventStore({ inMemory });
@@ -242,6 +367,21 @@ export async function createTestHarness(
   const repos: TempRepo[] = [];
   const simulators = new Map<string, AgentSimulator>();
   const stepper = createEventStepper();
+  const worktrees = new Map<string, string>();
+
+  // MergeQueue (initialized lazily when withMergeQueue is true)
+  let mergeQueue: MergeQueue | null = null;
+  let mergeQueueDb: Database.Database | null = null;
+
+  if (withMergeQueue) {
+    // Create in-memory database for merge queue
+    mergeQueueDb = new Database(":memory:");
+    mergeQueue = new MergeQueue({
+      db: mergeQueueDb,
+      tablePrefix: "test_",
+      initSchema: true,
+    });
+  }
 
   // Assertion context getter
   const getAssertionContext = (): AssertionContext => ({
@@ -250,6 +390,8 @@ export async function createTestHarness(
     messageRouter,
     simulators,
     repoPath: repos[0]?.path || "",
+    mergeQueue: mergeQueue ?? undefined,
+    worktrees: withWorkspaces ? worktrees : undefined,
   });
 
   const harness: TestHarness = {
@@ -258,6 +400,8 @@ export async function createTestHarness(
     messageRouter,
     taskManager,
     services,
+    mergeQueue,
+    worktrees,
 
     // Repository Management
     async createTempRepo(repoOptions?: TempRepoOptions): Promise<TempRepo> {
@@ -268,6 +412,135 @@ export async function createTestHarness(
 
     getRepo(): TempRepo | undefined {
       return repos[0];
+    },
+
+    // Worktree Management
+    createWorktreeForAgent(
+      agentId: string,
+      branch: string,
+      opts?: { baseBranch?: string; streamId?: string }
+    ): string {
+      if (!withWorkspaces) {
+        throw new Error("Worktree support not enabled. Create harness with withWorkspaces: true");
+      }
+
+      const repo = repos[0];
+      if (!repo) {
+        throw new Error("No repository available. Call createTempRepo() first.");
+      }
+
+      const baseBranch = opts?.baseBranch || "main";
+
+      // Create worktree directory
+      const worktreePath = path.join(path.dirname(repo.path), "worktrees", agentId);
+      fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+
+      // Create the worktree
+      try {
+        repo.git(`worktree add ${worktreePath} -b ${branch} ${baseBranch}`);
+      } catch (error) {
+        // Branch might already exist, try without -b
+        repo.git(`worktree add ${worktreePath} ${branch}`);
+      }
+
+      worktrees.set(agentId, worktreePath);
+      return worktreePath;
+    },
+
+    removeWorktree(agentId: string): void {
+      if (!withWorkspaces) {
+        throw new Error("Worktree support not enabled. Create harness with withWorkspaces: true");
+      }
+
+      const worktreePath = worktrees.get(agentId);
+      if (!worktreePath) {
+        throw new Error(`No worktree found for agent ${agentId}`);
+      }
+
+      const repo = repos[0];
+      if (repo) {
+        try {
+          repo.git(`worktree remove ${worktreePath} --force`);
+        } catch {
+          // Ignore errors during cleanup
+        }
+      }
+
+      worktrees.delete(agentId);
+    },
+
+    getWorktreePath(agentId: string): string | undefined {
+      return worktrees.get(agentId);
+    },
+
+    // Merge Queue Operations
+    submitMergeRequest(opts: SubmitMergeRequestOptions): string {
+      if (!mergeQueue) {
+        throw new Error("Merge queue not enabled. Create harness with withMergeQueue: true");
+      }
+      return mergeQueue.submit(opts);
+    },
+
+    processNextMergeRequest(
+      streamId: string,
+      opts?: { simulateConflict?: boolean; conflictFiles?: string[] }
+    ): string | null {
+      if (!mergeQueue) {
+        throw new Error("Merge queue not enabled. Create harness with withMergeQueue: true");
+      }
+
+      const mr = mergeQueue.getNext(streamId);
+      if (!mr) {
+        return null;
+      }
+
+      mergeQueue.markProcessing(mr.id);
+
+      if (opts?.simulateConflict) {
+        mergeQueue.markConflict(mr.id, opts.conflictFiles || ["conflicting-file.txt"]);
+      } else {
+        // Simulate successful merge with a fake commit hash
+        const fakeCommit = `merge-${mr.id}-${Date.now().toString(36)}`;
+        mergeQueue.markMerged(mr.id, fakeCommit);
+      }
+
+      return mr.id;
+    },
+
+    processAllMergeRequests(
+      streamId: string,
+      opts?: { simulateConflicts?: Map<string, string[]> }
+    ): string[] {
+      if (!mergeQueue) {
+        throw new Error("Merge queue not enabled. Create harness with withMergeQueue: true");
+      }
+
+      const processed: string[] = [];
+      let mr = mergeQueue.getNext(streamId);
+
+      while (mr) {
+        mergeQueue.markProcessing(mr.id);
+
+        const conflictFiles = opts?.simulateConflicts?.get(mr.id);
+        if (conflictFiles) {
+          mergeQueue.markConflict(mr.id, conflictFiles);
+        } else {
+          const fakeCommit = `merge-${mr.id}-${Date.now().toString(36)}`;
+          mergeQueue.markMerged(mr.id, fakeCommit);
+        }
+
+        processed.push(mr.id);
+        mr = mergeQueue.getNext(streamId);
+      }
+
+      return processed;
+    },
+
+    getMergeQueueDepth(streamId: string): number {
+      if (!mergeQueue) {
+        throw new Error("Merge queue not enabled. Create harness with withMergeQueue: true");
+      }
+      return mergeQueue.getQueueDepth(streamId);
     },
 
     // Simulator Management
@@ -402,6 +675,52 @@ export async function createTestHarness(
       assertExecutedStep(getAssertionContext(), agentId, stepType);
     },
 
+    // Merge Queue Assertions
+    assertMergeRequestStatus(mrId: string, status: MergeRequestStatus): void {
+      assertMergeRequestStatus(getAssertionContext(), mrId, status);
+    },
+
+    assertTaskMergeRequestStatus(taskId: string, status: MergeRequestStatus): void {
+      assertTaskMergeRequestStatus(getAssertionContext(), taskId, status);
+    },
+
+    assertMergeQueueDepth(streamId: string, depth: number): void {
+      assertMergeQueueDepth(getAssertionContext(), streamId, depth);
+    },
+
+    assertMergeRequestMerged(mrId: string): void {
+      assertMergeRequestMerged(getAssertionContext(), mrId);
+    },
+
+    assertMergeRequestConflict(mrId: string, expectedFiles?: string[]): void {
+      assertMergeRequestConflict(getAssertionContext(), mrId, expectedFiles);
+    },
+
+    // Worktree Assertions
+    assertWorktreeExists(worktreePath: string): void {
+      assertWorktreeExists(getAssertionContext(), worktreePath);
+    },
+
+    assertAgentHasWorktree(agentId: string): void {
+      assertAgentHasWorktree(getAssertionContext(), agentId);
+    },
+
+    assertWorktreeBranch(worktreePath: string, branch: string): void {
+      assertWorktreeBranch(getAssertionContext(), worktreePath, branch);
+    },
+
+    assertWorktreeClean(worktreePath: string): void {
+      assertWorktreeClean(getAssertionContext(), worktreePath);
+    },
+
+    assertWorktreeFileExists(worktreePath: string, filePath: string): void {
+      assertWorktreeFileExists(getAssertionContext(), worktreePath, filePath);
+    },
+
+    assertWorktreeFileContains(worktreePath: string, filePath: string, content: string | RegExp): void {
+      assertWorktreeFileContains(getAssertionContext(), worktreePath, filePath, content);
+    },
+
     // Cleanup
     async cleanup(): Promise<void> {
       // Stop all simulators
@@ -414,6 +733,26 @@ export async function createTestHarness(
 
       // Reset stepper
       stepper.reset();
+
+      // Cleanup worktrees before repos
+      if (withWorkspaces && repos[0]) {
+        for (const [agentId, worktreePath] of worktrees) {
+          try {
+            repos[0].git(`worktree remove ${worktreePath} --force`);
+          } catch {
+            // Ignore errors during cleanup
+          }
+        }
+        worktrees.clear();
+      }
+
+      // Close merge queue
+      if (mergeQueue) {
+        mergeQueue.close();
+      }
+      if (mergeQueueDb) {
+        mergeQueueDb.close();
+      }
 
       // Cleanup repos
       for (const repo of repos) {
