@@ -949,7 +949,9 @@ export function createAgentManager(
     // Helper to check if done() was called by looking for status events
     // The done() MCP tool emits status events with status_type completed/failed
     // and includes signal: "WORKER_DONE" in the details
-    const checkDoneCalled = (): { called: boolean; status?: string } => {
+    const checkDoneCalled = async (): Promise<{ called: boolean; status?: string }> => {
+      // Reload from disk to see events from MCP subprocess
+      await eventStore.reload();
       const statusEvents = eventStore.query({ type: "status" });
 
       // Look for status events from this agent that indicate completion
@@ -978,7 +980,7 @@ export function createAgentManager(
     }
 
     // Check if done() was called
-    let doneResult = checkDoneCalled();
+    let doneResult = await checkDoneCalled();
     if (doneResult.called) {
       return {
         doneCalled: true,
@@ -1010,7 +1012,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
       }
 
       // Check again
-      doneResult = checkDoneCalled();
+      doneResult = await checkDoneCalled();
       if (doneResult.called) {
         return {
           doneCalled: true,

@@ -231,6 +231,10 @@ Remember: You MUST call done() when finished.`,
       log(`done() status: ${result.doneStatus ?? "N/A"}`);
       log(`Total updates: ${result.updates.length}`);
 
+      // Reload EventStore to see events from MCP subprocess
+      // SQLite changes from other processes require reload to be visible
+      await eventStore.reload();
+
       // Check EventStore for status events
       const statusEvents = eventStore.query({ type: "status" });
       const workerDoneEvent = statusEvents.find(
