@@ -450,6 +450,99 @@ describe("handlers", () => {
 
       expect(mockMergeQueue.submit).not.toHaveBeenCalled();
     });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Blocked Status Tests (s-32xs: "Needs help, don't auto-terminate")
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    it("should NOT terminate when status is blocked - agent needs help", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        parentId: "coordinator-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = {
+        status: "blocked",
+        summary: "Need help with merge conflict",
+      };
+      const cleanupStatus: CleanupStatus = { ready: false, reason: "blocked" };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Per s-32xs spec: "Agent explicitly blocked → Self-report + wait → Needs help, don't auto-terminate"
+      expect(result.shouldTerminate).toBe(false);
+    });
+
+    it("should emit HELP_NEEDED signal when blocked", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        parentId: "coordinator-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = {
+        status: "blocked",
+        summary: "Need help with merge conflict",
+        details: { conflictFiles: ["file1.ts"] },
+      };
+      const cleanupStatus: CleanupStatus = { ready: false };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Should emit HELP_NEEDED signal to parent
+      expect(result.signalsEmitted).toContain("HELP_NEEDED");
+      expect(deps.messageRouter.emitStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status_type: "blocked",
+          details: expect.objectContaining({
+            signal: "HELP_NEEDED",
+            parentId: "coordinator-1",
+          }),
+        })
+      );
+    });
+
+    it("should not emit MERGE_REQUEST when blocked", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        streamId: "stream-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = { status: "blocked" };
+      const cleanupStatus: CleanupStatus = { ready: false };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      expect(result.signalsEmitted).not.toContain("MERGE_REQUEST");
+    });
+
+    it("should NOT terminate when status is deferred", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "worker-1",
+        role: "worker",
+        taskId: "task-1",
+        workspacePath: "/path/to/workspace",
+      };
+      const args: DoneArgs = {
+        status: "deferred",
+        summary: "Work deferred for later",
+      };
+      const cleanupStatus: CleanupStatus = { ready: false };
+
+      const result = await handleWorkerDone(context, args, cleanupStatus, deps as any);
+
+      // Deferred status should also not terminate
+      expect(result.shouldTerminate).toBe(false);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────

@@ -64,10 +64,12 @@ export interface WorkerHandlerDeps {
  *
  * Processing steps:
  * 1. Commit any uncommitted changes
- * 2. Emit WORKER_DONE signal
- * 3. Emit MERGE_REQUEST signal (stubbed)
- * 4. Signal children to terminate (basic cascade)
- * 5. Return shouldTerminate=true
+ * 1.5. Create checkpoints for task commits (Phase 6)
+ * 2. Handle blocked/deferred status (emit HELP_NEEDED, return shouldTerminate=false)
+ * 3. Emit WORKER_DONE signal (for completed/failed)
+ * 4. Emit MERGE_REQUEST signal and submit to queue
+ * 5. Signal children to terminate (basic cascade)
+ * 6. Return shouldTerminate=true (for completed/failed only)
  */
 export async function handleWorkerDone(
   context: LifecycleContext,
@@ -122,7 +124,73 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 2: Emit WORKER_DONE signal
+  // Step 2: Handle blocked/deferred status (don't terminate, emit HELP_NEEDED)
+  // Per s-32xs spec: "Agent explicitly blocked → Self-report + wait → Needs help, don't auto-terminate"
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  if (args.status === "blocked") {
+    try {
+      deps.messageRouter.emitStatus({
+        from: { agent_id: context.agentId },
+        status_type: "blocked",
+        summary: args.summary ?? `Worker blocked - needs help`,
+        details: {
+          signal: "HELP_NEEDED",
+          workerId: context.agentId,
+          taskId: context.taskId,
+          parentId: context.parentId,
+          status: args.status,
+          ...args.details,
+        },
+      });
+      signalsEmitted.push("HELP_NEEDED");
+    } catch (error) {
+      warnings.push(
+        `Failed to emit HELP_NEEDED: ${error instanceof Error ? error.message : "unknown"}`
+      );
+    }
+
+    // Blocked agents should NOT terminate - they wait for help
+    return {
+      shouldTerminate: false,
+      signalsEmitted,
+      cleanupActions,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
+  if (args.status === "deferred") {
+    try {
+      deps.messageRouter.emitStatus({
+        from: { agent_id: context.agentId },
+        status_type: "checkpoint",
+        summary: args.summary ?? `Worker deferred work`,
+        details: {
+          signal: "WORKER_DEFERRED",
+          workerId: context.agentId,
+          taskId: context.taskId,
+          status: args.status,
+          ...args.details,
+        },
+      });
+      signalsEmitted.push("WORKER_DEFERRED");
+    } catch (error) {
+      warnings.push(
+        `Failed to emit WORKER_DEFERRED: ${error instanceof Error ? error.message : "unknown"}`
+      );
+    }
+
+    // Deferred agents should NOT terminate
+    return {
+      shouldTerminate: false,
+      signalsEmitted,
+      cleanupActions,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step 3: Emit WORKER_DONE signal (for completed/failed)
   // ─────────────────────────────────────────────────────────────────────────────
 
   try {
@@ -146,7 +214,7 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 3: Emit MERGE_REQUEST signal and submit to queue
+  // Step 4: Emit MERGE_REQUEST signal and submit to queue
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (args.status === "completed" && context.workspacePath) {
@@ -210,7 +278,7 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Step 4: Signal descendants to prepare for termination
+  // Step 5: Signal descendants to prepare for termination
   // ─────────────────────────────────────────────────────────────────────────────
   // Note: This is notification only. Actual termination is handled by
   // AgentManager.terminate() which cascades depth-first after done() returns.
@@ -272,7 +340,7 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Return result - shouldTerminate=true for workers
+  // Return result - shouldTerminate=true for completed/failed workers
   // ─────────────────────────────────────────────────────────────────────────────
 
   return {
