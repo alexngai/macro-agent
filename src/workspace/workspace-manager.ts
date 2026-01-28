@@ -10,7 +10,10 @@
 
 import type { Stream, WorkerTask, StartTaskResult, AgentWorktree, CleanupWorkerBranchesOptions, CleanupResult } from 'dataplane';
 import { DataplaneAdapter } from './dataplane-adapter.js';
-import type { DataplaneConfig } from './config.js';
+import type { DataplaneConfig, WorktreePoolConfig } from './config.js';
+import { DEFAULT_POOL_CONFIG } from './config.js';
+import { WorktreePool } from './pool/worktree-pool.js';
+import type { AllocationStrategy, AcquireOptions } from './pool/types.js';
 import type {
   AgentId,
   StreamId,
@@ -38,6 +41,12 @@ export interface WorkspaceManagerConfig extends DataplaneConfig {
    * Defaults to `<repoPath>/.worktrees`.
    */
   worktreeBaseDir?: string;
+
+  /**
+   * Configuration for the shared worktree pool.
+   * When enabled, worktrees are managed by the pool and reused.
+   */
+  pool?: Partial<WorktreePoolConfig>;
 }
 
 /**
@@ -53,10 +62,12 @@ export interface WorkspaceManagerConfig extends DataplaneConfig {
 export class DefaultWorkspaceManager implements WorkspaceManager {
   private readonly adapter: DataplaneAdapter;
   private readonly config: Required<Pick<WorkspaceManagerConfig, 'worktreeBaseDir'>>;
+  private readonly poolConfig: WorktreePoolConfig;
   private readonly workspaces: Map<AgentId, Workspace> = new Map();
   private readonly agentToStream: Map<AgentId, StreamId> = new Map();
   private readonly eventListeners: Set<WorkspaceEventCallback> = new Set();
   private mergeQueue: MergeQueue | null = null;
+  private pool: WorktreePool | null = null;
 
   /**
    * Create a new DefaultWorkspaceManager.
@@ -68,6 +79,10 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     this.adapter = adapter;
     this.config = {
       worktreeBaseDir: config?.worktreeBaseDir ?? `${adapter.repoPath}/.worktrees`,
+    };
+    this.poolConfig = {
+      ...DEFAULT_POOL_CONFIG,
+      ...config?.pool,
     };
   }
 
@@ -528,6 +543,380 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // Worktree Pool
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get the worktree pool for managing shared worktrees.
+   *
+   * The pool is lazily initialized on first access. Returns null if
+   * pool is not enabled in configuration.
+   *
+   * @returns WorktreePool instance or null if not enabled
+   */
+  getPool(): WorktreePool | null {
+    if (!this.poolConfig.enabled) {
+      return null;
+    }
+
+    if (!this.pool) {
+      this.pool = new WorktreePool(this.adapter.repoPath, {
+        worktreeBaseDir: this.config.worktreeBaseDir,
+        maxSize: this.poolConfig.maxSize ?? 50,
+        useThemedNames: this.poolConfig.useThemedNames,
+        themedNames: this.poolConfig.themedNames,
+        recoverOrphans: this.poolConfig.recoverOrphans,
+        defaultStrategy: this.poolConfig.defaultStrategy,
+      });
+    }
+
+    return this.pool;
+  }
+
+  /**
+   * Check if the worktree pool is enabled.
+   *
+   * @returns true if pool is enabled
+   */
+  isPoolEnabled(): boolean {
+    return this.poolConfig.enabled;
+  }
+
+  /**
+   * Acquire a worktree from the pool for an agent.
+   *
+   * This is a lower-level method - prefer using createWorkerWorkspace,
+   * createIntegratorWorkspace, or createCoordinatorWorkspace which
+   * handle pool allocation automatically when enabled.
+   *
+   * @param options - Acquisition options
+   * @returns Worktree path or null if allocation failed
+   * @throws Error if pool is not enabled
+   */
+  async acquireFromPool(options: AcquireOptions): Promise<string | null> {
+    const pool = this.getPool();
+    if (!pool) {
+      throw new Error('Worktree pool is not enabled');
+    }
+
+    const result = await pool.acquire(options);
+    if (result.success && result.worktree) {
+      return result.worktree.path;
+    }
+
+    return null;
+  }
+
+  /**
+   * Release a worktree back to the pool.
+   *
+   * This is called automatically by deallocateWorkspace when pool is enabled.
+   *
+   * @param agentId - Agent releasing the worktree
+   * @param clean - Whether to clean the worktree (default: true)
+   * @throws Error if pool is not enabled
+   */
+  async releaseToPool(agentId: AgentId, clean = true): Promise<void> {
+    const pool = this.getPool();
+    if (!pool) {
+      throw new Error('Worktree pool is not enabled');
+    }
+
+    await pool.release(agentId, { clean });
+  }
+
+  /**
+   * Create a workspace for a worker using the pool.
+   *
+   * Pool-aware variant of createWorkerWorkspace. Uses the shared worktree
+   * pool for allocation when enabled.
+   *
+   * @param workerId - ID of the worker agent
+   * @param taskId - ID of the task to work on
+   * @param streamId - ID of the integration stream
+   * @param strategy - Allocation strategy if pool is exhausted
+   * @returns Worker workspace
+   * @throws Error if pool is exhausted and strategy is 'reject'
+   */
+  async createWorkerWorkspaceFromPool(
+    workerId: AgentId,
+    taskId: TaskId,
+    streamId: StreamId,
+    strategy?: AllocationStrategy
+  ): Promise<WorkerWorkspace> {
+    const pool = this.getPool();
+    if (!pool) {
+      // Fall back to non-pooled allocation
+      return this.createWorkerWorkspace(workerId, taskId, streamId);
+    }
+
+    const stream = this.adapter.getStream(streamId);
+    if (!stream) {
+      throw new Error(`Stream ${streamId} not found`);
+    }
+
+    // Acquire worktree from pool
+    const result = await pool.acquire({
+      agentId: workerId,
+      role: 'worker',
+      strategy: strategy ?? this.poolConfig.defaultStrategy,
+    });
+
+    if (!result.success || !result.worktree) {
+      throw new Error(result.error ?? 'Failed to acquire worktree from pool');
+    }
+
+    const worktreePath = result.worktree.path;
+
+    // Create workspace record
+    const workspace: WorkerWorkspace = {
+      agentId: workerId,
+      path: worktreePath,
+      branch: 'detached', // Will be updated by claimTask
+      streamId,
+      role: 'worker',
+      createdAt: Date.now(),
+      taskId,
+      baseBranch: stream.baseCommit,
+    };
+
+    // Store workspace
+    this.workspaces.set(workerId, workspace);
+    this.agentToStream.set(workerId, streamId);
+
+    // Emit event
+    this.emit('workspace:created', {
+      agentId: workerId,
+      role: 'worker',
+      streamId,
+      taskId,
+      path: worktreePath,
+      pooled: true,
+    });
+
+    return workspace;
+  }
+
+  /**
+   * Create a workspace for an integrator using the pool.
+   *
+   * Pool-aware variant of createIntegratorWorkspace. Uses the shared worktree
+   * pool for allocation when enabled.
+   *
+   * @param integratorId - ID of the integrator agent
+   * @param streamId - ID of the integration stream
+   * @param strategy - Allocation strategy if pool is exhausted
+   * @returns Integrator workspace
+   * @throws Error if pool is exhausted and strategy is 'reject'
+   */
+  async createIntegratorWorkspaceFromPool(
+    integratorId: AgentId,
+    streamId: StreamId,
+    strategy?: AllocationStrategy
+  ): Promise<IntegratorWorkspace> {
+    const pool = this.getPool();
+    if (!pool) {
+      // Fall back to non-pooled allocation
+      return this.createIntegratorWorkspace(integratorId, streamId);
+    }
+
+    const stream = this.adapter.getStream(streamId);
+    if (!stream) {
+      throw new Error(`Stream ${streamId} not found`);
+    }
+
+    // Acquire worktree from pool
+    const result = await pool.acquire({
+      agentId: integratorId,
+      role: 'integrator',
+      strategy: strategy ?? this.poolConfig.defaultStrategy,
+    });
+
+    if (!result.success || !result.worktree) {
+      throw new Error(result.error ?? 'Failed to acquire worktree from pool');
+    }
+
+    const worktreePath = result.worktree.path;
+
+    // Build integrator merge branch name
+    const timestamp = Date.now();
+    const integratorBranch = `integrator/${stream.agentId}@${timestamp}`;
+    const streamBranchName = this.adapter.getStreamBranchName(streamId);
+
+    // Create and checkout the integrator branch from the stream branch
+    try {
+      const streamCommit = execSync(`git rev-parse ${streamBranchName}`, {
+        cwd: this.adapter.repoPath,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      execSync(`git checkout -b ${integratorBranch} ${streamCommit}`, {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      console.error(`[WorkspaceManager] Failed to create integrator branch: ${error}`);
+    }
+
+    // Create workspace record
+    const workspace: IntegratorWorkspace = {
+      agentId: integratorId,
+      path: worktreePath,
+      branch: integratorBranch,
+      streamId,
+      role: 'integrator',
+      createdAt: Date.now(),
+      coordinatorId: stream.agentId,
+      integrationBranch: streamBranchName,
+    };
+
+    // Store workspace
+    this.workspaces.set(integratorId, workspace);
+    this.agentToStream.set(integratorId, streamId);
+
+    // Emit event
+    this.emit('workspace:created', {
+      agentId: integratorId,
+      role: 'integrator',
+      streamId,
+      coordinatorId: stream.agentId,
+      path: worktreePath,
+      pooled: true,
+    });
+
+    return workspace;
+  }
+
+  /**
+   * Create a workspace for a coordinator using the pool.
+   *
+   * Pool-aware variant of createCoordinatorWorkspace. Uses the shared worktree
+   * pool for allocation when enabled.
+   *
+   * @param coordinatorId - ID of the coordinator agent
+   * @param streamId - ID of the integration stream
+   * @param strategy - Allocation strategy if pool is exhausted
+   * @returns Coordinator workspace
+   * @throws Error if pool is exhausted and strategy is 'reject'
+   */
+  async createCoordinatorWorkspaceFromPool(
+    coordinatorId: AgentId,
+    streamId: StreamId,
+    strategy?: AllocationStrategy
+  ): Promise<CoordinatorWorkspace> {
+    const pool = this.getPool();
+    if (!pool) {
+      // Fall back to non-pooled allocation
+      return this.createCoordinatorWorkspace(coordinatorId, streamId);
+    }
+
+    const stream = this.adapter.getStream(streamId);
+    if (!stream) {
+      throw new Error(`Stream ${streamId} not found`);
+    }
+
+    // Acquire worktree from pool
+    const result = await pool.acquire({
+      agentId: coordinatorId,
+      role: 'coordinator',
+      strategy: strategy ?? this.poolConfig.defaultStrategy,
+    });
+
+    if (!result.success || !result.worktree) {
+      throw new Error(result.error ?? 'Failed to acquire worktree from pool');
+    }
+
+    const worktreePath = result.worktree.path;
+    const streamBranchName = this.adapter.getStreamBranchName(streamId);
+
+    // Checkout the stream branch
+    try {
+      execSync(`git checkout ${streamBranchName}`, {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      console.error(`[WorkspaceManager] Failed to checkout stream branch: ${error}`);
+    }
+
+    // Create workspace record
+    const workspace: CoordinatorWorkspace = {
+      agentId: coordinatorId,
+      path: worktreePath,
+      branch: streamBranchName,
+      streamId,
+      role: 'coordinator',
+      createdAt: Date.now(),
+      childWorkspacePaths: new Map(),
+    };
+
+    // Store workspace
+    this.workspaces.set(coordinatorId, workspace);
+    this.agentToStream.set(coordinatorId, streamId);
+
+    // Emit event
+    this.emit('workspace:created', {
+      agentId: coordinatorId,
+      role: 'coordinator',
+      streamId,
+      path: worktreePath,
+      pooled: true,
+    });
+
+    return workspace;
+  }
+
+  /**
+   * Deallocate a workspace and release resources.
+   *
+   * Async variant that properly releases pooled worktrees.
+   *
+   * @param agentId - ID of the agent whose workspace to deallocate
+   * @param clean - Whether to clean the worktree (default: true)
+   */
+  async deallocateWorkspaceAsync(agentId: AgentId, clean = true): Promise<void> {
+    const workspace = this.workspaces.get(agentId);
+    if (!workspace) {
+      return; // Already deallocated
+    }
+
+    // Remove from coordinator's child workspace map if this is a child
+    if (workspace.role === 'worker' || workspace.role === 'integrator') {
+      const streamId = workspace.streamId;
+      const stream = this.adapter.getStream(streamId);
+      if (stream) {
+        const coordinatorWorkspace = this.workspaces.get(
+          stream.agentId
+        ) as CoordinatorWorkspace | undefined;
+        coordinatorWorkspace?.childWorkspacePaths?.delete(agentId);
+      }
+    }
+
+    // Release to pool if enabled, otherwise deallocate via dataplane
+    const pool = this.getPool();
+    if (pool) {
+      await pool.release(agentId, { clean });
+    } else {
+      this.adapter.deallocateWorktree(agentId);
+    }
+
+    // Clean up mappings
+    this.workspaces.delete(agentId);
+    this.agentToStream.delete(agentId);
+
+    // Emit event
+    this.emit('workspace:deallocated', {
+      agentId,
+      role: workspace.role,
+      streamId: workspace.streamId,
+      pooled: !!pool,
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // Maintenance / Cleanup
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -589,6 +978,36 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     if (this.mergeQueue) {
       this.mergeQueue.close();
       this.mergeQueue = null;
+    }
+    // Close pool if it was initialized
+    if (this.pool) {
+      this.pool.close().catch((error: unknown) => {
+        console.error('[WorkspaceManager] Error closing pool:', error);
+      });
+      this.pool = null;
+    }
+    // Note: We don't close the adapter here since it may be shared
+  }
+
+  /**
+   * Close the workspace manager and release resources (async).
+   *
+   * Prefer this over close() when using the pool, as it properly
+   * awaits pool cleanup.
+   */
+  async closeAsync(): Promise<void> {
+    this.eventListeners.clear();
+    this.workspaces.clear();
+    this.agentToStream.clear();
+    // Close merge queue if it was initialized
+    if (this.mergeQueue) {
+      this.mergeQueue.close();
+      this.mergeQueue = null;
+    }
+    // Close pool if it was initialized
+    if (this.pool) {
+      await this.pool.close();
+      this.pool = null;
     }
     // Note: We don't close the adapter here since it may be shared
   }

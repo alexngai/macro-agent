@@ -11,8 +11,11 @@
 export {
   type DataplaneConfig,
   type WorkspaceDirectoryConfig,
+  type WorktreePoolConfig,
+  type AllocationStrategy,
   DEFAULT_DATAPLANE_CONFIG,
   DEFAULT_WORKSPACE_DIR_CONFIG,
+  DEFAULT_POOL_CONFIG,
 } from './config.js';
 
 // Dataplane adapter
@@ -70,6 +73,23 @@ export {
   type MergeQueueEventType,
   type MergeQueueEventCallback,
 } from './merge-queue/index.js';
+
+// Worktree pool
+export {
+  WorktreePool,
+  type AllocationResult,
+  type AcquireOptions,
+  type ReleaseOptions,
+  type PooledWorktree,
+  type PoolEvent,
+  type PoolEventCallback,
+  type PoolEventType,
+  type PoolStats,
+  type QueuedRequest,
+  type RecoveryResult,
+  type WorktreePoolInterface,
+  type WorktreeState,
+} from './pool/index.js';
 
 // Re-export key types from dataplane for convenience
 export type {

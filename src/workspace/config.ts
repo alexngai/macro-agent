@@ -96,6 +96,67 @@ export interface WorkspaceDirectoryConfig {
 }
 
 /**
+ * Strategy for handling allocation when pool is exhausted.
+ *
+ * - `reject`: Immediately reject the request (default)
+ * - `queue`: Wait for a worktree to become available
+ * - `steal`: Forcibly take a worktree from another agent
+ */
+export type AllocationStrategy = 'reject' | 'queue' | 'steal';
+
+/**
+ * Configuration for the shared worktree pool.
+ */
+export interface WorktreePoolConfig {
+  /**
+   * Whether to use the shared worktree pool.
+   * When enabled, worktrees are managed by the pool and reused.
+   * Defaults to false for backward compatibility.
+   */
+  enabled: boolean;
+
+  /**
+   * Maximum number of worktrees in the pool.
+   * Defaults to 50.
+   */
+  maxSize?: number;
+
+  /**
+   * Default strategy when pool is exhausted.
+   * Defaults to 'reject'.
+   */
+  defaultStrategy?: AllocationStrategy;
+
+  /**
+   * Whether to recover orphaned worktrees on startup.
+   * Defaults to true.
+   */
+  recoverOrphans?: boolean;
+
+  /**
+   * Use themed names for pool slots.
+   * Defaults to false.
+   */
+  useThemedNames?: boolean;
+
+  /**
+   * Custom themed names for pool slots.
+   */
+  themedNames?: string[];
+}
+
+/**
+ * Default worktree pool configuration.
+ */
+export const DEFAULT_POOL_CONFIG: WorktreePoolConfig = {
+  enabled: false,
+  maxSize: 50,
+  defaultStrategy: 'reject',
+  recoverOrphans: true,
+  useThemedNames: false,
+};
+
+/**
  * Default workspace directory configuration
  */
 export const DEFAULT_WORKSPACE_DIR_CONFIG: WorkspaceDirectoryConfig = {
