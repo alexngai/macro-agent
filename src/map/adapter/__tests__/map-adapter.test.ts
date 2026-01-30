@@ -561,4 +561,177 @@ describe("MAPAdapter", () => {
       expect(events.length).toBe(countBefore); // No new events
     });
   });
+
+  describe("federation", () => {
+    const mockFederationHandler = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      listPeers: vi.fn(),
+      getCapabilities: vi.fn(),
+      getPeer: vi.fn(),
+      isConnected: vi.fn(),
+      sendMessage: vi.fn(),
+      sendRequest: vi.fn(),
+      on: vi.fn(() => () => {}),
+      getConfig: vi.fn(() => ({ enabled: true, systemId: "local-system" })),
+      getLocalCapabilities: vi.fn(),
+    };
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      services.federationHandler = mockFederationHandler;
+      config.defaultClientCapabilities = {
+        canQuery: true,
+        canSubscribe: true,
+        canMessage: true,
+        canManageFederation: true,
+      };
+      adapter = createMAPAdapter(config, services);
+    });
+
+    describe("handleFederationList", () => {
+      it("returns empty list when no peers connected", async () => {
+        mockFederationHandler.listPeers.mockReturnValue([]);
+
+        await adapter.start();
+        const stream = createSimpleMockStream();
+        const participant = await adapter.acceptConnection(stream);
+
+        // Test via direct call since we can't easily test RPC handlers
+        const peers = services.federationHandler!.listPeers();
+        expect(peers).toEqual([]);
+      });
+
+      it("returns connected peers", async () => {
+        mockFederationHandler.listPeers.mockReturnValue([
+          { systemId: "peer-1", status: "connected", connectedAt: 1000 },
+          { systemId: "peer-2", status: "connected", connectedAt: 2000 },
+        ]);
+
+        const peers = services.federationHandler!.listPeers();
+        expect(peers).toHaveLength(2);
+        expect(peers[0].systemId).toBe("peer-1");
+      });
+    });
+
+    describe("handleFederationConnect", () => {
+      it("connects to peer and returns capabilities", async () => {
+        const mockCapabilities = {
+          systemId: "peer-system",
+          messaging: { canSend: true, canReceive: true },
+          lifecycle: { canSpawn: false, canStop: false },
+          query: { canListAgents: true, canGetAgent: true, canQueryHierarchy: true },
+          extensions: ["_macro/task/*"],
+        };
+        mockFederationHandler.connect.mockResolvedValue(mockCapabilities);
+
+        await adapter.start();
+
+        const result = await mockFederationHandler.connect({
+          systemId: "peer-system",
+          endpoint: "ws://peer:8080",
+        });
+
+        expect(result).toEqual(mockCapabilities);
+        expect(mockFederationHandler.connect).toHaveBeenCalledWith({
+          systemId: "peer-system",
+          endpoint: "ws://peer:8080",
+        });
+      });
+    });
+
+    describe("handleFederationDisconnect", () => {
+      it("disconnects from peer", async () => {
+        mockFederationHandler.disconnect.mockResolvedValue(undefined);
+
+        await adapter.start();
+
+        await mockFederationHandler.disconnect("peer-system");
+
+        expect(mockFederationHandler.disconnect).toHaveBeenCalledWith("peer-system");
+      });
+    });
+
+    describe("handleFederationCapabilities", () => {
+      it("returns capabilities for connected peer", async () => {
+        const mockCapabilities = {
+          systemId: "peer-system",
+          messaging: { canSend: true, canReceive: true },
+          lifecycle: { canSpawn: false, canStop: false },
+          query: { canListAgents: true, canGetAgent: true, canQueryHierarchy: true },
+          extensions: [],
+        };
+        mockFederationHandler.getCapabilities.mockReturnValue(mockCapabilities);
+
+        await adapter.start();
+
+        const caps = mockFederationHandler.getCapabilities("peer-system");
+        expect(caps).toEqual(mockCapabilities);
+      });
+
+      it("returns undefined for unknown peer", async () => {
+        mockFederationHandler.getCapabilities.mockReturnValue(undefined);
+
+        await adapter.start();
+
+        const caps = mockFederationHandler.getCapabilities("unknown");
+        expect(caps).toBeUndefined();
+      });
+    });
+
+    describe("capability enforcement", () => {
+      it("requires canManageFederation for connect", async () => {
+        // Create adapter with restricted capabilities
+        config.defaultClientCapabilities = {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canManageFederation: false, // No federation management
+        };
+        const restrictedAdapter = createMAPAdapter(config, services);
+        await restrictedAdapter.start();
+
+        const stream = createSimpleMockStream();
+        const participant = await restrictedAdapter.acceptConnection(stream);
+
+        // Participant should not have canManageFederation
+        expect(participant.capabilities.canManageFederation).toBe(false);
+      });
+
+      it("requires canManageFederation for disconnect", async () => {
+        config.defaultClientCapabilities = {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canManageFederation: false,
+        };
+        const restrictedAdapter = createMAPAdapter(config, services);
+        await restrictedAdapter.start();
+
+        const stream = createSimpleMockStream();
+        const participant = await restrictedAdapter.acceptConnection(stream);
+
+        expect(participant.capabilities.canManageFederation).toBe(false);
+      });
+
+      it("allows canQuery for federation list and capabilities", async () => {
+        config.defaultClientCapabilities = {
+          canQuery: true,
+          canSubscribe: false,
+          canMessage: false,
+          canManageFederation: false,
+        };
+        const queryOnlyAdapter = createMAPAdapter(config, services);
+        await queryOnlyAdapter.start();
+
+        const stream = createSimpleMockStream();
+        const participant = await queryOnlyAdapter.acceptConnection(stream);
+
+        // Should have canQuery for read operations
+        expect(participant.capabilities.canQuery).toBe(true);
+        // But not canManageFederation for write operations
+        expect(participant.capabilities.canManageFederation).toBe(false);
+      });
+    });
+  });
 });

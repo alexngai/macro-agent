@@ -588,4 +588,144 @@ describe("MessageRouter.sendToAddress()", () => {
       expect(wakeHandlerCalled).toBe(true);
     });
   });
+
+  describe("federated address", () => {
+    it("throws FEDERATION_NOT_AVAILABLE when no federation handler", async () => {
+      createAgent("sender");
+
+      try {
+        await router.sendToAddress({
+          from: "sender",
+          to: { system: "remote.system/macro-agent", agent: "remote-agent" },
+          content: "Hello federation",
+        });
+        expect.fail("Expected AddressRoutingError to be thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(AddressRoutingError);
+        expect((error as AddressRoutingError).code).toBe(
+          "FEDERATION_NOT_AVAILABLE"
+        );
+      }
+    });
+
+    it("throws FEDERATION_NOT_AVAILABLE when not connected to system", async () => {
+      const mockFederationHandler = {
+        isConnected: () => false,
+        sendMessage: async () => {},
+        connect: async () => ({} as any),
+        disconnect: async () => {},
+        getPeer: () => undefined,
+        listPeers: () => [],
+        getCapabilities: () => undefined,
+        sendRequest: async () => ({}),
+        on: () => () => {},
+        getConfig: () => ({ enabled: true, systemId: "local-system" }),
+        getLocalCapabilities: () => ({} as any),
+      };
+
+      const routerWithFederation = createMessageRouter(eventStore, {
+        federationHandler: mockFederationHandler,
+      });
+
+      createAgent("sender");
+
+      try {
+        await routerWithFederation.sendToAddress({
+          from: "sender",
+          to: { system: "remote.system/macro-agent", agent: "remote-agent" },
+          content: "Hello federation",
+        });
+        expect.fail("Expected AddressRoutingError to be thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(AddressRoutingError);
+        expect((error as AddressRoutingError).code).toBe(
+          "FEDERATION_NOT_AVAILABLE"
+        );
+      }
+    });
+
+    it("routes federated agent address via federation handler", async () => {
+      let sentSystemId: string | undefined;
+      let sentMessage: any;
+
+      const mockFederationHandler = {
+        isConnected: (systemId: string) => systemId === "remote.system/macro-agent",
+        sendMessage: async (systemId: string, message: any) => {
+          sentSystemId = systemId;
+          sentMessage = message;
+        },
+        connect: async () => ({} as any),
+        disconnect: async () => {},
+        getPeer: () => ({ systemId: "remote.system/macro-agent", status: "connected" } as any),
+        listPeers: () => [],
+        getCapabilities: () => undefined,
+        sendRequest: async () => ({}),
+        on: () => () => {},
+        getConfig: () => ({ enabled: true, systemId: "local-system" }),
+        getLocalCapabilities: () => ({} as any),
+      };
+
+      const routerWithFederation = createMessageRouter(eventStore, {
+        federationHandler: mockFederationHandler,
+      });
+
+      createAgent("sender");
+
+      const result = await routerWithFederation.sendToAddress({
+        from: "sender",
+        to: { system: "remote.system/macro-agent", agent: "remote-agent" },
+        content: "Hello remote agent",
+      });
+
+      expect(sentSystemId).toBe("remote.system/macro-agent");
+      expect(sentMessage.type).toBe("map/send");
+      expect(sentMessage.from).toBe("sender");
+      expect(sentMessage.to).toEqual({
+        system: "remote.system/macro-agent",
+        agent: "remote-agent",
+      });
+      expect(sentMessage.content).toBe("Hello remote agent");
+      expect(result.delivered).toEqual([]); // No confirmation for federated
+    });
+
+    it("routes federated scope address via federation handler", async () => {
+      let sentSystemId: string | undefined;
+      let sentMessage: any;
+
+      const mockFederationHandler = {
+        isConnected: (systemId: string) => systemId === "remote.system/macro-agent",
+        sendMessage: async (systemId: string, message: any) => {
+          sentSystemId = systemId;
+          sentMessage = message;
+        },
+        connect: async () => ({} as any),
+        disconnect: async () => {},
+        getPeer: () => ({ systemId: "remote.system/macro-agent", status: "connected" } as any),
+        listPeers: () => [],
+        getCapabilities: () => undefined,
+        sendRequest: async () => ({}),
+        on: () => () => {},
+        getConfig: () => ({ enabled: true, systemId: "local-system" }),
+        getLocalCapabilities: () => ({} as any),
+      };
+
+      const routerWithFederation = createMessageRouter(eventStore, {
+        federationHandler: mockFederationHandler,
+      });
+
+      createAgent("sender");
+
+      const result = await routerWithFederation.sendToAddress({
+        from: "sender",
+        to: { system: "remote.system/macro-agent", scope: "workers" },
+        content: "Hello remote scope",
+      });
+
+      expect(sentSystemId).toBe("remote.system/macro-agent");
+      expect(sentMessage.to).toEqual({
+        system: "remote.system/macro-agent",
+        scope: "workers",
+      });
+    });
+  });
 });

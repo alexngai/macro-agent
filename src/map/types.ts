@@ -111,6 +111,44 @@ export interface TaskAddress {
   task: TaskId;
 }
 
+// =============================================================================
+// Federation Address Types
+// =============================================================================
+
+/**
+ * System identifier for federated systems.
+ * Format: `<domain>/<system>/<instance>`
+ * Example: `example.com/macro-agent/prod-east`
+ */
+export type SystemId = string;
+
+/**
+ * Address targeting an agent in a federated system.
+ * Used for cross-system message routing.
+ */
+export interface FederatedAgentAddress {
+  /** Target system identifier */
+  system: SystemId;
+  /** Agent ID within the target system */
+  agent: AgentId;
+}
+
+/**
+ * Address targeting a scope in a federated system.
+ * Used for cross-system scope-based messaging.
+ */
+export interface FederatedScopeAddress {
+  /** Target system identifier */
+  system: SystemId;
+  /** Scope ID within the target system */
+  scope: ScopeId;
+}
+
+/**
+ * Union of all federated address types.
+ */
+export type FederatedAddress = FederatedAgentAddress | FederatedScopeAddress;
+
 /**
  * Union of all hierarchical address types.
  */
@@ -133,6 +171,7 @@ export type HierarchicalAddress =
  * - Hierarchical: { parent }, { children }, { ancestors }, { descendants }, { siblings }
  * - Broadcast: { broadcast: true } - all agents
  * - Extension: { task } - macro-agent specific task addressing
+ * - Federated: { system, agent } or { system, scope } - cross-system addressing
  */
 export type Address =
   // Direct addressing
@@ -146,7 +185,9 @@ export type Address =
   // Broadcast
   | BroadcastAddress
   // Extension (macro-agent specific)
-  | TaskAddress;
+  | TaskAddress
+  // Federated addressing (cross-system)
+  | FederatedAddress;
 
 // =============================================================================
 // Type Guards
@@ -264,6 +305,31 @@ export function isStructuralAddress(
   return isScopeAddress(addr) || isRoleAddress(addr);
 }
 
+/**
+ * Check if address targets an agent in a federated system.
+ */
+export function isFederatedAgentAddress(
+  addr: Address
+): addr is FederatedAgentAddress {
+  return "system" in addr && "agent" in addr;
+}
+
+/**
+ * Check if address targets a scope in a federated system.
+ */
+export function isFederatedScopeAddress(
+  addr: Address
+): addr is FederatedScopeAddress {
+  return "system" in addr && "scope" in addr;
+}
+
+/**
+ * Check if address is a federated address (cross-system).
+ */
+export function isFederatedAddress(addr: Address): addr is FederatedAddress {
+  return "system" in addr;
+}
+
 // =============================================================================
 // Message Options
 // =============================================================================
@@ -308,6 +374,11 @@ export interface SendOptions {
  * Get a human-readable description of an address.
  */
 export function describeAddress(addr: Address): string {
+  // Check federated addresses first (they have 'system' + another field)
+  if (isFederatedAgentAddress(addr))
+    return `federated:${addr.system}/agent:${addr.agent}`;
+  if (isFederatedScopeAddress(addr))
+    return `federated:${addr.system}/scope:${addr.scope}`;
   if (isAgentAddress(addr)) return `agent:${addr.agent}`;
   if (isAgentsAddress(addr)) return `agents:[${addr.agents.join(", ")}]`;
   if (isScopeAddress(addr)) return `scope:${addr.scope}`;

@@ -94,6 +94,7 @@ const DEFAULT_CLIENT_CAPABILITIES: ParticipantCapabilities = {
   canManageScopes: false,
   canUpdatePermissions: false,
   canManageTasks: false,
+  canManageFederation: false,
 };
 
 /**
@@ -108,6 +109,7 @@ const DEFAULT_AGENT_CAPABILITIES: ParticipantCapabilities = {
   canManageScopes: true,
   canUpdatePermissions: false,
   canManageTasks: true,
+  canManageFederation: true,
 };
 
 // =============================================================================

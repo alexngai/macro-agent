@@ -62,8 +62,11 @@ import {
   isTaskAddress,
   isBroadcastAddress,
   isHierarchicalAddress,
+  isFederatedAddress,
   describeAddress,
 } from "../map/types.js";
+import type { FederationHandler } from "../map/federation/types.js";
+import { getSystemFromAddress } from "../map/federation/federation-handler.js";
 import {
   addressToChannel,
   isLegacyCompatible,
@@ -215,6 +218,11 @@ export interface MessageRouterConfig {
    * Used to actually wake/inject/interrupt agents.
    */
   wakeHandler?: WakeHandler;
+  /**
+   * Optional federation handler for cross-system messaging.
+   * Required when sending to federated addresses.
+   */
+  federationHandler?: FederationHandler;
 }
 
 /**
@@ -229,6 +237,7 @@ export function createMessageRouter(
   const agentSessionChecker = config.agentSessionChecker;
   const sessionChecker = config.sessionChecker;
   const wakeHandler = config.wakeHandler;
+  const federationHandler = config.federationHandler;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -426,6 +435,47 @@ export function createMessageRouter(
     // Handle multi-agent addresses (not legacy compatible, handle directly)
     if (isAgentsAddress(to)) {
       return sendToMultipleAgents(from, to, content, options);
+    }
+
+    // Handle federated addresses (cross-system routing)
+    if (isFederatedAddress(to)) {
+      if (!federationHandler) {
+        throw new AddressRoutingError(
+          "Federation not configured for cross-system messaging",
+          "FEDERATION_NOT_AVAILABLE",
+          to
+        );
+      }
+
+      const systemId = getSystemFromAddress(to);
+      if (!federationHandler.isConnected(systemId)) {
+        throw new AddressRoutingError(
+          `Not connected to federated system: ${systemId}`,
+          "FEDERATION_NOT_AVAILABLE",
+          to,
+          { systemId }
+        );
+      }
+
+      // Send via federation handler
+      await federationHandler.sendMessage(systemId, {
+        type: "map/send",
+        from,
+        to,
+        content,
+        options,
+      });
+
+      // Return result (no delivery confirmation for federated messages)
+      return {
+        id: `fed-${nanoid()}` as EventId,
+        from,
+        to,
+        content,
+        timestamp: Date.now() as Timestamp,
+        delivered: [], // Cannot confirm delivery for federated messages
+        correlationId,
+      };
     }
 
     // Check if this is a legacy-compatible address

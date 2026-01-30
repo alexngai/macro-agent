@@ -86,6 +86,8 @@ export interface ParticipantCapabilities {
   canUpdatePermissions?: boolean;
   /** Can create, assign, and complete tasks */
   canManageTasks?: boolean;
+  /** Can manage federation connections (connect/disconnect peers) */
+  canManageFederation?: boolean;
 }
 
 /**

@@ -54,6 +54,7 @@ import {
   type JsonRpcMessage,
 } from "./rpc-handler.js";
 import { EXTENSION_CAPABILITIES } from "./extensions/index.js";
+import type { FederationHandler, FederationCapabilities, ConnectedPeer, MAPPeerConfig } from "../federation/types.js";
 
 // =============================================================================
 // Connection Session
@@ -108,6 +109,11 @@ export interface MAPAdapterServices {
    * Get agent's descendants (for subscription matching).
    */
   getDescendants?: (agentId: AgentId) => AgentId[];
+
+  /**
+   * Optional federation handler for cross-system communication.
+   */
+  federationHandler?: FederationHandler;
 }
 
 /**
@@ -592,6 +598,12 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/scopes/create": async (params, ctx) => this.handleCreateScope(participantId, params, ctx),
       "map/scopes/join": async (params) => this.handleJoinScope(participantId, params),
       "map/scopes/leave": async (params) => this.handleLeaveScope(participantId, params),
+
+      // Federation methods
+      "map/federation/connect": async (params) => this.handleFederationConnect(participantId, params),
+      "map/federation/disconnect": async (params) => this.handleFederationDisconnect(participantId, params),
+      "map/federation/list": async () => this.handleFederationList(participantId),
+      "map/federation/capabilities": async (params) => this.handleFederationCapabilities(participantId, params),
     };
 
     // Add extension method handlers
@@ -615,6 +627,11 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/scopes/list": "canQuery",
       "map/scopes/get": "canQuery",
       "map/scopes/create": "canManageScopes",
+      // Federation methods
+      "map/federation/connect": "canManageFederation",
+      "map/federation/disconnect": "canManageFederation",
+      "map/federation/list": "canQuery",
+      "map/federation/capabilities": "canQuery",
     };
 
     // Add capability requirements for registered extension methods
@@ -846,6 +863,107 @@ export class MAPAdapterImpl implements MAPAdapter {
       throw RPCError.notFound("scope", scopeId);
     }
     return { success };
+  }
+
+  // ===========================================================================
+  // Federation Handlers
+  // ===========================================================================
+
+  private async handleFederationConnect(
+    participantId: ParticipantId,
+    params: unknown
+  ): Promise<{ capabilities: FederationCapabilities }> {
+    if (!this.services.federationHandler) {
+      throw RPCError.internalError("Federation not available");
+    }
+
+    const { systemId, endpoint, auth } = (params ?? {}) as MAPPeerConfig;
+    if (!systemId) {
+      throw RPCError.invalidParams("systemId is required");
+    }
+    if (!endpoint) {
+      throw RPCError.invalidParams("endpoint is required");
+    }
+
+    try {
+      const capabilities = await this.services.federationHandler.connect({
+        systemId,
+        endpoint,
+        auth,
+      });
+      return { capabilities };
+    } catch (err) {
+      throw RPCError.internalError(
+        err instanceof Error ? err.message : "Failed to connect"
+      );
+    }
+  }
+
+  private async handleFederationDisconnect(
+    participantId: ParticipantId,
+    params: unknown
+  ): Promise<{ success: boolean }> {
+    if (!this.services.federationHandler) {
+      throw RPCError.internalError("Federation not available");
+    }
+
+    const { systemId } = (params ?? {}) as { systemId: string };
+    if (!systemId) {
+      throw RPCError.invalidParams("systemId is required");
+    }
+
+    try {
+      await this.services.federationHandler.disconnect(systemId);
+      return { success: true };
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.includes("Not connected")
+      ) {
+        throw RPCError.notFound("peer", systemId);
+      }
+      throw RPCError.internalError(
+        err instanceof Error ? err.message : "Failed to disconnect"
+      );
+    }
+  }
+
+  private async handleFederationList(
+    participantId: ParticipantId
+  ): Promise<{ peers: Array<{ systemId: string; status: string; connectedAt: number }> }> {
+    if (!this.services.federationHandler) {
+      return { peers: [] };
+    }
+
+    const peers = this.services.federationHandler.listPeers();
+    return {
+      peers: peers.map((peer: ConnectedPeer) => ({
+        systemId: peer.systemId,
+        status: peer.status,
+        connectedAt: peer.connectedAt,
+      })),
+    };
+  }
+
+  private async handleFederationCapabilities(
+    participantId: ParticipantId,
+    params: unknown
+  ): Promise<{ capabilities: FederationCapabilities | null }> {
+    if (!this.services.federationHandler) {
+      throw RPCError.internalError("Federation not available");
+    }
+
+    const { systemId } = (params ?? {}) as { systemId: string };
+    if (!systemId) {
+      throw RPCError.invalidParams("systemId is required");
+    }
+
+    const capabilities = this.services.federationHandler.getCapabilities(systemId);
+    if (!capabilities) {
+      throw RPCError.notFound("peer", systemId);
+    }
+
+    return { capabilities };
   }
 
   // ===========================================================================

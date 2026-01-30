@@ -19,6 +19,9 @@ import {
   isTaskAddress,
   isDirectAddress,
   isStructuralAddress,
+  isFederatedAgentAddress,
+  isFederatedScopeAddress,
+  isFederatedAddress,
   describeAddress,
   normalizeAddress,
 } from "../types.js";
@@ -207,6 +210,82 @@ describe("Address type guards", () => {
       expect(isStructuralAddress({ broadcast: true })).toBe(false);
     });
   });
+
+  describe("isFederatedAgentAddress", () => {
+    it("returns true for federated agent address", () => {
+      expect(
+        isFederatedAgentAddress({
+          system: "example.com/macro-agent/prod",
+          agent: "agent-1",
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for local agent address", () => {
+      expect(isFederatedAgentAddress({ agent: "agent-1" })).toBe(false);
+    });
+
+    it("returns false for federated scope address", () => {
+      expect(
+        isFederatedAgentAddress({
+          system: "example.com/macro-agent/prod",
+          scope: "scope-1",
+        } as Address)
+      ).toBe(false);
+    });
+  });
+
+  describe("isFederatedScopeAddress", () => {
+    it("returns true for federated scope address", () => {
+      expect(
+        isFederatedScopeAddress({
+          system: "example.com/macro-agent/prod",
+          scope: "scope-1",
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for local scope address", () => {
+      expect(isFederatedScopeAddress({ scope: "scope-1" })).toBe(false);
+    });
+
+    it("returns false for federated agent address", () => {
+      expect(
+        isFederatedScopeAddress({
+          system: "example.com/macro-agent/prod",
+          agent: "agent-1",
+        } as Address)
+      ).toBe(false);
+    });
+  });
+
+  describe("isFederatedAddress", () => {
+    it("returns true for federated agent address", () => {
+      expect(
+        isFederatedAddress({
+          system: "example.com/macro-agent/prod",
+          agent: "agent-1",
+        })
+      ).toBe(true);
+    });
+
+    it("returns true for federated scope address", () => {
+      expect(
+        isFederatedAddress({
+          system: "example.com/macro-agent/prod",
+          scope: "scope-1",
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for local addresses", () => {
+      expect(isFederatedAddress({ agent: "agent-1" })).toBe(false);
+      expect(isFederatedAddress({ scope: "scope-1" })).toBe(false);
+      expect(isFederatedAddress({ role: "worker" })).toBe(false);
+      expect(isFederatedAddress({ broadcast: true })).toBe(false);
+      expect(isFederatedAddress({ parent: true })).toBe(false);
+    });
+  });
 });
 
 describe("describeAddress", () => {
@@ -267,6 +346,24 @@ describe("describeAddress", () => {
 
   it("describes task address", () => {
     expect(describeAddress({ task: "task-123" })).toBe("task:task-123");
+  });
+
+  it("describes federated agent address", () => {
+    expect(
+      describeAddress({
+        system: "example.com/macro-agent/prod",
+        agent: "agent-1",
+      })
+    ).toBe("federated:example.com/macro-agent/prod/agent:agent-1");
+  });
+
+  it("describes federated scope address", () => {
+    expect(
+      describeAddress({
+        system: "example.com/macro-agent/prod",
+        scope: "scope-1",
+      })
+    ).toBe("federated:example.com/macro-agent/prod/scope:scope-1");
   });
 });
 

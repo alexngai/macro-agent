@@ -248,7 +248,8 @@ export type AddressRoutingErrorCode =
   | "TASK_NOT_FOUND" // Target task doesn't exist
   | "TASK_UNASSIGNED" // Task has no assigned agent
   | "SCOPE_NOT_FOUND" // Target scope doesn't exist
-  | "PARTIAL_DELIVERY"; // Some recipients failed
+  | "PARTIAL_DELIVERY" // Some recipients failed
+  | "FEDERATION_NOT_AVAILABLE"; // Federation not configured for cross-system addressing
 
 /**
  * Error for MAP address routing failures.
