@@ -476,22 +476,86 @@ describe("MessageRouter.sendToAddress()", () => {
   });
 
   describe("multi-agent address", () => {
-    it("throws ADDRESS_NOT_SUPPORTED for agents address", async () => {
+    it("routes to all specified agents", async () => {
       createAgent("sender");
       createAgent("agent-1");
       createAgent("agent-2");
+      createAgent("agent-3");
+
+      const result = await router.sendToAddress({
+        from: "sender",
+        to: { agents: ["agent-1", "agent-2", "agent-3"] },
+        content: "Hello multiple",
+      });
+
+      expect(result.delivered).toHaveLength(3);
+      expect(result.delivered).toContain("agent-1");
+      expect(result.delivered).toContain("agent-2");
+      expect(result.delivered).toContain("agent-3");
+    });
+
+    it("each agent receives the message", async () => {
+      createAgent("sender");
+      createAgent("agent-1");
+      createAgent("agent-2");
+
+      await router.sendToAddress({
+        from: "sender",
+        to: { agents: ["agent-1", "agent-2"] },
+        content: "Multi-message",
+      });
+
+      expect(router.getMessages("agent-1").length).toBeGreaterThanOrEqual(1);
+      expect(router.getMessages("agent-2").length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("throws AGENT_NOT_FOUND if any agent is missing", async () => {
+      createAgent("sender");
+      createAgent("agent-1");
+      // agent-2 does not exist
 
       try {
         await router.sendToAddress({
           from: "sender",
           to: { agents: ["agent-1", "agent-2"] },
-          content: "Hello multiple",
+          content: "Hello",
         });
+        expect.fail("Expected AddressRoutingError to be thrown");
       } catch (error) {
         expect(error).toBeInstanceOf(AddressRoutingError);
-        expect((error as AddressRoutingError).code).toBe("ADDRESS_NOT_SUPPORTED");
-        expect((error as AddressRoutingError).message).toContain("Multi-agent");
+        expect((error as AddressRoutingError).code).toBe("AGENT_NOT_FOUND");
       }
+    });
+
+    it("throws NO_RECIPIENTS for empty agents array", async () => {
+      createAgent("sender");
+
+      try {
+        await router.sendToAddress({
+          from: "sender",
+          to: { agents: [] },
+          content: "Hello",
+        });
+        expect.fail("Expected AddressRoutingError to be thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(AddressRoutingError);
+        expect((error as AddressRoutingError).code).toBe("NO_RECIPIENTS");
+      }
+    });
+
+    it("includes correlationId when provided", async () => {
+      createAgent("sender");
+      createAgent("agent-1");
+      createAgent("agent-2");
+
+      const result = await router.sendToAddress({
+        from: "sender",
+        to: { agents: ["agent-1", "agent-2"] },
+        content: "Request",
+        options: { correlationId: "multi-req-123" },
+      });
+
+      expect(result.correlationId).toBe("multi-req-123");
     });
   });
 

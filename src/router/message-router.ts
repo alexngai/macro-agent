@@ -233,11 +233,24 @@ export function createMessageRouter(
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
 
+  // Deprecation warning flags (emit once per session)
+  let sendDeprecationWarned = false;
+
   // ─────────────────────────────────────────────────────────────────
   // Message Operations
   // ─────────────────────────────────────────────────────────────────
 
   async function send(request: SendMessageRequest): Promise<SentMessage> {
+    // Emit deprecation warning once per session
+    if (!sendDeprecationWarned) {
+      sendDeprecationWarned = true;
+      console.warn(
+        "[macro-agent] DEPRECATION WARNING: send() with channel-based MessageTarget is deprecated. " +
+          "Use sendToAddress() with MAP Address type instead. " +
+          "See MAP Integration spec (s-5qir) for migration guide."
+      );
+    }
+
     const { from, to, content, correlation_id, priority = "normal" } = request;
 
     // Validate target - at least one target type must be specified
@@ -410,13 +423,9 @@ export function createMessageRouter(
       return sendToHierarchicalAddress(from, to, content, options);
     }
 
-    // For multi-agent addresses, throw until implemented
+    // Handle multi-agent addresses (not legacy compatible, handle directly)
     if (isAgentsAddress(to)) {
-      throw new AddressRoutingError(
-        "Multi-agent addressing not yet implemented",
-        "ADDRESS_NOT_SUPPORTED",
-        to
-      );
+      return sendToMultipleAgents(from, to, content, options);
     }
 
     // Check if this is a legacy-compatible address
@@ -892,6 +901,110 @@ export function createMessageRouter(
           {
             priority: priority as MessagePriority,
             deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined,
+          },
+          sessionChecker
+        );
+        if (decision.shouldWake || decision.shouldInterrupt) {
+          wakeHandler(recipientId, decision, event.id);
+        }
+      }
+
+      delivered.push(recipientId);
+    }
+
+    return {
+      id: event.id,
+      from,
+      to,
+      content,
+      timestamp: event.timestamp,
+      delivered,
+      correlationId,
+    };
+  }
+
+  /**
+   * Send a message to multiple specific agents.
+   * Used for { agents: [...] } addresses.
+   */
+  async function sendToMultipleAgents(
+    from: AgentId,
+    to: import("../map/types.js").AgentsAddress,
+    content: string,
+    options: { priority?: string; delivery?: string; correlationId?: string } = {}
+  ): Promise<AddressSendResult> {
+    const { priority = "normal", delivery, correlationId } = options;
+    const delivered: AgentId[] = [];
+    const recipientIds = to.agents;
+
+    if (recipientIds.length === 0) {
+      throw new AddressRoutingError(
+        "Empty agents array",
+        "NO_RECIPIENTS",
+        to
+      );
+    }
+
+    // Verify all agents exist first
+    for (const agentId of recipientIds) {
+      const agent = eventStore.getAgent(agentId);
+      if (!agent) {
+        throw new AddressRoutingError(
+          `Agent not found: ${agentId}`,
+          "AGENT_NOT_FOUND",
+          to
+        );
+      }
+    }
+
+    // Emit primary event for the multi-agent send
+    const event = eventStore.emit({
+      type: "message",
+      source: { agent_id: from },
+      target: {
+        address: to,
+        delivered: recipientIds,
+      },
+      payload: {
+        content,
+        correlation_id: correlationId,
+        priority,
+        delivery_hint: delivery,
+        multicast: {
+          type: "agents",
+          recipientCount: recipientIds.length,
+        },
+      },
+    });
+
+    // Fan out to each recipient
+    for (const recipientId of recipientIds) {
+      eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          agent_id: recipientId,
+          address: { agent: recipientId },
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+          via: "agents",
+          original_message_id: event.id,
+        },
+      });
+
+      // Handle wake decision
+      if (sessionChecker && wakeHandler) {
+        const decision = getWakeDecisionWithHint(
+          recipientId,
+          {
+            priority: priority as MessagePriority,
+            deliveryHint: delivery as
+              | import("../map/types.js").DeliveryHint
+              | undefined,
           },
           sessionChecker
         );
