@@ -53,6 +53,7 @@ import {
   type HandlerContext,
   type JsonRpcMessage,
 } from "./rpc-handler.js";
+import { EXTENSION_CAPABILITIES } from "./extensions/index.js";
 
 // =============================================================================
 // Connection Session
@@ -615,6 +616,14 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/scopes/get": "canQuery",
       "map/scopes/create": "canManageScopes",
     };
+
+    // Add capability requirements for registered extension methods
+    for (const method of this.extensions.keys()) {
+      const capability = EXTENSION_CAPABILITIES[method];
+      if (capability) {
+        capabilityRequirements[method] = capability as keyof ConnectedParticipant["capabilities"];
+      }
+    }
 
     return createRPCHandler({
       handlers,

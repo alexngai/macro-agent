@@ -94,3 +94,26 @@ export {
   type MAPWebSocketConfig,
   type MAPWebSocketSetup,
 } from "./websocket-integration.js";
+
+// Extension methods (_macro/*)
+export {
+  // Registration
+  registerMacroExtensions,
+  unregisterMacroExtensions,
+  registerTaskExtensions,
+  unregisterTaskExtensions,
+  registerWakeExtension,
+  unregisterWakeExtension,
+  registerWorkspaceExtension,
+  unregisterWorkspaceExtension,
+  // Constants
+  MACRO_EXTENSION_METHODS,
+  EXTENSION_CAPABILITIES,
+  // Types
+  type MacroExtensionServices,
+  type TaskExtensionServices,
+  type WakeExtensionServices,
+  type WorkspaceExtensionServices,
+  type SessionInfo,
+  type InternalWorkspace,
+} from "./extensions/index.js";

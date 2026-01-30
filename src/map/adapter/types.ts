@@ -84,6 +84,8 @@ export interface ParticipantCapabilities {
   canManageScopes?: boolean;
   /** Can update permissions */
   canUpdatePermissions?: boolean;
+  /** Can create, assign, and complete tasks */
+  canManageTasks?: boolean;
 }
 
 /**
