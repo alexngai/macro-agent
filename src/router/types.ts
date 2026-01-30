@@ -9,6 +9,12 @@ import type {
   Timestamp,
   EventSource,
 } from "../store/types/index.js";
+import type {
+  Address,
+  SendOptions,
+  DeliveryHint,
+  MessagePriority as MAPMessagePriority,
+} from "../map/types.js";
 
 // Message target - where to route messages
 export interface MessageTarget {
@@ -190,3 +196,75 @@ export type AgentSpawner = (
  * Callback to check if an agent has an active session.
  */
 export type AgentSessionChecker = (agentId: AgentId) => boolean;
+
+// =============================================================================
+// MAP Address-based Send Types
+// =============================================================================
+
+/**
+ * Request to send a message using MAP Address.
+ * This is the new MAP-native interface that will eventually replace
+ * the channel-based SendMessageRequest.
+ */
+export interface SendToAddressRequest {
+  /** Sending agent ID */
+  from: AgentId;
+  /** Target address */
+  to: Address;
+  /** Message content */
+  content: string;
+  /** Send options (priority, delivery hint, etc.) */
+  options?: SendOptions;
+}
+
+/**
+ * Result of sending a message via Address-based routing.
+ * Includes delivery confirmation for each resolved recipient.
+ */
+export interface AddressSendResult {
+  /** Message ID */
+  id: EventId;
+  /** Sending agent */
+  from: AgentId;
+  /** Original target address */
+  to: Address;
+  /** Message content */
+  content: string;
+  /** When the message was sent */
+  timestamp: Timestamp;
+  /** Agent IDs the message was delivered to */
+  delivered: AgentId[];
+  /** Correlation ID for threading (if provided) */
+  correlationId?: string;
+}
+
+/**
+ * Error codes for MAP address routing failures.
+ */
+export type AddressRoutingErrorCode =
+  | "ADDRESS_NOT_SUPPORTED" // Address type not yet implemented
+  | "NO_RECIPIENTS" // Address resolved to zero recipients
+  | "AGENT_NOT_FOUND" // Target agent doesn't exist
+  | "TASK_NOT_FOUND" // Target task doesn't exist
+  | "TASK_UNASSIGNED" // Task has no assigned agent
+  | "SCOPE_NOT_FOUND" // Target scope doesn't exist
+  | "PARTIAL_DELIVERY"; // Some recipients failed
+
+/**
+ * Error for MAP address routing failures.
+ */
+export class AddressRoutingError extends Error {
+  constructor(
+    message: string,
+    public readonly code: AddressRoutingErrorCode,
+    public readonly address?: Address,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = "AddressRoutingError";
+  }
+}
+
+// Re-export Address and related types for convenience
+export type { Address, SendOptions, DeliveryHint };
+export { MAPMessagePriority };

@@ -118,13 +118,31 @@ export type { RoleAgentInfo, RoleAgentSource } from "./role-resolver.js";
 export {
   determineWakeAction,
   getWakeDecision,
+  getWakeDecisionWithHint,
   shouldWakeAgent,
   shouldInterruptAgent,
   comparePriority as compareMessagePriority,
   PRIORITY_VALUES as MESSAGE_PRIORITY_VALUES,
 } from "./wake.js";
 
-export type { SessionChecker, WakeDecision } from "./wake.js";
+export type { SessionChecker, WakeDecision, WakeOptions } from "./wake.js";
 
 // Wake handler type from message router
 export type { WakeHandler } from "./message-router.js";
+
+// Address resolver for hierarchical addresses (MAP Phase 2)
+export {
+  resolveParent,
+  resolveChildren,
+  resolveAncestors,
+  resolveDescendants,
+  resolveSiblings,
+  resolveHierarchicalAddress,
+  hasRecipients,
+} from "./address-resolver.js";
+
+export type {
+  HierarchyAgentInfo,
+  HierarchySource,
+  ResolvedAddress,
+} from "./address-resolver.js";

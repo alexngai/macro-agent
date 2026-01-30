@@ -8,11 +8,13 @@ import { describe, it, expect, vi } from "vitest";
 import {
   determineWakeAction,
   getWakeDecision,
+  getWakeDecisionWithHint,
   shouldWakeAgent,
   shouldInterruptAgent,
   comparePriority,
   PRIORITY_VALUES,
   type SessionChecker,
+  type WakeOptions,
 } from "../wake.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +215,189 @@ describe("getWakeDecision", () => {
     // Without isStopped, defaults to not stopped
     expect(decision.action).toBe("wake");
     expect(decision.shouldWake).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getWakeDecisionWithHint
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("getWakeDecisionWithHint", () => {
+  describe("without delivery hint (priority-based)", () => {
+    it("should use priority-based decision when no hint provided", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        isPrompting: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "urgent" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("wake");
+      expect(decision.reason).toBe("priority_based");
+    });
+
+    it("should use priority-based decision when hint is 'queue'", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        isPrompting: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "urgent", deliveryHint: "queue" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("wake");
+      expect(decision.reason).toBe("priority_based");
+    });
+  });
+
+  describe("with 'interrupt' delivery hint", () => {
+    it("should force interrupt regardless of priority", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+        isPrompting: vi.fn().mockReturnValue(true),
+        supportsInjection: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "low", deliveryHint: "interrupt" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("interrupt");
+      expect(decision.shouldWake).toBe(true);
+      expect(decision.shouldInterrupt).toBe(true);
+      expect(decision.reason).toBe("delivery_hint_interrupt");
+    });
+
+    it("should force interrupt even for idle agent", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        isPrompting: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "normal", deliveryHint: "interrupt" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("interrupt");
+      expect(decision.shouldInterrupt).toBe(true);
+      expect(decision.reason).toBe("delivery_hint_interrupt");
+    });
+  });
+
+  describe("with 'inject' delivery hint", () => {
+    it("should force inject when session supports injection", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+        isPrompting: vi.fn().mockReturnValue(true),
+        supportsInjection: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "low", deliveryHint: "inject" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("inject");
+      expect(decision.shouldWake).toBe(true);
+      expect(decision.shouldInterrupt).toBe(false);
+      expect(decision.canInject).toBe(true);
+      expect(decision.reason).toBe("delivery_hint_inject");
+    });
+
+    it("should fall back to queue when injection not supported and session exists", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+        isPrompting: vi.fn().mockReturnValue(true),
+        supportsInjection: vi.fn().mockReturnValue(false),
+      };
+
+      const options: WakeOptions = { priority: "high", deliveryHint: "inject" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("queue");
+      expect(decision.shouldWake).toBe(false);
+      expect(decision.canInject).toBe(false);
+      expect(decision.reason).toBe("delivery_hint_inject_fallback");
+    });
+
+    it("should fall back to wake when injection not supported and no session", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        isPrompting: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(false),
+      };
+
+      const options: WakeOptions = { priority: "normal", deliveryHint: "inject" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("wake");
+      expect(decision.shouldWake).toBe(true);
+      expect(decision.canInject).toBe(false);
+      expect(decision.reason).toBe("delivery_hint_inject_fallback");
+    });
+  });
+
+  describe("with stopped agent", () => {
+    it("should always skip for stopped agent regardless of hint", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+        isPrompting: vi.fn().mockReturnValue(true),
+        supportsInjection: vi.fn().mockReturnValue(true),
+        isStopped: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "urgent", deliveryHint: "interrupt" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("skip");
+      expect(decision.shouldWake).toBe(false);
+      expect(decision.shouldInterrupt).toBe(false);
+      expect(decision.canInject).toBe(false);
+      expect(decision.reason).toBe("agent_stopped");
+    });
+
+    it("should skip for stopped agent even with inject hint", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(true),
+        isStopped: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "high", deliveryHint: "inject" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("skip");
+      expect(decision.reason).toBe("agent_stopped");
+    });
+  });
+
+  describe("edge cases", () => {
+    it("should handle missing optional session checker methods", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+      };
+
+      const options: WakeOptions = { priority: "normal", deliveryHint: "inject" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      // Without supportsInjection, defaults to true
+      expect(decision.action).toBe("inject");
+      expect(decision.canInject).toBe(true);
+    });
+
+    it("should preserve canInject flag based on session capabilities", () => {
+      const checker: SessionChecker = {
+        hasActiveSession: vi.fn().mockReturnValue(true),
+        isPrompting: vi.fn().mockReturnValue(false),
+        supportsInjection: vi.fn().mockReturnValue(false),
+      };
+
+      const options: WakeOptions = { priority: "urgent", deliveryHint: "interrupt" };
+      const decision = getWakeDecisionWithHint("agent-1", options, checker);
+
+      expect(decision.action).toBe("interrupt");
+      expect(decision.canInject).toBe(false);
+    });
   });
 });
 
