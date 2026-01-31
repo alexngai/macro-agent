@@ -387,10 +387,7 @@ export function federatedAddressToPeerAddress(address: FederatedAddress): string
   if (isFederatedAgentAddress(address)) {
     return `${address.system}/${address.agent}`;
   }
-  if (isFederatedScopeAddress(address)) {
-    // For scope addresses, route to the system root
-    return address.system;
-  }
+  // For scope addresses (or any other federated address), route to the system root
   return address.system;
 }
 

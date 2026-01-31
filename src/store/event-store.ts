@@ -244,6 +244,15 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     );
   }
 
+  // Emit warning for in-memory mode (only in non-test environments)
+  if (config.inMemory && process.env.NODE_ENV !== 'test') {
+    console.warn(
+      '[macro-agent] WARNING: Using in-memory EventStore. MCP tools (done, spawn_agent, etc.) will not work ' +
+        'because MCP servers run as separate subprocesses that cannot access in-memory data. ' +
+        'Use file-based storage (remove inMemory option) for real agent workflows.'
+    );
+  }
+
   const store = createStore();
 
   // Set up persister based on backend type

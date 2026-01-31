@@ -257,10 +257,10 @@ describe("Role-Based Message Routing", () => {
       expect(agents.length).toBe(2);
 
       // Send to @workers
-      await router.send({
+      await router.sendToAddress({
+        from: "coordinator-1" as import("../../store/types/index.js").AgentId,
+        to: { role: "worker" },
         content: "Hello workers",
-        from: { agent_id: "coordinator-1" },
-        to: { role: { role: "worker" } },
       });
 
       // Verify messages were routed via query
@@ -276,11 +276,11 @@ describe("Role-Based Message Routing", () => {
       spawnAndStartAgent("worker-1", "worker", "task1");
       spawnAndStartAgent("monitor-1", "monitor", "monitor-task");
 
-      // Broadcast to workers
-      await router.send({
+      // Broadcast to workers (using role-based addressing)
+      await router.sendToAddress({
+        from: "coordinator-1" as import("../../store/types/index.js").AgentId,
+        to: { role: "worker" },
         content: "Broadcast to workers",
-        from: { agent_id: "coordinator-1" },
-        to: { broadcast: { scope: "workers" } },
       });
 
       // Verify broadcast was sent

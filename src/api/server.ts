@@ -652,11 +652,11 @@ export function createAPIServer(
         content: string,
         priority: "high"
       ) {
-        await services.messageRouter.send({
-          from: { agent_id: "__human__" as AgentId },
-          to: { agent_id: toAgentId },
+        await services.messageRouter.sendToAddress({
+          from: "__human__" as AgentId,
+          to: { agent: toAgentId },
           content,
-          priority,
+          options: { priority },
         });
       },
     };
@@ -1359,11 +1359,11 @@ export function createAPIApp(
         content: string,
         priority: "high"
       ) {
-        await messageRouter.send({
-          from: { agent_id: "__human__" as AgentId },
-          to: { agent_id: toAgentId },
+        await messageRouter.sendToAddress({
+          from: "__human__" as AgentId,
+          to: { agent: toAgentId },
           content,
-          priority,
+          options: { priority },
         });
       },
     };

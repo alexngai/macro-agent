@@ -221,19 +221,24 @@ const app = createAPIApp({
 ```typescript
 import { createEventStore } from 'macro-agent';
 
-// In-memory store (for testing)
+// In-memory store (for unit testing only)
+// ⚠️ WARNING: MCP tools (done, spawn_agent, etc.) will NOT work with in-memory storage
+// because MCP servers run as separate subprocesses that cannot access in-memory data.
 const eventStore = await createEventStore({ inMemory: true });
 
-// SQLite store (for production)
+// SQLite store (for production - required for MCP tools)
 const eventStore = await createEventStore({
-  dbPath: './data/events.db',
+  instanceId: 'my-project',
+  baseDir: './data',
 });
 
-// Shared database connection
+// Legacy path option (deprecated)
 const eventStore = await createEventStore({
-  db: existingDatabase,
+  path: './data/events.json', // Use instanceId + baseDir instead
 });
 ```
+
+> **Important**: Always use file-based storage (SQLite) for workflows that involve real agents with MCP tools. The `inMemory` option is only suitable for unit tests that don't spawn actual Claude Code processes.
 
 ## Message Router Configuration
 

@@ -131,6 +131,7 @@ describe("Cascade Termination E2E", () => {
   let agentManager: AgentManager;
   let messageRouter: MessageRouter;
   let testRepo: { path: string; cleanup: () => void };
+  let testInstanceId: string;
 
   beforeEach(async () => {
     if (!RUN_FULL_AGENT) {
@@ -141,7 +142,12 @@ describe("Cascade Termination E2E", () => {
     testRepo = createTestRepo("cascade");
     log(`Test repo created at: ${testRepo.path}`);
 
-    eventStore = await createEventStore({ inMemory: true });
+    // Use file-based storage for MCP subprocess compatibility
+    testInstanceId = `cascade-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",

@@ -130,13 +130,11 @@ export function createInjectContextHandler(
       content: string,
       priority: "high"
     ) {
-      await deps.messageRouter.send({
-        from: {
-          agent_id: fromAgentId ?? callerAgentId,
-        },
-        to: { agent_id: toAgentId },
+      await deps.messageRouter.sendToAddress({
+        from: fromAgentId ?? callerAgentId,
+        to: { agent: toAgentId },
         content,
-        priority,
+        options: { priority },
       });
     },
   };

@@ -12,6 +12,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocket } from "ws";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { createEventStore, type EventStore } from "../../store/event-store.js";
 import {
   createAgentManager,
@@ -192,6 +195,8 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testDir: string;
+  let testInstanceId: string;
   const clients: ACPWireClient[] = [];
 
   beforeEach(async () => {
@@ -200,8 +205,15 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
       return;
     }
 
-    // Create real services
-    eventStore = await createEventStore({ inMemory: true });
+    // Create temp directory for file-based storage (required for MCP subprocess access)
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), "websocket-full-e2e-"));
+    testInstanceId = `websocket-full-e2e-${Date.now()}`;
+
+    // Create real services with file-based storage
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testDir,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -231,6 +243,11 @@ describe("WebSocket ACP Full E2E (Real Agents)", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+
+    // Clean up temp directory
+    if (testDir) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   describe("Single Client - Real Agent", () => {

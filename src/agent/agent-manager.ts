@@ -430,8 +430,9 @@ export function createAgentManager(
       });
 
       // Build MCP server configuration for the macro-agent MCP server
+      // Note: McpServerStdio doesn't have a 'type' field - stdio is the implicit default
+      // when neither 'type: http' nor 'type: sse' is specified
       const macroAgentMcp = {
-        type: "stdio" as const,
         name: "macro-agent",
         command: "npx",
         args: ["multiagent-mcp"],
@@ -446,9 +447,9 @@ export function createAgentManager(
       };
 
       // Combine with any user-provided MCP servers
+      // Note: Like macroAgentMcp, user MCP servers use stdio (no 'type' field)
       const userMcpServers =
         agentConfig?.mcpServers?.map((s) => ({
-          type: "stdio" as const,
           name: s.name,
           command: s.command,
           args: s.args ?? [],

@@ -53,8 +53,8 @@ This document describes the architecture of macro-agent, a multi-agent orchestra
 │                           Message Router                                      │
 │                                                                               │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │ Direct Channel  │  │Broadcast Channel│  │  Role Channel   │              │
-│  │ agent → agent   │  │ fan-out to all  │  │ resolve at send │              │
+│  │  MAP Addresses  │  │   Structural    │  │  Hierarchical   │              │
+│  │  { agent }      │  │  { scope/role } │  │ { parent/child }│              │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
 │                                                                               │
 │  Priority Ordering: urgent > high > normal > low                              │
@@ -228,7 +228,7 @@ pending → assigned → in_progress → completed
 
 ### Message Router
 
-Inter-agent communication with multiple channel types:
+Inter-agent communication using MAP (Multi-Agent Protocol) addressing:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -243,16 +243,49 @@ Inter-agent communication with multiple channel types:
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘                    ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
-│  Channel Types:                                                              │
+│  MAP Address Types:                                                          │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   Direct    │  │  Broadcast  │  │    Role     │  │   Topic     │        │
-│  │ agent→agent │  │  fan-out    │  │ role→agents │  │ pub/sub     │        │
+│  │   Direct    │  │  Structural │  │Hierarchical │  │  Federated  │        │
+│  │ { agent }   │  │ { scope }   │  │ { parent }  │  │ { system,   │        │
+│  │ { agents }  │  │ { role }    │  │ { children }│  │   agent }   │        │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
 │                                                                              │
 │  Activity Waking:                                                            │
 │  - Monitor agents wake on system events                                      │
 │  - Sleeping agents wake on direct messages                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Primary API:** `sendToAddress()`
+
+```typescript
+// Direct agent addressing
+await router.sendToAddress({
+  from: "coordinator",
+  to: { agent: "worker-1" },
+  content: "Start task",
+});
+
+// Role-based addressing
+await router.sendToAddress({
+  from: "coordinator",
+  to: { role: "worker" },
+  content: "Status check",
+});
+
+// Hierarchical addressing
+await router.sendToAddress({
+  from: "worker-1",
+  to: { parent: true },
+  content: "Task complete",
+});
+
+// Scope/topic addressing
+await router.sendToAddress({
+  from: "monitor",
+  to: { scope: "alerts" },
+  content: "System warning",
+});
 ```
 
 ### Context Injection

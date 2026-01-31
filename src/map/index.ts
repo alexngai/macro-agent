@@ -14,6 +14,3 @@ export * from "./types.js";
 
 // Adapter types
 export * from "./adapter/index.js";
-
-// Utilities
-export * from "./utils/index.js";
