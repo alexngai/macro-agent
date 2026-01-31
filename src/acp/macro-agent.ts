@@ -401,8 +401,9 @@ export class MacroAgent implements Agent {
     method: string,
     params: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
-    // Method comes in without the underscore prefix
-    const fullMethod = `_${method}` as ACPExtensionMethod;
+    // Method may come with or without underscore prefix depending on caller
+    // SDK calls with full name (e.g., "_macro/spawnAgent"), direct calls may omit it
+    const fullMethod = (method.startsWith("_") ? method : `_${method}`) as ACPExtensionMethod;
 
     switch (fullMethod) {
       case "_macro/spawnAgent":

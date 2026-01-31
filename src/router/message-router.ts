@@ -19,10 +19,7 @@ import type {
   Timestamp,
 } from "../store/types/index.js";
 import type {
-  MessageTarget,
   MessageSender,
-  SendMessageRequest,
-  SentMessage,
   ReceivedMessage,
   GetMessagesOptions,
   Channel,
@@ -35,8 +32,11 @@ import type {
   AgentSessionChecker,
   MessagePriority,
   WakeAction,
+  SendToAddressRequest,
+  AddressSendResult,
+  Address,
 } from "./types.js";
-import { RoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
+import { RoutingError, AddressRoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
 import {
   resolveBroadcastTarget,
   type BroadcastAgentSource,
@@ -47,9 +47,27 @@ import {
 } from "./role-resolver.js";
 import {
   getWakeDecision,
+  getWakeDecisionWithHint,
   type SessionChecker,
   type WakeDecision,
 } from "./wake.js";
+import {
+  isAgentAddress,
+  isAgentsAddress,
+  isScopeAddress,
+  isRoleAddress,
+  isTaskAddress,
+  isBroadcastAddress,
+  isHierarchicalAddress,
+  isFederatedAddress,
+  describeAddress,
+} from "../map/types.js";
+import type { FederationHandler } from "../map/federation/types.js";
+import { getSystemFromAddress } from "../map/federation/federation-handler.js";
+import {
+  resolveHierarchicalAddress,
+  type HierarchySource,
+} from "./address-resolver.js";
 
 /**
  * MessageRouter interface
@@ -60,12 +78,17 @@ export interface MessageRouter {
   // ─────────────────────────────────────────────────────────────────
 
   /**
-   * Send a message to target(s).
-   * Routes based on target type: agent_id, task_id, or topic.
-   * If the target is a task with no assigned agent, may spawn a new agent.
-   * @throws RoutingError if target cannot be resolved
+   * Send a message using MAP Address-based routing.
+   *
+   * This is the new MAP-native method that accepts Address types directly.
+   * It supports all legacy-compatible addresses and will throw for
+   * hierarchical addresses until full resolution is implemented.
+   *
+   * @param request - The send request with MAP Address
+   * @returns Result with delivery confirmation
+   * @throws AddressRoutingError if address cannot be resolved
    */
-  send(request: SendMessageRequest): Promise<SentMessage>;
+  sendToAddress(request: SendToAddressRequest): Promise<AddressSendResult>;
 
   /**
    * Emit a status event from an agent.
@@ -179,6 +202,11 @@ export interface MessageRouterConfig {
    * Used to actually wake/inject/interrupt agents.
    */
   wakeHandler?: WakeHandler;
+  /**
+   * Optional federation handler for cross-system messaging.
+   * Required when sending to federated addresses.
+   */
+  federationHandler?: FederationHandler;
 }
 
 /**
@@ -193,6 +221,7 @@ export function createMessageRouter(
   const agentSessionChecker = config.agentSessionChecker;
   const sessionChecker = config.sessionChecker;
   const wakeHandler = config.wakeHandler;
+  const federationHandler = config.federationHandler;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -201,64 +230,522 @@ export function createMessageRouter(
   // Message Operations
   // ─────────────────────────────────────────────────────────────────
 
-  async function send(request: SendMessageRequest): Promise<SentMessage> {
-    const { from, to, content, correlation_id, priority = "normal" } = request;
+  /**
+   * Send a message using MAP Address-based routing.
+   */
+  async function sendToAddress(
+    request: SendToAddressRequest
+  ): Promise<AddressSendResult> {
+    const { from, to, content, options = {} } = request;
+    const { priority = "normal", delivery, correlationId } = options;
 
-    // Validate target - at least one target type must be specified
-    if (!to.agent_id && !to.task_id && !to.topic && !to.broadcast && !to.role) {
-      throw new RoutingError("No target specified", "NO_TARGET", to);
+    // Handle hierarchical addresses using the resolver
+    if (isHierarchicalAddress(to)) {
+      return sendToHierarchicalAddress(from, to, content, options);
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Handle multicast targets (broadcast, role)
-    // ─────────────────────────────────────────────────────────────────
-
-    if (to.broadcast || to.role) {
-      return sendMulticast(request, priority);
+    // Handle multi-agent addresses (not legacy compatible, handle directly)
+    if (isAgentsAddress(to)) {
+      return sendToMultipleAgents(from, to, content, options);
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Handle unicast targets (agent_id, task_id, topic)
-    // ─────────────────────────────────────────────────────────────────
+    // Handle federated addresses (cross-system routing)
+    if (isFederatedAddress(to)) {
+      if (!federationHandler) {
+        throw new AddressRoutingError(
+          "Federation not configured for cross-system messaging",
+          "FEDERATION_NOT_AVAILABLE",
+          to
+        );
+      }
 
-    // Resolve recipients and build effective target
-    const resolvedTarget = await resolveTarget(to);
+      const systemId = getSystemFromAddress(to);
+      if (!federationHandler.isConnected(systemId)) {
+        throw new AddressRoutingError(
+          `Not connected to federated system: ${systemId}`,
+          "FEDERATION_NOT_AVAILABLE",
+          to,
+          { systemId }
+        );
+      }
 
-    // Emit message event with resolved target
+      // Send via federation handler
+      await federationHandler.sendMessage(systemId, {
+        type: "map/send",
+        from,
+        to,
+        content,
+        options,
+      });
+
+      // Return result (no delivery confirmation for federated messages)
+      return {
+        id: `fed-${nanoid()}` as EventId,
+        from,
+        to,
+        content,
+        timestamp: Date.now() as Timestamp,
+        delivered: [], // Cannot confirm delivery for federated messages
+        correlationId,
+      };
+    }
+
+    // Handle remaining address types directly
+    const delivered: AgentId[] = [];
+    if (isAgentAddress(to)) {
+      // Direct agent address
+      const agent = eventStore.getAgent(to.agent);
+      if (!agent) {
+        throw new AddressRoutingError(
+          `Agent not found: ${to.agent}`,
+          "AGENT_NOT_FOUND",
+          to
+        );
+      }
+
+      const event = eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          agent_id: to.agent,
+          address: to,
+          delivered: [to.agent],
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+        },
+      });
+
+      // Handle wake decision
+      if (sessionChecker && wakeHandler) {
+        const decision = getWakeDecisionWithHint(
+          to.agent,
+          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          sessionChecker
+        );
+        if (decision.shouldWake || decision.shouldInterrupt) {
+          wakeHandler(to.agent, decision, event.id);
+        }
+      }
+
+      delivered.push(to.agent);
+
+      return {
+        id: event.id,
+        from,
+        to,
+        content,
+        timestamp: event.timestamp,
+        delivered,
+        correlationId,
+      };
+    }
+
+    if (isTaskAddress(to)) {
+      // Task address - resolve to assigned agent
+      const task = eventStore.getTask(to.task);
+      if (!task) {
+        throw new AddressRoutingError(
+          `Task not found: ${to.task}`,
+          "TASK_NOT_FOUND",
+          to
+        );
+      }
+
+      let targetAgentId: AgentId;
+      if (!task.assigned_agent) {
+        // Try to spawn an agent for unassigned task
+        if (!agentSpawner) {
+          throw new AddressRoutingError(
+            `Task ${to.task} has no assigned agent`,
+            "TASK_UNASSIGNED",
+            to
+          );
+        }
+        const result = await agentSpawner(to.task, task.description);
+        targetAgentId = result.agent_id;
+      } else {
+        targetAgentId = task.assigned_agent;
+      }
+
+      const event = eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          agent_id: targetAgentId,
+          address: to,
+          delivered: [targetAgentId],
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+          original_target: { task: to.task },
+        },
+      });
+
+      // Handle wake decision
+      if (sessionChecker && wakeHandler) {
+        const decision = getWakeDecisionWithHint(
+          targetAgentId,
+          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          sessionChecker
+        );
+        if (decision.shouldWake || decision.shouldInterrupt) {
+          wakeHandler(targetAgentId, decision, event.id);
+        }
+      }
+
+      delivered.push(targetAgentId);
+
+      return {
+        id: event.id,
+        from,
+        to,
+        content,
+        timestamp: event.timestamp,
+        delivered,
+        correlationId,
+      };
+    }
+
+    if (isScopeAddress(to)) {
+      // Scope address - route to topic subscribers
+      const subscribers = eventStore.getSubscribers({
+        type: "topic",
+        target: to.scope,
+      });
+
+      if (subscribers.length === 0) {
+        throw new AddressRoutingError(
+          `Scope has no subscribers: ${to.scope}`,
+          "NO_RECIPIENTS",
+          to
+        );
+      }
+
+      const event = eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          topic: to.scope,
+          address: to,
+          delivered: subscribers,
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+        },
+      });
+
+      // Handle wake decisions for each subscriber
+      // Note: The EventStore already fans out to subscribers via target.topic routing,
+      // so we don't emit separate events here (that would cause duplicate messages)
+      for (const subscriberId of subscribers) {
+        if (sessionChecker && wakeHandler) {
+          const decision = getWakeDecisionWithHint(
+            subscriberId,
+            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            sessionChecker
+          );
+          if (decision.shouldWake || decision.shouldInterrupt) {
+            wakeHandler(subscriberId, decision, event.id);
+          }
+        }
+
+        delivered.push(subscriberId);
+      }
+
+      return {
+        id: event.id,
+        from,
+        to,
+        content,
+        timestamp: event.timestamp,
+        delivered,
+        correlationId,
+      };
+    }
+
+    if (isRoleAddress(to)) {
+      // Role address - resolve to matching agents
+      const agentSource: RoleAgentSource = {
+        listAgents: () => eventStore.listAgents(),
+        getAgent: (id) => eventStore.getAgent(id),
+      };
+
+      const recipientIds = resolveRoleTarget(agentSource, {
+        role: to.role,
+        coordinatorId: to.within,
+      });
+
+      if (recipientIds.length === 0) {
+        throw new AddressRoutingError(
+          `No agents found for role: ${to.role}${to.within ? ` within ${to.within}` : ""}`,
+          "NO_RECIPIENTS",
+          to
+        );
+      }
+
+      const event = eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          address: to,
+          delivered: recipientIds,
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+          multicast: {
+            type: "role",
+            role: to.role,
+            coordinatorId: to.within,
+            recipientCount: recipientIds.length,
+          },
+        },
+      });
+
+      // Fan out to each recipient
+      for (const recipientId of recipientIds) {
+        eventStore.emit({
+          type: "message",
+          source: { agent_id: from },
+          target: {
+            agent_id: recipientId,
+            address: { agent: recipientId },
+          },
+          payload: {
+            content,
+            correlation_id: correlationId,
+            priority,
+            delivery_hint: delivery,
+            via: "role",
+            original_message_id: event.id,
+          },
+        });
+
+        // Handle wake decision
+        if (sessionChecker && wakeHandler) {
+          const decision = getWakeDecisionWithHint(
+            recipientId,
+            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            sessionChecker
+          );
+          if (decision.shouldWake || decision.shouldInterrupt) {
+            wakeHandler(recipientId, decision, event.id);
+          }
+        }
+
+        delivered.push(recipientId);
+      }
+
+      return {
+        id: event.id,
+        from,
+        to,
+        content,
+        timestamp: event.timestamp,
+        delivered,
+        correlationId,
+      };
+    }
+
+    if (isBroadcastAddress(to)) {
+      // Broadcast to all agents
+      const agentSource: BroadcastAgentSource = {
+        listAgents: () => eventStore.listAgents(),
+      };
+
+      const recipientIds = resolveBroadcastTarget(agentSource, { scope: "all" });
+
+      const event = eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          address: to,
+          delivered: recipientIds,
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+          multicast: {
+            type: "broadcast",
+            scope: "all",
+            recipientCount: recipientIds.length,
+          },
+        },
+      });
+
+      // Fan out to each recipient
+      for (const recipientId of recipientIds) {
+        eventStore.emit({
+          type: "message",
+          source: { agent_id: from },
+          target: {
+            agent_id: recipientId,
+            address: { agent: recipientId },
+          },
+          payload: {
+            content,
+            correlation_id: correlationId,
+            priority,
+            delivery_hint: delivery,
+            via: "broadcast",
+            original_message_id: event.id,
+          },
+        });
+
+        // Handle wake decision
+        if (sessionChecker && wakeHandler) {
+          const decision = getWakeDecisionWithHint(
+            recipientId,
+            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            sessionChecker
+          );
+          if (decision.shouldWake || decision.shouldInterrupt) {
+            wakeHandler(recipientId, decision, event.id);
+          }
+        }
+
+        delivered.push(recipientId);
+      }
+
+      return {
+        id: event.id,
+        from,
+        to,
+        content,
+        timestamp: event.timestamp,
+        delivered,
+        correlationId,
+      };
+    }
+
+    // Should not reach here for legacy-compatible addresses
+    throw new AddressRoutingError(
+      `Unhandled address type: ${describeAddress(to)}`,
+      "ADDRESS_NOT_SUPPORTED",
+      to
+    );
+  }
+
+  /**
+   * Send a message to a hierarchical address (parent, children, ancestors, descendants, siblings).
+   * Uses the address resolver to convert the relative address to concrete agent IDs.
+   */
+  async function sendToHierarchicalAddress(
+    from: AgentId,
+    to: Address,
+    content: string,
+    options: { priority?: string; delivery?: string; correlationId?: string } = {}
+  ): Promise<AddressSendResult> {
+    const { priority = "normal", delivery, correlationId } = options;
+    const delivered: AgentId[] = [];
+
+    // Create hierarchy source from EventStore
+    const hierarchySource: HierarchySource = {
+      getAgent: (id) => {
+        const agent = eventStore.getAgent(id);
+        if (!agent) return undefined;
+        return {
+          id: agent.id,
+          parent: agent.parent ?? undefined,
+          lineage: agent.lineage,
+          state: agent.state,
+        };
+      },
+      listAgents: () =>
+        eventStore.listAgents().map((agent) => ({
+          id: agent.id,
+          parent: agent.parent ?? undefined,
+          lineage: agent.lineage,
+          state: agent.state,
+        })),
+    };
+
+    // Resolve the hierarchical address
+    const resolved = resolveHierarchicalAddress(
+      to as import("../map/types.js").HierarchicalAddress,
+      from,
+      hierarchySource
+    );
+
+    if (resolved.agentIds.length === 0) {
+      throw new AddressRoutingError(
+        `No recipients found for hierarchical address: ${describeAddress(to)}`,
+        "NO_RECIPIENTS",
+        to
+      );
+    }
+
+    // Emit a primary event for the hierarchical send
     const event = eventStore.emit({
       type: "message",
-      source: {
-        agent_id: from.agent_id,
-        task_id: from.task_id,
+      source: { agent_id: from },
+      target: {
+        address: to,
+        delivered: resolved.agentIds,
       },
-      target: resolvedTarget,
       payload: {
         content,
-        correlation_id,
+        correlation_id: correlationId,
         priority,
-        // Keep original target info for context
-        original_target: to.task_id ? { task_id: to.task_id } : undefined,
+        delivery_hint: delivery,
+        multicast: {
+          type: "hierarchical",
+          address: describeAddress(to),
+          recipientCount: resolved.agentIds.length,
+        },
       },
     });
 
-    // Handle priority-based wake for direct agent target
-    if (resolvedTarget.agent_id && sessionChecker && wakeHandler) {
-      const decision = getWakeDecision(resolvedTarget.agent_id, priority, sessionChecker);
-      if (decision.shouldWake || decision.shouldInterrupt) {
-        wakeHandler(resolvedTarget.agent_id, decision, event.id);
-      }
-    }
+    // Fan out to each resolved recipient
+    for (const recipientId of resolved.agentIds) {
+      eventStore.emit({
+        type: "message",
+        source: { agent_id: from },
+        target: {
+          agent_id: recipientId,
+          address: { agent: recipientId },
+        },
+        payload: {
+          content,
+          correlation_id: correlationId,
+          priority,
+          delivery_hint: delivery,
+          via: "hierarchical",
+          original_message_id: event.id,
+        },
+      });
 
-    // Route to lineage subscribers if this is from an ancestor
-    // (children with lineage subscription to themselves receive messages from ancestors)
-    routeToLineageSubscribers(
-      from.agent_id,
-      event.id,
-      from,
-      content,
-      event.timestamp,
-      correlation_id
-    );
+      // Handle wake decision
+      if (sessionChecker && wakeHandler) {
+        const decision = getWakeDecisionWithHint(
+          recipientId,
+          {
+            priority: priority as MessagePriority,
+            deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined,
+          },
+          sessionChecker
+        );
+        if (decision.shouldWake || decision.shouldInterrupt) {
+          wakeHandler(recipientId, decision, event.id);
+        }
+      }
+
+      delivered.push(recipientId);
+    }
 
     return {
       id: event.id,
@@ -266,87 +753,102 @@ export function createMessageRouter(
       to,
       content,
       timestamp: event.timestamp,
-      correlation_id,
+      delivered,
+      correlationId,
     };
   }
 
   /**
-   * Send a message to multiple recipients (broadcast or role channels).
-   * Fans out to all matching agents at send time.
+   * Send a message to multiple specific agents.
+   * Used for { agents: [...] } addresses.
    */
-  async function sendMulticast(
-    request: SendMessageRequest,
-    priority: MessagePriority
-  ): Promise<SentMessage> {
-    const { from, to, content, correlation_id } = request;
+  async function sendToMultipleAgents(
+    from: AgentId,
+    to: import("../map/types.js").AgentsAddress,
+    content: string,
+    options: { priority?: string; delivery?: string; correlationId?: string } = {}
+  ): Promise<AddressSendResult> {
+    const { priority = "normal", delivery, correlationId } = options;
+    const delivered: AgentId[] = [];
+    const recipientIds = to.agents;
 
-    // Create agent source adapter for resolution functions
-    const agentSource: BroadcastAgentSource & RoleAgentSource = {
-      listAgents: () => eventStore.listAgents(),
-      getAgent: (id) => eventStore.getAgent(id),
-    };
-
-    // Resolve recipients based on target type
-    let recipientIds: AgentId[] = [];
-
-    if (to.broadcast) {
-      recipientIds = resolveBroadcastTarget(agentSource, to.broadcast);
-    } else if (to.role) {
-      recipientIds = resolveRoleTarget(agentSource, to.role);
+    if (recipientIds.length === 0) {
+      throw new AddressRoutingError(
+        "Empty agents array",
+        "NO_RECIPIENTS",
+        to
+      );
     }
 
-    // Emit a single message event with multicast metadata
+    // Verify all agents exist first
+    for (const agentId of recipientIds) {
+      const agent = eventStore.getAgent(agentId);
+      if (!agent) {
+        throw new AddressRoutingError(
+          `Agent not found: ${agentId}`,
+          "AGENT_NOT_FOUND",
+          to
+        );
+      }
+    }
+
+    // Emit primary event for the multi-agent send
     const event = eventStore.emit({
       type: "message",
-      source: {
-        agent_id: from.agent_id,
-        task_id: from.task_id,
-      },
+      source: { agent_id: from },
       target: {
-        // For multicast, we emit to each recipient individually
-        // The original multicast info is preserved in payload
+        address: to,
+        delivered: recipientIds,
       },
       payload: {
         content,
-        correlation_id,
+        correlation_id: correlationId,
         priority,
+        delivery_hint: delivery,
         multicast: {
-          type: to.broadcast ? "broadcast" : "role",
-          scope: to.broadcast?.scope,
-          role: to.role?.role,
-          coordinatorId: to.role?.coordinatorId,
+          type: "agents",
           recipientCount: recipientIds.length,
         },
       },
     });
 
-    // Fan out: emit individual message events to each recipient
+    // Fan out to each recipient
     for (const recipientId of recipientIds) {
       eventStore.emit({
         type: "message",
-        source: {
-          agent_id: from.agent_id,
-          task_id: from.task_id,
-        },
+        source: { agent_id: from },
         target: {
           agent_id: recipientId,
+          address: { agent: recipientId },
         },
         payload: {
           content,
-          correlation_id,
+          correlation_id: correlationId,
           priority,
-          via: to.broadcast ? "broadcast" : "role",
+          delivery_hint: delivery,
+          via: "agents",
           original_message_id: event.id,
         },
       });
 
-      // Handle priority-based wake for each recipient
+      // Handle wake decision
       if (sessionChecker && wakeHandler) {
-        const decision = getWakeDecision(recipientId, priority, sessionChecker);
+        const decision = getWakeDecisionWithHint(
+          recipientId,
+          {
+            priority: priority as MessagePriority,
+            deliveryHint: delivery as
+              | import("../map/types.js").DeliveryHint
+              | undefined,
+          },
+          sessionChecker
+        );
         if (decision.shouldWake || decision.shouldInterrupt) {
           wakeHandler(recipientId, decision, event.id);
         }
       }
+
+      delivered.push(recipientId);
     }
 
     return {
@@ -355,7 +857,8 @@ export function createMessageRouter(
       to,
       content,
       timestamp: event.timestamp,
-      correlation_id,
+      delivered,
+      correlationId,
     };
   }
 
@@ -519,157 +1022,6 @@ export function createMessageRouter(
   // ─────────────────────────────────────────────────────────────────
 
   /**
-   * Resolve message target to event target.
-   * Converts task_id to assigned agent_id.
-   * Returns target suitable for EventStore emission.
-   */
-  async function resolveTarget(target: MessageTarget): Promise<{
-    agent_id?: string;
-    topic?: string;
-  }> {
-    const resolved: { agent_id?: string; topic?: string } = {};
-
-    // Direct agent target
-    if (target.agent_id) {
-      const agent = eventStore.getAgent(target.agent_id);
-      if (!agent) {
-        throw new RoutingError(
-          `Agent not found: ${target.agent_id}`,
-          "AGENT_NOT_FOUND",
-          target
-        );
-      }
-      resolved.agent_id = target.agent_id;
-    }
-
-    // Task target - resolve to assigned agent
-    if (target.task_id) {
-      const task = eventStore.getTask(target.task_id);
-      if (!task) {
-        throw new RoutingError(
-          `Task not found: ${target.task_id}`,
-          "TASK_NOT_FOUND",
-          target
-        );
-      }
-      if (!task.assigned_agent) {
-        // Try to find or spawn an agent for this task
-        const agentId = await resolveOrSpawnAgentForTask(task);
-        resolved.agent_id = agentId;
-      } else {
-        // Route to the assigned agent
-        resolved.agent_id = task.assigned_agent;
-      }
-    }
-
-    // Topic target - pass through for EventStore to handle
-    if (target.topic) {
-      resolved.topic = target.topic;
-    }
-
-    return resolved;
-  }
-
-  /**
-   * Resolve or spawn an agent for an unassigned task.
-   * 1. Check if last assigned agent is still running → use it
-   * 2. Otherwise, spawn new agent with task description
-   * 3. The new agent gets assigned to the task by the spawner
-   */
-  async function resolveOrSpawnAgentForTask(task: {
-    id: TaskId;
-    description: string;
-    agent_history?: Array<{ agent_id: AgentId }>;
-  }): Promise<AgentId> {
-    // 1. Check if last assigned agent from history is still running
-    if (task.agent_history && task.agent_history.length > 0) {
-      const lastEntry = task.agent_history[task.agent_history.length - 1];
-      const lastAgentId = lastEntry.agent_id;
-
-      // Check if agent exists and has an active session
-      const lastAgent = eventStore.getAgent(lastAgentId);
-      if (lastAgent && lastAgent.state === "running") {
-        // Verify with session checker if available
-        if (!agentSessionChecker || agentSessionChecker(lastAgentId)) {
-          return lastAgentId;
-        }
-      }
-    }
-
-    // 2. No running previous agent - spawn a new one
-    if (!agentSpawner) {
-      throw new RoutingError(
-        `Task ${task.id} has no assigned agent and no agent spawner configured`,
-        "TASK_UNASSIGNED",
-        { task_id: task.id }
-      );
-    }
-
-    try {
-      const result = await agentSpawner(task.id, task.description);
-      return result.agent_id;
-    } catch (error) {
-      throw new RoutingError(
-        `Failed to spawn agent for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
-        "SPAWN_FAILED",
-        { task_id: task.id }
-      );
-    }
-  }
-
-  /**
-   * Route message to lineage subscribers.
-   * When an agent sends a message, children who have subscribed to lineage
-   * will receive the message.
-   */
-  function routeToLineageSubscribers(
-    senderAgentId: AgentId,
-    messageId: EventId,
-    from: MessageSender,
-    content: string,
-    timestamp: Timestamp,
-    correlation_id?: string
-  ): void {
-    // Find all agents that have this sender in their lineage
-    const allAgents = eventStore.listAgents();
-
-    for (const agent of allAgents) {
-      // Skip sender
-      if (agent.id === senderAgentId) continue;
-
-      // Check if sender is in this agent's lineage (is an ancestor)
-      if (agent.lineage.includes(senderAgentId)) {
-        // Check if agent has lineage subscription to themselves
-        const subs = eventStore.getSubscriptions(agent.id);
-        const hasLineageSub = subs.some(
-          (s) => s.type === "lineage" && s.target === agent.id
-        );
-
-        if (hasLineageSub) {
-          // Route message to this descendant
-          // This is done by emitting a separate message event to the descendant
-          eventStore.emit({
-            type: "message",
-            source: {
-              agent_id: from.agent_id,
-              task_id: from.task_id,
-            },
-            target: {
-              agent_id: agent.id,
-            },
-            payload: {
-              content: `[Lineage] ${content}`,
-              correlation_id,
-              original_message_id: messageId,
-              via: "lineage",
-            },
-          });
-        }
-      }
-    }
-  }
-
-  /**
    * Route status event to subtree subscribers.
    * Parents who have subscribed to an agent's subtree receive status notifications.
    */
@@ -739,7 +1091,7 @@ export function createMessageRouter(
   }
 
   return {
-    send,
+    sendToAddress,
     emitStatus,
     getMessages,
     getFullMessage,

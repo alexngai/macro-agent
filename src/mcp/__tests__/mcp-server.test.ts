@@ -142,6 +142,15 @@ function createMockMessageRouter(): MessageRouter {
       timestamp: Date.now(),
       correlation_id: request.correlation_id,
     })),
+    sendToAddress: vi.fn(async (request) => ({
+      id: "msg_test123",
+      from: request.from,
+      to: request.to,
+      content: request.content,
+      timestamp: Date.now(),
+      delivered: [],
+      correlationId: request.options?.correlationId,
+    })),
     emitStatus: vi.fn(),
     getMessages: vi.fn(() => []),
     getFullMessage: vi.fn(() => null),
@@ -288,51 +297,53 @@ describe("MCP Server", () => {
   });
 
   describe("send_message tool", () => {
-    it("should send message to agent", async () => {
+    it("should send message to agent via sendToAddress", async () => {
       createMCPServer(context, services);
 
-      await messageRouter.send({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: { agent_id: "agent_target123" },
+      await messageRouter.sendToAddress({
+        from: context.agent_id,
+        to: { agent: "agent_target123" },
         content: "Hello!",
       });
 
-      expect(messageRouter.send).toHaveBeenCalledWith({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: { agent_id: "agent_target123" },
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith({
+        from: context.agent_id,
+        to: { agent: "agent_target123" },
         content: "Hello!",
       });
     });
 
-    it("should send message to topic", async () => {
+    it("should send message to scope via sendToAddress", async () => {
       createMCPServer(context, services);
 
-      await messageRouter.send({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: { topic: "discoveries" },
+      await messageRouter.sendToAddress({
+        from: context.agent_id,
+        to: { scope: "discoveries" },
         content: "Found something!",
       });
 
-      expect(messageRouter.send).toHaveBeenCalledWith({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: { topic: "discoveries" },
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith({
+        from: context.agent_id,
+        to: { scope: "discoveries" },
         content: "Found something!",
       });
     });
 
-    it("should include correlation_id for replies", async () => {
+    it("should include correlationId for replies", async () => {
       createMCPServer(context, services);
 
-      await messageRouter.send({
-        from: { agent_id: context.agent_id, task_id: context.task_id },
-        to: { agent_id: "agent_sender123" },
+      await messageRouter.sendToAddress({
+        from: context.agent_id,
+        to: { agent: "agent_sender123" },
         content: "Reply",
-        correlation_id: "msg_original123",
+        options: { correlationId: "msg_original123" },
       });
 
-      expect(messageRouter.send).toHaveBeenCalledWith(
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith(
         expect.objectContaining({
-          correlation_id: "msg_original123",
+          options: expect.objectContaining({
+            correlationId: "msg_original123",
+          }),
         })
       );
     });

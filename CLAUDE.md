@@ -41,10 +41,10 @@ macro-agent enables coordinated work across multiple AI agents with:
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
 │                     Message Router                           │
-│  - Direct agent-to-agent messaging                          │
-│  - Broadcast channels (fan-out)                             │
-│  - Role channels (send-time resolution)                     │
-│  - Priority ordering                                        │
+│  - MAP addressing (agent, role, scope, parent/child)        │
+│  - sendToAddress() for all message routing                  │
+│  - Priority ordering (urgent > high > normal > low)         │
+│  - Activity waking for sleeping agents                      │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐

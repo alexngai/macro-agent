@@ -268,6 +268,7 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
   let server: WebSocketACPServer;
   let testPort: number;
   let testRepo: { path: string; cleanup: () => void };
+  let testInstanceId: string;
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
@@ -279,8 +280,12 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
     // Create isolated test repo to avoid polluting real repo
     testRepo = createTestRepo("lifecycle");
 
-    // Create services with in-memory storage
-    eventStore = await createEventStore({ inMemory: true });
+    // Create services with file-based storage (required for MCP subprocess access)
+    testInstanceId = `lifecycle-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -608,6 +613,7 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
   let server: WebSocketACPServer;
   let testPort: number;
   let testRepo: { path: string; cleanup: () => void };
+  let testInstanceId: string;
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
@@ -616,7 +622,11 @@ describe("Part 2: Multi-Client WebSocket ACP E2E", () => {
     // Create isolated test repo to avoid polluting real repo
     testRepo = createTestRepo("multiclient");
 
-    eventStore = await createEventStore({ inMemory: true });
+    testInstanceId = `multiclient-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -865,6 +875,7 @@ describe("Part 3: Event Storage E2E", () => {
   let server: WebSocketACPServer;
   let testPort: number;
   let testRepo: { path: string; cleanup: () => void };
+  let testInstanceId: string;
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
@@ -873,7 +884,11 @@ describe("Part 3: Event Storage E2E", () => {
     // Create isolated test repo to avoid polluting real repo
     testRepo = createTestRepo("events");
 
-    eventStore = await createEventStore({ inMemory: true });
+    testInstanceId = `events-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -1006,6 +1021,7 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
   let server: WebSocketACPServer;
   let testPort: number;
   let testRepo: { path: string; cleanup: () => void };
+  let testInstanceId: string;
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
@@ -1017,8 +1033,12 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
     // Create isolated test repo to avoid polluting real repo
     testRepo = createTestRepo("messaging");
 
-    // Create services with in-memory storage
-    eventStore = await createEventStore({ inMemory: true });
+    // Create services with file-based storage (required for MCP subprocess access)
+    testInstanceId = `messaging-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -1105,14 +1125,14 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Child 2 spawned: ${child2Id}`);
 
         // Send message from child1 to child2 via MessageRouter
-        const sentMsg = await messageRouter.send({
-          from: { agent_id: child1Id },
-          to: { agent_id: child2Id },
+        const sentMsg = await messageRouter.sendToAddress({
+          from: child1Id,
+          to: { agent: child2Id },
           content: "Hello from sibling!",
         });
         expect(sentMsg.id).toBeDefined();
-        expect(sentMsg.from.agent_id).toBe(child1Id);
-        expect(sentMsg.to.agent_id).toBe(child2Id);
+        expect(sentMsg.from).toBe(child1Id);
+        expect((sentMsg.to as { agent: string }).agent).toBe(child2Id);
         log(`✓ Message sent: ${sentMsg.id}`);
 
         // Verify child2 has pending message
@@ -1161,14 +1181,14 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Agents spawned: sender=${senderId}, receiver=${receiverId}`);
 
         // Send multiple messages
-        const msg1 = await messageRouter.send({
-          from: { agent_id: senderId },
-          to: { agent_id: receiverId },
+        const msg1 = await messageRouter.sendToAddress({
+          from: senderId,
+          to: { agent: receiverId },
           content: "Message 1",
         });
-        const msg2 = await messageRouter.send({
-          from: { agent_id: senderId },
-          to: { agent_id: receiverId },
+        const msg2 = await messageRouter.sendToAddress({
+          from: senderId,
+          to: { agent: receiverId },
           content: "Message 2",
         });
         log(`✓ Sent 2 messages`);
@@ -1239,10 +1259,10 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         messageRouter.subscribe(sub2Id, { type: "topic", target: topic });
         log(`✓ Both subscribers subscribed to topic: ${topic}`);
 
-        // Publish message to topic
-        const sentMsg = await messageRouter.send({
-          from: { agent_id: publisherId },
-          to: { topic },
+        // Publish message to topic (scope)
+        const sentMsg = await messageRouter.sendToAddress({
+          from: publisherId,
+          to: { scope: topic },
           content: "Broadcast announcement!",
         });
         log(`✓ Published message: ${sentMsg.id}`);
@@ -1297,9 +1317,9 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Grandchild spawned: ${grandchildId}`);
 
         // Send message from grandchild to head (ancestor)
-        const msgToHead = await messageRouter.send({
-          from: { agent_id: grandchildId },
-          to: { agent_id: headId },
+        const msgToHead = await messageRouter.sendToAddress({
+          from: grandchildId,
+          to: { agent: headId },
           content: "Report from grandchild to head",
         });
         expect(msgToHead.id).toBeDefined();
@@ -1312,9 +1332,9 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Head received: "${headMessages[0].content}"`);
 
         // Send message from head to grandchild (descendant)
-        const msgToGrandchild = await messageRouter.send({
-          from: { agent_id: headId },
-          to: { agent_id: grandchildId },
+        const msgToGrandchild = await messageRouter.sendToAddress({
+          from: headId,
+          to: { agent: grandchildId },
           content: "Instructions from head to grandchild",
         });
         expect(msgToGrandchild.id).toBeDefined();
@@ -1422,9 +1442,9 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Task created: ${task.id}, assigned to: ${workerId}`);
 
         // Send message to the task
-        const sentMsg = await messageRouter.send({
-          from: { agent_id: headId },
-          to: { task_id: task.id },
+        const sentMsg = await messageRouter.sendToAddress({
+          from: headId,
+          to: { task: task.id },
           content: "Instructions for the task",
         });
         expect(sentMsg.id).toBeDefined();
@@ -1465,9 +1485,9 @@ describe("Part 4: Inter-Agent Messaging E2E", () => {
         log(`✓ Child spawned: ${childId}`);
 
         // Send message
-        const sentMsg = await messageRouter.send({
-          from: { agent_id: headId },
-          to: { agent_id: childId },
+        const sentMsg = await messageRouter.sendToAddress({
+          from: headId,
+          to: { agent: childId },
           content: "Message structure check",
         });
         log(`✓ Message sent: ${sentMsg.id}`);

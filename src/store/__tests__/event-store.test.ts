@@ -6,6 +6,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createEventStore, EventStore, parseDuration } from '../event-store.js';
+import {
+  isMessageEvent,
+  getMessagePayload,
+  getTargetAddress,
+  type Event,
+  type EventTarget,
+} from '../types/events.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -384,6 +391,120 @@ describe('EventStore', () => {
 
       const fullContent = store.getFullMessage(event.id);
       expect(fullContent).toBe(longContent);
+    });
+  });
+
+  describe('MAP Address Format (Phase 2)', () => {
+    it('should store message with MAP agent address', () => {
+      const event = store.emit({
+        type: 'message',
+        source: { agent_id: 'sender' },
+        target: {
+          agent_id: 'recipient',
+          address: { agent: 'recipient' },
+          delivered: ['recipient'],
+        },
+        payload: { content: 'Hello with MAP address' },
+      });
+
+      expect(event.target?.address).toEqual({ agent: 'recipient' });
+      expect(event.target?.delivered).toEqual(['recipient']);
+    });
+
+    it('should store message with MAP broadcast address', () => {
+      const event = store.emit({
+        type: 'message',
+        source: { agent_id: 'sender' },
+        target: {
+          address: { broadcast: true },
+          delivered: ['agent_1', 'agent_2'],
+        },
+        payload: {
+          content: 'Broadcast message',
+          priority: 'high',
+          delivery_hint: 'inject',
+        },
+      });
+
+      expect(event.target?.address).toEqual({ broadcast: true });
+      expect(event.target?.delivered).toEqual(['agent_1', 'agent_2']);
+    });
+
+    it('should store message with hierarchical address', () => {
+      const event = store.emit({
+        type: 'message',
+        source: { agent_id: 'child' },
+        target: {
+          address: { parent: true },
+          delivered: ['parent_agent'],
+        },
+        payload: { content: 'Message to parent' },
+      });
+
+      expect(event.target?.address).toEqual({ parent: true });
+      expect(event.target?.delivered).toEqual(['parent_agent']);
+    });
+
+    it('should store message with descendants address and depth', () => {
+      const event = store.emit({
+        type: 'message',
+        source: { agent_id: 'coordinator' },
+        target: {
+          address: { descendants: true, depth: 2 },
+          delivered: ['child1', 'child2', 'grandchild1'],
+        },
+        payload: { content: 'Cascade message' },
+      });
+
+      expect(event.target?.address).toEqual({ descendants: true, depth: 2 });
+      expect(event.target?.delivered).toHaveLength(3);
+    });
+
+    it('should store message with role address', () => {
+      const event = store.emit({
+        type: 'message',
+        source: { agent_id: 'coordinator' },
+        target: {
+          address: { role: 'worker', within: 'scope_123' },
+          delivered: ['worker_1', 'worker_2'],
+        },
+        payload: {
+          content: 'Work assignment',
+          priority: 'normal',
+        },
+      });
+
+      expect(event.target?.address).toEqual({ role: 'worker', within: 'scope_123' });
+    });
+
+    it('should query events and retrieve stored addresses', () => {
+      store.emit({
+        type: 'message',
+        source: { agent_id: 'sender' },
+        target: {
+          agent_id: 'recipient',
+          address: { agent: 'recipient' },
+        },
+        payload: { content: 'Test' },
+      });
+
+      const events = store.query({ type: 'message' });
+      expect(events.length).toBe(1);
+      expect(events[0].target?.address).toEqual({ agent: 'recipient' });
+    });
+
+    it('should maintain backward compatibility with legacy target format', () => {
+      // Event without MAP address (legacy format)
+      store.emit({
+        type: 'message',
+        source: { agent_id: 'sender' },
+        target: { agent_id: 'recipient' },
+        payload: { content: 'Legacy message' },
+      });
+
+      const messages = store.getMessages('recipient');
+      expect(messages.length).toBe(1);
+      expect(messages[0].content).toBe('Legacy message');
     });
   });
 
@@ -942,6 +1063,157 @@ describe('Event Archival', () => {
 
       await store1.close();
       await store2.close();
+    });
+  });
+});
+
+describe('Message Event Helper Functions', () => {
+  describe('isMessageEvent', () => {
+    it('should return true for message events', () => {
+      const event: Event = {
+        id: 'evt_1',
+        version: 1,
+        timestamp: Date.now(),
+        type: 'message',
+        source: { agent_id: 'sender' },
+        target: { agent_id: 'recipient' },
+        payload: { content: 'test' },
+      };
+      expect(isMessageEvent(event)).toBe(true);
+    });
+
+    it('should return false for non-message events', () => {
+      const event: Event = {
+        id: 'evt_1',
+        version: 1,
+        timestamp: Date.now(),
+        type: 'spawn',
+        source: { agent_id: 'parent' },
+        payload: { agent_id: 'child', session_id: 'sess_1', task: 'work' },
+      };
+      expect(isMessageEvent(event)).toBe(false);
+    });
+  });
+
+  describe('getMessagePayload', () => {
+    it('should return typed payload for message events', () => {
+      const event: Event = {
+        id: 'evt_1',
+        version: 1,
+        timestamp: Date.now(),
+        type: 'message',
+        source: { agent_id: 'sender' },
+        payload: {
+          content: 'Hello',
+          priority: 'high',
+          delivery_hint: 'inject',
+          correlation_id: 'corr_123',
+        },
+      };
+
+      const payload = getMessagePayload(event);
+      expect(payload).not.toBeUndefined();
+      expect(payload?.content).toBe('Hello');
+      expect(payload?.priority).toBe('high');
+      expect(payload?.delivery_hint).toBe('inject');
+      expect(payload?.correlation_id).toBe('corr_123');
+    });
+
+    it('should return undefined for non-message events', () => {
+      const event: Event = {
+        id: 'evt_1',
+        version: 1,
+        timestamp: Date.now(),
+        type: 'status',
+        source: { agent_id: 'agent' },
+        payload: { status_type: 'started', summary: 'Starting' },
+      };
+
+      const payload = getMessagePayload(event);
+      expect(payload).toBeUndefined();
+    });
+
+    it('should return undefined if payload is missing content', () => {
+      const event: Event = {
+        id: 'evt_1',
+        version: 1,
+        timestamp: Date.now(),
+        type: 'message',
+        source: { agent_id: 'sender' },
+        payload: { priority: 'high' }, // missing content
+      };
+
+      const payload = getMessagePayload(event);
+      expect(payload).toBeUndefined();
+    });
+  });
+
+  describe('getTargetAddress', () => {
+    it('should return MAP address when present', () => {
+      const target: EventTarget = {
+        agent_id: 'recipient',
+        address: { agent: 'recipient' },
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ agent: 'recipient' });
+    });
+
+    it('should construct address from agent_id for legacy format', () => {
+      const target: EventTarget = {
+        agent_id: 'recipient',
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ agent: 'recipient' });
+    });
+
+    it('should construct address from task_id for legacy format', () => {
+      const target: EventTarget = {
+        task_id: 'task_123',
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ task: 'task_123' });
+    });
+
+    it('should construct address from topic for legacy format', () => {
+      const target: EventTarget = {
+        topic: 'updates',
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ scope: 'updates' });
+    });
+
+    it('should construct broadcast address for scope="all"', () => {
+      const target: EventTarget = {
+        scope: 'all',
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ broadcast: true });
+    });
+
+    it('should return undefined for empty target', () => {
+      const target: EventTarget = {};
+      const address = getTargetAddress(target);
+      expect(address).toBeUndefined();
+    });
+
+    it('should return undefined when target is undefined', () => {
+      const address = getTargetAddress(undefined);
+      expect(address).toBeUndefined();
+    });
+
+    it('should prioritize MAP address over legacy fields', () => {
+      const target: EventTarget = {
+        agent_id: 'legacy_recipient',
+        address: { broadcast: true },
+      };
+
+      const address = getTargetAddress(target);
+      expect(address).toEqual({ broadcast: true });
     });
   });
 });
