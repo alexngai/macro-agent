@@ -9,7 +9,10 @@
  *   RUN_FULL_AGENT_TESTS=true npm run test:e2e -- src/__tests__/integration.e2e.test.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { createEventStore, type EventStore } from "../store/event-store.js";
 import {
   createAgentManager,
@@ -34,6 +37,8 @@ describe("End-to-End Integration", () => {
   let messageRouter: MessageRouter;
   let lifecycleEvents: AgentLifecycleEvent[];
   let unsubscribe: () => void;
+  let testDir: string;
+  let testInstanceId: string;
 
   beforeAll(() => {
     if (!RUN_FULL_AGENT) {
@@ -44,8 +49,15 @@ describe("End-to-End Integration", () => {
   });
 
   beforeEach(async () => {
-    // Create fresh instances for each test
-    eventStore = await createEventStore({ inMemory: true });
+    // Create temp directory for file-based storage (required for MCP subprocess access)
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), "integration-e2e-"));
+    testInstanceId = `integration-e2e-${Date.now()}`;
+
+    // Create fresh instances for each test with file-based storage
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testDir,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -58,6 +70,17 @@ describe("End-to-End Integration", () => {
     unsubscribe = agentManager.onLifecycleEvent((event) => {
       lifecycleEvents.push(event);
     });
+  });
+
+  afterEach(async () => {
+    // Clean up temp directory
+    if (testDir) {
+      try {
+        fs.rmSync(testDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   });
 
   afterAll(async () => {
@@ -358,9 +381,9 @@ describe("Message Routing Integration", () => {
     });
 
     // Parent sends message to child
-    await messageRouter.send({
-      from: { agent_id: "agent_parent" },
-      to: { agent_id: "agent_child" },
+    await messageRouter.sendToAddress({
+      from: "agent_parent",
+      to: { agent: "agent_child" },
       content: "Hello child",
     });
 

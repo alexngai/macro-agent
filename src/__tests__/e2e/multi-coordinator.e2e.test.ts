@@ -162,6 +162,7 @@ describe("Multi-Coordinator E2E", () => {
   let mergeQueue: MergeQueue;
   let mergeQueueDb: Database.Database;
   let testRepo: ReturnType<typeof createTestRepo>;
+  let testInstanceId: string;
 
   beforeEach(async () => {
     if (!RUN_FULL_AGENT) {
@@ -172,7 +173,11 @@ describe("Multi-Coordinator E2E", () => {
     testRepo = createTestRepo("multi-coord");
     log(`Test repo created at: ${testRepo.path}`);
 
-    eventStore = await createEventStore({ inMemory: true });
+    testInstanceId = `multi-coord-e2e-${Date.now()}`;
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testRepo.path,
+    });
     messageRouter = createMessageRouter(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
       defaultPermissionMode: "auto-approve",

@@ -47,10 +47,12 @@ export class MergeRequestStateError extends Error {
 
 /**
  * Generate a unique merge request ID.
+ * Uses timestamp + longer random suffix to avoid collisions at high volume.
  */
 function generateMergeRequestId(): string {
   const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 6);
+  // Use 10 random characters instead of 4 to avoid collisions at scale
+  const random = Math.random().toString(36).slice(2, 12);
   return `mr-${timestamp}-${random}`;
 }
 

@@ -22,6 +22,9 @@ import {
   afterEach,
 } from "vitest";
 import { WebSocket } from "ws";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { createEventStore, type EventStore } from "../../store/event-store.js";
 import {
   createAgentManager,
@@ -224,6 +227,8 @@ describe("Context Injection E2E", () => {
   let messageRouter: MessageRouter;
   let server: WebSocketACPServer;
   let testPort: number;
+  let testDir: string;
+  let testInstanceId: string;
   const clients: ACPTestClient[] = [];
 
   beforeEach(async () => {
@@ -232,8 +237,15 @@ describe("Context Injection E2E", () => {
       return;
     }
 
-    // Create services with in-memory storage
-    eventStore = await createEventStore({ inMemory: true });
+    // Create temp directory for file-based storage (required for MCP subprocess access)
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), "injection-e2e-"));
+    testInstanceId = `injection-e2e-${Date.now()}`;
+
+    // Create services with file-based storage
+    eventStore = await createEventStore({
+      instanceId: testInstanceId,
+      baseDir: testDir,
+    });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
     agentManager = createAgentManager(eventStore, messageRouter, {
@@ -278,6 +290,11 @@ describe("Context Injection E2E", () => {
     await server?.stop();
     await agentManager?.close();
     await eventStore?.close();
+
+    // Clean up temp directory
+    if (testDir) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
     log("Cleanup complete");
   });
 
@@ -346,11 +363,11 @@ describe("Context Injection E2E", () => {
           getSession: (agentId) => agentManager.getSession(agentId),
           isPrompting: (agentId) => agentManager.isPrompting(agentId),
           sendMessage: async (from, to, content, priority) => {
-            await messageRouter.send({
-              from: from ? { agent_id: from } : { agent_id: "system" },
-              to: { agent_id: to },
+            await messageRouter.sendToAddress({
+              from: from ?? "system",
+              to: { agent: to },
               content,
-              priority,
+              options: { priority },
             });
           },
         };
@@ -404,11 +421,11 @@ describe("Context Injection E2E", () => {
           getSession: (agentId) => agentManager.getSession(agentId),
           isPrompting: (agentId) => agentManager.isPrompting(agentId),
           sendMessage: async (from, to, content, priority) => {
-            await messageRouter.send({
-              from: from ? { agent_id: from } : { agent_id: "system" },
-              to: { agent_id: to },
+            await messageRouter.sendToAddress({
+              from: from ?? "system",
+              to: { agent: to },
               content,
-              priority,
+              options: { priority },
             });
           },
         };
@@ -459,11 +476,11 @@ describe("Context Injection E2E", () => {
           getSession: (agentId) => agentManager.getSession(agentId),
           isPrompting: (agentId) => agentManager.isPrompting(agentId),
           sendMessage: async (from, to, content, priority) => {
-            await messageRouter.send({
-              from: from ? { agent_id: from } : { agent_id: headId },
-              to: { agent_id: to },
+            await messageRouter.sendToAddress({
+              from: from ?? headId,
+              to: { agent: to },
               content,
-              priority,
+              options: { priority },
             });
           },
         };
@@ -507,11 +524,11 @@ describe("Context Injection E2E", () => {
           getSession: () => null, // Force message fallback
           isPrompting: () => false,
           sendMessage: async (from, to, content, priority) => {
-            await messageRouter.send({
-              from: from ? { agent_id: from } : { agent_id: "system" },
-              to: { agent_id: to },
+            await messageRouter.sendToAddress({
+              from: from ?? "system",
+              to: { agent: to },
               content,
-              priority,
+              options: { priority },
             });
           },
         };
@@ -552,11 +569,11 @@ describe("Context Injection E2E", () => {
           getSession: (agentId) => agentManager.getSession(agentId),
           isPrompting: (agentId) => agentManager.isPrompting(agentId),
           sendMessage: async (from, to, content, priority) => {
-            await messageRouter.send({
-              from: from ? { agent_id: from } : { agent_id: "system" },
-              to: { agent_id: to },
+            await messageRouter.sendToAddress({
+              from: from ?? "system",
+              to: { agent: to },
               content,
-              priority,
+              options: { priority },
             });
           },
         };

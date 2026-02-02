@@ -140,6 +140,7 @@ function createMockTaskManager(): TaskManager {
 function createMockMessageRouter(): MessageRouter {
   return {
     send: vi.fn(),
+    sendToAddress: vi.fn(),
     emitStatus: vi.fn(),
     getMessages: vi.fn(() => []),
     getFullMessage: vi.fn(() => null),
@@ -586,13 +587,13 @@ describe("API Server", () => {
       const server = createTrackedServer();
       vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
       vi.mocked(agentManager.getSession).mockReturnValue(null);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -603,11 +604,11 @@ describe("API Server", () => {
       expect(res.body.success).toBe(true);
       expect(res.body.method).toBe("message");
       // The inject module wraps the content with a header
-      expect(messageRouter.send).toHaveBeenCalledWith({
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith({
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "[Context Injection from User]\n\nTest message",
-        priority: "high",
+        options: { priority: "high" },
       });
     });
 
@@ -673,13 +674,13 @@ describe("API Server", () => {
       const server = createTrackedServer();
       vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
       vi.mocked(agentManager.getSession).mockReturnValue(null);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -688,11 +689,11 @@ describe("API Server", () => {
 
       expect(res.status).toBe(200);
       // The content should include the reason in the formatted message
-      expect(messageRouter.send).toHaveBeenCalledWith({
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith({
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "[Context Injection from User]\nReason: Build is failing\n\nTest message",
-        priority: "high",
+        options: { priority: "high" },
       });
     });
 
@@ -751,13 +752,13 @@ describe("API Server", () => {
         checkInjectSupport: vi.fn().mockResolvedValue(true),
         interruptWith: vi.fn(),
       } as any);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -779,7 +780,7 @@ describe("API Server", () => {
         checkInjectSupport: vi.fn().mockResolvedValue(false),
         interruptWith: vi.fn(),
       } as any);
-      vi.mocked(messageRouter.send).mockRejectedValue(new Error("Message failed"));
+      vi.mocked(messageRouter.sendToAddress).mockRejectedValue(new Error("Message failed"));
 
       const res = await request(server.app)
         .post("/api/agents/agent_test123/inject")
@@ -801,13 +802,13 @@ describe("API Server", () => {
         checkInjectSupport: vi.fn().mockResolvedValue(false),
         interruptWith: interruptWithMock,
       } as any);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -888,13 +889,13 @@ describe("API Server", () => {
       const server = createTrackedServer();
       vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
       vi.mocked(agentManager.getSession).mockReturnValue(null);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -940,13 +941,13 @@ describe("API Server", () => {
       const server = createTrackedServer();
       vi.mocked(agentManager.get).mockReturnValue(createMockAgent({ state: "stopped" }));
       vi.mocked(agentManager.getSession).mockReturnValue(null);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -968,13 +969,13 @@ describe("API Server", () => {
         checkInjectSupport: vi.fn().mockResolvedValue(true),
         interruptWith: vi.fn(),
       } as any);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -990,13 +991,13 @@ describe("API Server", () => {
       const server = createTrackedServer();
       vi.mocked(agentManager.get).mockReturnValue(createMockAgent());
       vi.mocked(agentManager.getSession).mockReturnValue(null);
-      vi.mocked(messageRouter.send).mockResolvedValue({
+      vi.mocked(messageRouter.sendToAddress).mockResolvedValue({
         id: "evt_123",
         timestamp: Date.now(),
-        from: { agent_id: "__human__" },
-        to: { agent_id: "agent_test123" },
+        from: "__human__",
+        to: { agent: "agent_test123" },
         content: "Test message",
-        priority: "high",
+        delivered: ["agent_test123"],
       });
 
       const res = await request(server.app)
@@ -1004,9 +1005,9 @@ describe("API Server", () => {
         .send({ content: "Test message" });
 
       expect(res.status).toBe(200);
-      expect(messageRouter.send).toHaveBeenCalledWith(
+      expect(messageRouter.sendToAddress).toHaveBeenCalledWith(
         expect.objectContaining({
-          from: { agent_id: "__human__" },
+          from: "__human__",
         })
       );
     });

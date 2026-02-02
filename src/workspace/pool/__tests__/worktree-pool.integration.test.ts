@@ -37,12 +37,31 @@ describe('WorktreePool Integration', () => {
 
   /**
    * Helper to list all worktrees
+   * Uses realpath to handle macOS /var -> /private/var symlink
    */
   function listWorktrees(): string[] {
     return git('worktree list --porcelain')
       .split('\n')
       .filter((line) => line.startsWith('worktree '))
-      .map((line) => line.replace('worktree ', ''));
+      .map((line) => {
+        const wtPath = line.replace('worktree ', '');
+        try {
+          return fs.realpathSync(wtPath);
+        } catch {
+          return wtPath;
+        }
+      });
+  }
+
+  /**
+   * Helper to normalize path for comparison (handles macOS symlinks)
+   */
+  function normalizePath(p: string): string {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return p;
+    }
   }
 
   /**
@@ -145,7 +164,7 @@ describe('WorktreePool Integration', () => {
 
         // Verify git recognizes it as a worktree
         const worktrees = listWorktrees();
-        expect(worktrees).toContain(wtPath);
+        expect(worktrees).toContain(normalizePath(wtPath));
 
         // Verify the repo files are present
         expect(fs.existsSync(path.join(wtPath, 'README.md'))).toBe(true);
@@ -586,8 +605,8 @@ describe('WorktreePool Integration', () => {
 
       // Verify orphans exist
       const worktreesBefore = listWorktrees();
-      expect(worktreesBefore).toContain(orphan1Path);
-      expect(worktreesBefore).toContain(orphan2Path);
+      expect(worktreesBefore).toContain(normalizePath(orphan1Path));
+      expect(worktreesBefore).toContain(normalizePath(orphan2Path));
 
       // Create pool with recovery enabled
       const pool = new WorktreePool(repoPath, {
@@ -1152,6 +1171,9 @@ describe('WorktreePool Integration', () => {
           strategy: 'queue',
           timeout: 60000,
         });
+
+        // Wait for the queue request to be added (needs microtask to complete)
+        await new Promise((resolve) => setImmediate(resolve));
 
         // Close the pool
         await pool.close();

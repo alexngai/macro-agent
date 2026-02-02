@@ -122,10 +122,10 @@ describe("Steering Integration", () => {
       // Step to get all agents running
       await harness.stepAll();
 
-      // Broadcast to workers
-      const result = await harness.messageRouter.send({
-        from: { agent_id: coord.agentId },
-        to: { broadcast: { scope: "workers" } },
+      // Broadcast to workers via role-based addressing
+      const result = await harness.messageRouter.sendToAddress({
+        from: coord.agentId,
+        to: { role: "worker" },
         content: "Task update for all workers",
       });
 
@@ -167,10 +167,10 @@ describe("Steering Integration", () => {
 
       await harness.stepAll();
 
-      // Broadcast to all
-      await harness.messageRouter.send({
-        from: { agent_id: coord.agentId },
-        to: { broadcast: { scope: "all" } },
+      // Broadcast to all via broadcast addressing
+      await harness.messageRouter.sendToAddress({
+        from: coord.agentId,
+        to: { broadcast: true },
         content: "System-wide announcement",
       });
 
@@ -211,10 +211,10 @@ describe("Steering Integration", () => {
       // Run worker1 to completion
       await harness.waitForSimulator(worker1.agentId, { maxIterations: 10 });
 
-      // Broadcast to workers
-      await harness.messageRouter.send({
-        from: { agent_id: coord.agentId },
-        to: { broadcast: { scope: "workers" } },
+      // Broadcast to workers via role-based addressing
+      await harness.messageRouter.sendToAddress({
+        from: coord.agentId,
+        to: { role: "worker" },
         content: "Only for running workers",
       });
 
@@ -379,11 +379,11 @@ describe("Steering Integration", () => {
       });
 
       it("should wake sleeping agent with normal priority", async () => {
-        await messageRouter.send({
-          from: { agent_id: "sender" },
-          to: { agent_id: "sleeping-agent" },
+        await messageRouter.sendToAddress({
+          from: "sender",
+          to: { agent: "sleeping-agent" },
           content: "Wake up!",
-          priority: "normal",
+          options: { priority: "normal" },
         });
 
         expect(wakeEvents).toHaveLength(1);
@@ -392,22 +392,22 @@ describe("Steering Integration", () => {
       });
 
       it("should not wake sleeping agent with low priority", async () => {
-        await messageRouter.send({
-          from: { agent_id: "sender" },
-          to: { agent_id: "sleeping-agent" },
+        await messageRouter.sendToAddress({
+          from: "sender",
+          to: { agent: "sleeping-agent" },
           content: "Low priority message",
-          priority: "low",
+          options: { priority: "low" },
         });
 
         expect(wakeEvents).toHaveLength(0);
       });
 
       it("should interrupt busy agent with urgent priority", async () => {
-        await messageRouter.send({
-          from: { agent_id: "sender" },
-          to: { agent_id: "busy-agent" },
+        await messageRouter.sendToAddress({
+          from: "sender",
+          to: { agent: "busy-agent" },
           content: "URGENT!",
-          priority: "urgent",
+          options: { priority: "urgent" },
         });
 
         expect(wakeEvents).toHaveLength(1);
@@ -416,11 +416,11 @@ describe("Steering Integration", () => {
       });
 
       it("should only queue for busy agent with normal priority", async () => {
-        await messageRouter.send({
-          from: { agent_id: "sender" },
-          to: { agent_id: "busy-agent" },
+        await messageRouter.sendToAddress({
+          from: "sender",
+          to: { agent: "busy-agent" },
           content: "Normal message",
-          priority: "normal",
+          options: { priority: "normal" },
         });
 
         // No wake event for queue action
@@ -613,9 +613,9 @@ describe("Steering Integration", () => {
       // The message is simply queued (or dropped) but no error occurs
       const messagesBefore = harness.messageRouter.getMessages(worker.agentId);
 
-      await harness.messageRouter.send({
-        from: { agent_id: "sender" },
-        to: { agent_id: worker.agentId },
+      await harness.messageRouter.sendToAddress({
+        from: "sender",
+        to: { agent: worker.agentId },
         content: "Message to stopped agent",
       });
 
@@ -680,11 +680,11 @@ describe("Steering Integration", () => {
       expect(eventStore.getAgent("stopped-agent")?.state).toBe("stopped");
 
       // Send urgent message - should not throw
-      await messageRouter.send({
-        from: { agent_id: "sender" },
-        to: { agent_id: "stopped-agent" },
+      await messageRouter.sendToAddress({
+        from: "sender",
+        to: { agent: "stopped-agent" },
         content: "URGENT to stopped",
-        priority: "urgent",
+        options: { priority: "urgent" },
       });
 
       // Message is delivered to the queue
@@ -730,9 +730,9 @@ describe("Steering Integration", () => {
       await harness.stepAll(); // Get worker2 running
 
       // Broadcast to workers - should only hit worker2 (running)
-      await harness.messageRouter.send({
-        from: { agent_id: coord.agentId },
-        to: { broadcast: { scope: "workers" } },
+      await harness.messageRouter.sendToAddress({
+        from: coord.agentId,
+        to: { role: "worker" },
         content: "Broadcast after some workers stopped",
       });
 

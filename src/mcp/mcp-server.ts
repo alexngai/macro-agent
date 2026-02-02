@@ -430,11 +430,27 @@ export function createMCPServer(
       inputSchema: SendMessageSchema,
     }, async (args) => {
       try {
-        const result = await messageRouter.send({
-          from: { agent_id: context.agent_id, task_id: context.task_id },
-          to: args.to,
+        // Convert legacy target format to MAP Address
+        const to = args.to.agent_id
+          ? { agent: args.to.agent_id }
+          : args.to.task_id
+            ? { task: args.to.task_id }
+            : args.to.topic
+              ? { scope: args.to.topic }
+              : null;
+
+        if (!to) {
+          throw new MCPToolError(
+            "Must specify one of: agent_id, task_id, or topic",
+            "INVALID_INPUT"
+          );
+        }
+
+        const result = await messageRouter.sendToAddress({
+          from: context.agent_id,
+          to,
           content: args.content,
-          correlation_id: args.correlation_id,
+          options: args.correlation_id ? { correlationId: args.correlation_id } : undefined,
         });
 
         return {
@@ -443,7 +459,7 @@ export function createMCPServer(
               type: "text" as const,
               text: JSON.stringify({
                 message_id: result.id,
-                delivered_to: 1, // Direct message always delivered to 1 recipient
+                delivered_to: result.delivered.length,
               }),
             },
           ],

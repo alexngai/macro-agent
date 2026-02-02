@@ -563,6 +563,9 @@ describe('WorktreePool', () => {
         timeout: 60000,
       });
 
+      // Wait for the queue request to be added (needs microtask to complete)
+      await new Promise((resolve) => setImmediate(resolve));
+
       // Close the pool
       await pool.close();
 

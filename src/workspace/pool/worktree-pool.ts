@@ -356,8 +356,9 @@ export class WorktreePool implements WorktreePoolInterface {
     const shouldClean = options?.clean ?? true;
     const force = options?.force ?? false;
 
-    // Check for uncommitted changes if not forcing
-    if (!force && shouldClean) {
+    // Check for uncommitted changes only if NOT cleaning (and not forcing)
+    // If cleaning is enabled, the clean operation will handle uncommitted changes
+    if (!force && !shouldClean) {
       try {
         const status = execSync('git status --porcelain', {
           cwd: slot.path,

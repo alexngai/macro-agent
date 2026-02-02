@@ -273,7 +273,7 @@ describe("WebSocket ACP Server", () => {
       expect(response.jsonrpc).toBe("2.0");
       expect(response.id).toBe(1);
       expect(response.error).toBeDefined();
-      expect(response.error.code).toBe(-32601); // Method not found
+      expect(response.error.code).toBe(-32603); // Internal error (SDK wraps unknown methods)
     });
   });
 

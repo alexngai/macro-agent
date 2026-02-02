@@ -21,6 +21,7 @@
 
 import type { AgentId } from "../store/types/index.js";
 import type { MessagePriority, WakeAction } from "./types.js";
+import type { DeliveryHint } from "../map/types.js";
 
 // =============================================================================
 // Types
@@ -57,6 +58,18 @@ export interface WakeDecision {
   shouldInterrupt: boolean;
   /** Whether injection is available */
   canInject: boolean;
+  /** Reason for the decision (useful for debugging/logging) */
+  reason?: string;
+}
+
+/**
+ * Options for wake decision with delivery hint.
+ */
+export interface WakeOptions {
+  /** Message priority */
+  priority: MessagePriority;
+  /** Optional delivery hint from MAP */
+  deliveryHint?: DeliveryHint;
 }
 
 // =============================================================================
@@ -134,6 +147,91 @@ export function getWakeDecision(
     shouldWake: effectiveAction === "wake",
     shouldInterrupt: effectiveAction === "interrupt",
     canInject: supportsInjection,
+  };
+}
+
+/**
+ * Get wake decision considering both priority and delivery hint.
+ *
+ * Delivery hint takes precedence over priority-based decision:
+ * - 'queue' or undefined: Use existing priority-based logic
+ * - 'inject': Force injection attempt (falls back to queue if not supported)
+ * - 'interrupt': Force interrupt (highest priority delivery)
+ *
+ * @param agentId - The target agent
+ * @param options - Priority and optional delivery hint
+ * @param sessionChecker - Session state checker
+ * @returns Wake decision with action and flags
+ */
+export function getWakeDecisionWithHint(
+  agentId: AgentId,
+  options: WakeOptions,
+  sessionChecker: SessionChecker
+): WakeDecision {
+  const { priority, deliveryHint } = options;
+
+  // Get session state
+  const hasSession = sessionChecker.hasActiveSession(agentId);
+  const supportsInjection = sessionChecker.supportsInjection?.(agentId) ?? true;
+  const isStopped = sessionChecker.isStopped?.(agentId) ?? false;
+
+  // If agent is stopped, always skip
+  if (isStopped) {
+    return {
+      action: "skip",
+      shouldWake: false,
+      shouldInterrupt: false,
+      canInject: false,
+      reason: "agent_stopped",
+    };
+  }
+
+  // If no hint or hint is 'queue', use priority-based decision
+  if (!deliveryHint || deliveryHint === "queue") {
+    const decision = getWakeDecision(agentId, priority, sessionChecker);
+    return {
+      ...decision,
+      reason: "priority_based",
+    };
+  }
+
+  // Delivery hint overrides priority-based decision
+  if (deliveryHint === "interrupt") {
+    return {
+      action: "interrupt",
+      shouldWake: true,
+      shouldInterrupt: true,
+      canInject: supportsInjection,
+      reason: "delivery_hint_interrupt",
+    };
+  }
+
+  if (deliveryHint === "inject") {
+    // If session doesn't support injection, fall back to wake/queue
+    if (!supportsInjection) {
+      return {
+        action: hasSession ? "queue" : "wake",
+        shouldWake: !hasSession,
+        shouldInterrupt: false,
+        canInject: false,
+        reason: "delivery_hint_inject_fallback",
+      };
+    }
+
+    return {
+      action: "inject",
+      shouldWake: true,
+      shouldInterrupt: false,
+      canInject: true,
+      reason: "delivery_hint_inject",
+    };
+  }
+
+  // Fallback to priority-based (shouldn't reach here)
+  const decision = getWakeDecision(agentId, priority, sessionChecker);
+  return {
+    ...decision,
+    reason: "priority_based_fallback",
   };
 }
 
