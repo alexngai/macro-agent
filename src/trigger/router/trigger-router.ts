@@ -404,7 +404,7 @@ export function createTriggerRouter(
       // Register built-in strategies
       router.registerStrategy(createHeadStrategy());
       router.registerStrategy(createDirectStrategy());
-      router.registerStrategy(createRoleStrategy());
+      router.registerStrategy(createRoleStrategy({ allowSpawn: true }));
       router.registerStrategy(createBroadcastStrategy());
       router.registerStrategy(createTaskStrategy());
 

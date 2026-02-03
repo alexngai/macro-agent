@@ -66,13 +66,17 @@ export function createRoleStrategy(
       // Find agents with the specified role
       const allAgents = context.agentManager.list();
 
-      // Filter by role - check config.role or task for role hint
+      // Filter by role - check agent.role (top-level), config.role, or task hint
       const agentsWithRole = allAgents.filter((agent) => {
-        const config = agent.config as Record<string, unknown> | undefined;
-        const agentRole = config?.role as string | undefined;
+        // Check top-level role property first (standard Agent interface)
+        if (agent.role && agent.role.toLowerCase() === targetRole.toLowerCase()) {
+          return true;
+        }
 
-        // Check explicit role in config
-        if (agentRole && agentRole.toLowerCase() === targetRole.toLowerCase()) {
+        // Check role in config (legacy/alternative)
+        const config = agent.config as Record<string, unknown> | undefined;
+        const configRole = config?.role as string | undefined;
+        if (configRole && configRole.toLowerCase() === targetRole.toLowerCase()) {
           return true;
         }
 
