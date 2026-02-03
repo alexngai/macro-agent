@@ -2,7 +2,11 @@
 /**
  * Multi-Agent CLI
  *
- * Command-line interface for the multi-agent orchestration system.
+ * Command-line interface for inspecting and managing the multi-agent system.
+ * For running the server, use `multiagent` instead.
+ *
+ * Usage:
+ *   multiagent-cli <command> [options]
  */
 
 import { Command } from "commander";
@@ -102,7 +106,7 @@ function printHierarchy(
 const program = new Command();
 
 program
-  .name("multiagent")
+  .name("multiagent-cli")
   .description("Multi-agent orchestration system CLI")
   .version("0.0.1");
 

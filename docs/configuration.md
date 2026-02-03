@@ -177,19 +177,18 @@ type PermissionMode =
 ### CLI Options
 
 ```bash
-multiagent start [options]
+# Server (default mode runs full ACP + MAP + REST)
+multiagent [options]
+  --port <port>               Port (default: 3001)
+  --host <host>               Host (default: localhost)
+  --cwd <path>                Working directory
+  --acp                       Stdio ACP-only mode (for acp-factory)
+
+# CLI tools (for management/inspection)
+multiagent-cli start [options]
   -p, --port <port>           Port (default: 3000)
   -h, --host <host>           Host (default: localhost)
   --cwd <path>                Working directory
-
-multiagent-acp [options]
-  --cwd <path>                Working directory
-  --ws                        Enable WebSocket ACP
-  --ws-port <port>            WebSocket port (default: 3001)
-  --ws-host <host>            WebSocket host (default: localhost)
-  --api                       Enable HTTP API server
-  --port <port>               HTTP API port (auto-discovers)
-  --host <host>               HTTP API host (default: localhost)
 ```
 
 ### Programmatic API Server
@@ -287,8 +286,8 @@ const messageRouter = createMessageRouter(eventStore, {
 ### Development (In-Memory)
 
 ```bash
-# No environment variables needed - uses defaults
-npx multiagent start
+# Start full server with default settings
+npx multiagent
 ```
 
 ### Production with Sudocode
@@ -298,17 +297,27 @@ export MACRO_TASK_BACKEND=sudocode
 export SUDOCODE_PROJECT_PATH=/path/to/project
 export MACRO_TASK_TOOL_MODE=abstract
 
-npx multiagent start --port 3000
+npx multiagent --port 3001
 ```
 
-### Multi-Client ACP Server
+### Server Mode (Default)
 
 ```bash
-# WebSocket + HTTP API
-npx multiagent-acp --ws --ws-port 3001 --api --port 3000
+# Full server with ACP + MAP + REST API
+npx multiagent --port 3001 --host 0.0.0.0
 
-# All transports: stdio + WebSocket + HTTP API
-npx multiagent-acp --ws --ws-port 3001 --api --port 3000
+# Endpoints available:
+#   ws://host:port/acp      - ACP protocol
+#   ws://host:port/map      - MAP protocol
+#   ws://host:port/api/ws   - Real-time subscriptions
+#   http://host:port/api/*  - REST API
+```
+
+### Stdio ACP Mode (for acp-factory)
+
+```bash
+# For embedded use with acp-factory
+npx multiagent --acp --cwd /path/to/project
 ```
 
 ### Programmatic Full Setup

@@ -13,14 +13,14 @@ import { AgentFactory } from "acp-factory";
 
 export interface RegisterOptions {
   /**
-   * Custom command to run macro-agent ACP server.
-   * Defaults to "npx" with args ["multiagent-acp"]
+   * Custom command to run macro-agent in ACP mode.
+   * Defaults to "npx" with args ["multiagent", "--acp"]
    */
   command?: string;
 
   /**
    * Custom arguments for the command.
-   * Defaults to ["multiagent-acp"]
+   * Defaults to ["multiagent", "--acp"]
    */
   args?: string[];
 
@@ -60,7 +60,7 @@ export interface RegisterOptions {
 export function registerMacroAgent(options: RegisterOptions = {}): void {
   const {
     command = "npx",
-    args = ["multiagent-acp"],
+    args = ["multiagent", "--acp"],
     env,
   } = options;
 

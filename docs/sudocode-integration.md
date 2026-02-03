@@ -25,7 +25,7 @@ export SUDOCODE_PROJECT_PATH=/path/to/project
 ### 2. Start macro-agent
 
 ```bash
-npx multiagent start
+npx multiagent
 ```
 
 The agent will automatically connect to sudocode and use issues as the task source.

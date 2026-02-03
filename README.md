@@ -25,8 +25,8 @@ macro-agent can integrate with [sudocode](https://github.com/sudocode-ai/sudocod
 export MACRO_TASK_BACKEND=sudocode
 export SUDOCODE_PROJECT_PATH=/path/to/project
 
-# Start macro-agent
-npx multiagent start
+# Start macro-agent server (full mode with ACP + MAP + REST)
+npx multiagent
 ```
 
 With sudocode enabled:
@@ -45,26 +45,33 @@ npm install macro-agent
 
 ## Quick Start
 
-### CLI Usage
+### Server Mode (Default)
 
 ```bash
-# Start the server
-npx multiagent start
+# Start full server with ACP + MAP + REST API
+npx multiagent
 
+# Custom port and host
+npx multiagent --port 8080 --host 0.0.0.0
+```
+
+### CLI Tools
+
+```bash
 # Start interactive chat
-npx multiagent chat
+npx multiagent-cli chat
 
 # Check system status
-npx multiagent status
+npx multiagent-cli status
 
 # View agent hierarchy
-npx multiagent hierarchy
+npx multiagent-cli hierarchy
 
 # List all agents
-npx multiagent agents
+npx multiagent-cli agents
 
 # List all tasks
-npx multiagent tasks
+npx multiagent-cli tasks
 ```
 
 ### Programmatic Usage
@@ -243,43 +250,36 @@ Fallback chain: `inject()` → `interruptWith()` → high-priority message
 | `inject_context` | Inject context into another agent |
 | `wait_for_activity` | Wait for system events (Monitor) |
 
-## ACP Mode (Agent Communication Protocol)
+## Server Mode (ACP + MAP)
 
-macro-agent can run as an ACP-compliant agent, enabling external systems to spawn and control it programmatically.
+macro-agent runs as an ACP-compliant agent server with MAP (Multi-Agent Protocol) support, enabling external systems to spawn and control agents programmatically.
 
-### Stdio ACP (Single Client)
+### Full Server Mode (Default)
+
+```bash
+# Start combined server with all protocols
+npx multiagent
+
+# Custom configuration
+npx multiagent --port 8080 --host 0.0.0.0 --cwd /path/to/project
+```
+
+### Stdio ACP (Embedded Use)
 
 ```bash
 # Run as stdio ACP server (for spawning via acp-factory)
-npx multiagent-acp --cwd /path/to/project
+npx multiagent --acp
+npx multiagent --acp --cwd /path/to/project
 ```
 
-### WebSocket ACP (Multi-Client)
-
-For scenarios where multiple clients need to connect to the same agent hierarchy simultaneously:
-
-```bash
-# WebSocket ACP server
-npx multiagent-acp --ws --ws-port 3001
-
-# WebSocket + HTTP API together
-npx multiagent-acp --ws --ws-port 3001 --api --port 3000
-
-# All transports: stdio + WebSocket + HTTP API
-npx multiagent-acp --ws --ws-port 3001 --api --port 3000
-```
-
-### ACP Options
+### Server Options
 
 | Option | Description |
 |--------|-------------|
+| `--port <port>` | Server port (default: 3001) |
+| `--host <host>` | Server host (default: localhost) |
 | `--cwd <path>` | Working directory for agents |
-| `--ws` | Enable WebSocket ACP server |
-| `--ws-port <port>` | WebSocket port (default: 3001) |
-| `--ws-host <host>` | WebSocket host (default: localhost) |
-| `--api` | Enable HTTP API server |
-| `--port <port>` | HTTP API port (auto-discovers if not specified) |
-| `--host <host>` | HTTP API host (default: localhost) |
+| `--acp` | Stdio ACP-only mode (for embedded use with acp-factory) |
 
 ### Multi-Client Architecture
 
@@ -316,55 +316,65 @@ Each client can:
 - Send prompts to their mounted agents
 - See agents spawned by other clients
 
-### Programmatic ACP Registration
+### Programmatic Usage
 
 ```typescript
 import { registerMacroAgent } from 'macro-agent';
 import { AgentFactory } from 'acp-factory';
 
-// Register macro-agent with acp-factory
+// Register macro-agent with acp-factory (uses --acp flag for stdio mode)
 registerMacroAgent();
 
-// Spawn via ACP
+// Spawn via ACP (stdio mode)
 const handle = await AgentFactory.spawn('macro-agent', {
   permissionMode: 'auto-approve',
 });
 
-// Or connect to WebSocket ACP
-const ws = new WebSocket('ws://localhost:3001/acp');
-// Send JSON-RPC 2.0 messages for ACP methods
+// Or connect to server mode (default when running `multiagent`)
+const acpWs = new WebSocket('ws://localhost:3001/acp');   // ACP protocol
+const mapWs = new WebSocket('ws://localhost:3001/map');   // MAP protocol
 ```
 
 ## CLI Commands
 
+### multiagent (Server)
+
 ```
-multiagent start [options]    Start the server
-  -p, --port <port>           Port (default: 3000)
-  -h, --host <host>           Host (default: localhost)
+multiagent [options]          Start the agent server (full mode by default)
+  --port <port>               Port (default: 3001)
+  --host <host>               Host (default: localhost)
   --cwd <path>                Working directory
+  --acp                       Stdio ACP-only mode (for acp-factory)
+```
 
-multiagent chat               Interactive chat mode
+Server endpoints (default mode):
+- `ws://host:port/acp` - ACP protocol (WebSocket)
+- `ws://host:port/map` - MAP protocol (WebSocket)
+- `ws://host:port/api/ws` - Real-time subscriptions
+- `http://host:port/api/*` - REST API
+- `http://host:port/health` - Health check
 
-multiagent status             Show system status
+### multiagent-cli (Management Tools)
 
-multiagent agents [id]        List agents or show details
+```
+multiagent-cli start [options]  Start REST-only server (legacy)
+  -p, --port <port>             Port (default: 3000)
+  -h, --host <host>             Host (default: localhost)
+  --cwd <path>                  Working directory
 
-multiagent tasks [id]         List tasks or show details
+multiagent-cli chat             Interactive chat mode
 
-multiagent hierarchy [root]   Show agent hierarchy tree
+multiagent-cli status           Show system status
 
-multiagent stop [agentId]     Stop agent(s)
+multiagent-cli agents [id]      List agents or show details
 
-multiagent clear              Reset the system
+multiagent-cli tasks [id]       List tasks or show details
 
-multiagent-acp [options]      Run as ACP server
-  --cwd <path>                Working directory
-  --ws                        Enable WebSocket ACP
-  --ws-port <port>            WebSocket port (default: 3001)
-  --ws-host <host>            WebSocket host (default: localhost)
-  --api                       Enable HTTP API server
-  --port <port>               HTTP API port (auto-discovers)
-  --host <host>               HTTP API host (default: localhost)
+multiagent-cli hierarchy [root] Show agent hierarchy tree
+
+multiagent-cli stop [agentId]   Stop agent(s)
+
+multiagent-cli clear            Reset the system
 ```
 
 ## Development

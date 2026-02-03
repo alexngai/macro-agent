@@ -1,38 +1,40 @@
 #!/usr/bin/env node
 /**
- * ACP Server CLI Entry Point
+ * Multi-Agent Server Entry Point
  *
- * Runs macro-agent as an ACP-compliant agent that can be spawned
- * and controlled via the Agent Communication Protocol.
+ * Runs macro-agent as a full server with ACP + MAP + REST support.
+ * This is the primary entry point for running macro-agent.
  *
  * Usage:
- *   multiagent-acp [options]
+ *   multiagent [options]
  *
  * Options:
  *   --cwd <path>       Working directory for agents
- *   --api              Enable API server (WebSocket ACP + REST API on same port)
- *   --port <port>      Port for API server (default: 3001)
- *   --host <host>      Host for API server (default: localhost)
+ *   --port <port>      Port for server (default: 3001)
+ *   --host <host>      Host for server (default: localhost)
+ *   --acp              Stdio ACP-only mode (for embedded use with acp-factory)
  *
  * Examples:
- *   # Stdio ACP only (default, for embedded use)
- *   multiagent-acp
+ *   # Full server mode (default): WebSocket ACP + MAP + REST API
+ *   multiagent
+ *   multiagent --port 8080
+ *   multiagent --host 0.0.0.0 --port 3001
  *
- *   # API server: WebSocket ACP + REST API
- *   multiagent-acp --api
- *   multiagent-acp --api --port 8080
- *   multiagent-acp --api --host 0.0.0.0 --port 3001
+ *   # Stdio ACP-only mode (for spawning via acp-factory)
+ *   multiagent --acp
+ *   multiagent --acp --cwd /path/to/project
  *
- * API server endpoints:
+ * Server endpoints (default mode):
  *   ws://host:port/acp      - ACP protocol (WebSocket)
+ *   ws://host:port/map      - MAP protocol (WebSocket)
  *   ws://host:port/api/ws   - Real-time subscriptions (WebSocket)
  *   http://host:port/api/*  - REST API endpoints
  *   http://host:port/health - Health check
  *
- * Or register with acp-factory:
+ * For embedded use with acp-factory:
  *   AgentFactory.register('macro-agent', {
  *     command: 'npx',
- *     args: ['multiagent-acp'],
+ *     args: ['multiagent', '--acp'],
  *   });
  */
 
@@ -68,11 +70,11 @@ import {
 export interface ACPServerOptions {
   /** Working directory for agents */
   cwd?: string;
-  /** Enable API server (WebSocket ACP + REST API) */
-  api?: boolean;
-  /** Port for API server (default: 3001) */
+  /** Stdio ACP-only mode (for embedded use with acp-factory) */
+  acp?: boolean;
+  /** Port for server (default: 3001) */
   port?: number;
-  /** Host for API server (default: localhost) */
+  /** Host for server (default: localhost) */
   host?: string;
 }
 
@@ -88,8 +90,8 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
     if (args[i] === "--cwd" && args[i + 1]) {
       options.cwd = args[i + 1];
       i++;
-    } else if (args[i] === "--api") {
-      options.api = true;
+    } else if (args[i] === "--acp") {
+      options.acp = true;
     } else if (args[i] === "--port" && args[i + 1]) {
       options.port = parseInt(args[i + 1], 10);
       i++;
@@ -237,19 +239,6 @@ async function main() {
   };
 
   try {
-    // Start combined server if --api is enabled
-    if (options.api) {
-      const host = options.host ?? "localhost";
-      const port = options.port ?? 3001;
-
-      combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher },
-        { port, host, defaultCwd }
-      );
-
-      await combinedServer.start();
-    }
-
     // Handle graceful shutdown
     process.on("SIGINT", async () => {
       await cleanup();
@@ -261,23 +250,8 @@ async function main() {
       process.exit(0);
     });
 
-    // Determine if we should run stdio ACP
-    // Skip stdio ACP if:
-    // 1. MACRO_AGENT_SERVER_ONLY env var is set (spawned by MacroAgentServerManager)
-    // 2. Or stdin detection fails (fallback)
-    const serverOnlyEnv = process.env.MACRO_AGENT_SERVER_ONLY === "1";
-    const skipStdioAcp = options.api && serverOnlyEnv;
-
-    if (skipStdioAcp) {
-      // WebSocket-only mode: just keep the process alive until shutdown signal
-      console.error("[acp] Running in server-only mode (stdin not connected)");
-
-      // Keep process alive - will exit via SIGINT/SIGTERM handlers
-      await new Promise<void>(() => {
-        // Never resolves - process stays alive until signal
-      });
-    } else {
-      // Standard mode: set up stdio ACP connection
+    if (options.acp) {
+      // Stdio ACP-only mode (for embedded use with acp-factory)
       const { input, output } = createStdioStreams();
       const stream = ndJsonStream(output, input);
 
@@ -298,6 +272,22 @@ async function main() {
 
       // Clean up on normal close
       await cleanup();
+    } else {
+      // Full server mode (default): WebSocket ACP + MAP + REST API
+      const host = options.host ?? "localhost";
+      const port = options.port ?? 3001;
+
+      combinedServer = createCombinedServer(
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher },
+        { port, host, defaultCwd }
+      );
+
+      await combinedServer.start();
+
+      // Keep process alive - will exit via SIGINT/SIGTERM handlers
+      await new Promise<void>(() => {
+        // Never resolves - process stays alive until signal
+      });
     }
   } catch (error) {
     // Log errors to stderr (not stdout, which is used for ACP)

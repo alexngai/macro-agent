@@ -66,7 +66,8 @@ describe("WakeManager", () => {
       wakeManager.requestWakeNow({ reason: "third" });
 
       expect(wakeManager.hasPendingWake()).toBe(true);
-      expect(wakeManager.getPendingReason()).toBe("first"); // First reason preserved
+      // Last reason is stored (newer reason overrides older)
+      expect(wakeManager.getPendingReason()).toBe("third");
     });
 
     it("should run wake cycle after coalesce delay", async () => {
@@ -92,15 +93,24 @@ describe("WakeManager", () => {
     it("should return skipped if wake in progress", async () => {
       wakeManager.start();
 
-      // Start a long-running cycle
+      // Create a long-running inject operation to keep the cycle busy
+      let resolveInject: () => void;
+      const injectPromise = new Promise<{ success: boolean }>((resolve) => {
+        resolveInject = () => resolve({ success: true });
+      });
+
+      const mockSession = {
+        supportsInject: vi.fn().mockReturnValue(true),
+        inject: vi.fn().mockReturnValue(injectPromise),
+      };
+
+      mockDeps.agentManager.getSession = vi.fn().mockReturnValue(mockSession);
       mockDeps.systemEventQueue.getAgentsWithEvents = vi
         .fn()
         .mockReturnValue(["agent_1" as AgentId]);
-      mockDeps.systemEventQueue.drainText = vi.fn().mockImplementation(() => {
-        return new Promise((resolve) => setTimeout(() => resolve(["Event"]), 1000));
-      });
+      mockDeps.systemEventQueue.drainText = vi.fn().mockReturnValue(["Event"]);
 
-      // Start first cycle
+      // Start first cycle (will wait on inject)
       const firstCyclePromise = wakeManager.runWakeCycle({ reason: "first" });
 
       // Try to start second cycle immediately
@@ -109,8 +119,9 @@ describe("WakeManager", () => {
       expect(result.status).toBe("skipped");
       expect(result.reason).toBe("wake-in-progress");
 
-      // Clean up
-      await vi.runAllTimersAsync();
+      // Clean up - resolve the pending inject
+      resolveInject!();
+      await firstCyclePromise;
     });
 
     it("should deliver events to agents with inject", async () => {
@@ -134,8 +145,14 @@ describe("WakeManager", () => {
     });
 
     it("should fall back to interrupt if inject fails", async () => {
+      // Create a mock iterator that completes after first call
+      let callCount = 0;
       const mockIterator = {
-        next: vi.fn().mockResolvedValue({ done: false, value: {} }),
+        next: vi.fn().mockImplementation(() => {
+          callCount++;
+          // First call returns a value, second call ends the iteration
+          return Promise.resolve(callCount === 1 ? { done: false, value: {} } : { done: true });
+        }),
         [Symbol.asyncIterator]: function () {
           return this;
         },

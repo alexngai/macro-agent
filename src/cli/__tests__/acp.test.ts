@@ -30,15 +30,15 @@ describe("parseArgs", () => {
     });
   });
 
-  describe("--api option", () => {
-    it("should parse --api flag", () => {
-      const result = parseArgs(["--api"]);
-      expect(result.api).toBe(true);
+  describe("--acp option", () => {
+    it("should parse --acp flag", () => {
+      const result = parseArgs(["--acp"]);
+      expect(result.acp).toBe(true);
     });
 
-    it("should not set api if flag not provided", () => {
+    it("should not set acp if flag not provided (default is full server mode)", () => {
       const result = parseArgs([]);
-      expect(result.api).toBeUndefined();
+      expect(result.acp).toBeUndefined();
     });
   });
 
@@ -81,14 +81,14 @@ describe("parseArgs", () => {
     it("should parse all options together", () => {
       const result = parseArgs([
         "--cwd", "/project",
-        "--api",
+        "--acp",
         "--port", "9000",
         "--host", "127.0.0.1",
       ]);
 
       expect(result).toEqual({
         cwd: "/project",
-        api: true,
+        acp: true,
         port: 9000,
         host: "127.0.0.1",
       });
@@ -96,7 +96,7 @@ describe("parseArgs", () => {
 
     it("should parse options in any order", () => {
       const result = parseArgs([
-        "--api",
+        "--acp",
         "--host", "0.0.0.0",
         "--cwd", "/my/project",
         "--port", "4000",
@@ -104,40 +104,40 @@ describe("parseArgs", () => {
 
       expect(result).toEqual({
         cwd: "/my/project",
-        api: true,
+        acp: true,
         port: 4000,
         host: "0.0.0.0",
       });
     });
 
-    it("should parse --api with --port only", () => {
-      const result = parseArgs(["--api", "--port", "5000"]);
+    it("should parse server options without --acp (full server mode)", () => {
+      const result = parseArgs(["--port", "5000", "--host", "0.0.0.0"]);
 
       expect(result).toEqual({
-        api: true,
         port: 5000,
+        host: "0.0.0.0",
       });
     });
 
-    it("should parse --api with --host only", () => {
-      const result = parseArgs(["--api", "--host", "0.0.0.0"]);
+    it("should parse --acp with --cwd (stdio ACP mode)", () => {
+      const result = parseArgs(["--acp", "--cwd", "/project"]);
 
       expect(result).toEqual({
-        api: true,
-        host: "0.0.0.0",
+        acp: true,
+        cwd: "/project",
       });
     });
   });
 
   describe("edge cases", () => {
-    it("should return empty object for no arguments", () => {
+    it("should return empty object for no arguments (defaults to full server mode)", () => {
       const result = parseArgs([]);
       expect(result).toEqual({});
     });
 
     it("should ignore unknown options", () => {
-      const result = parseArgs(["--unknown", "value", "--api"]);
-      expect(result.api).toBe(true);
+      const result = parseArgs(["--unknown", "value", "--acp"]);
+      expect(result.acp).toBe(true);
       expect(result).not.toHaveProperty("unknown");
     });
 
@@ -146,9 +146,9 @@ describe("parseArgs", () => {
       const originalArgv = process.argv;
 
       try {
-        process.argv = ["node", "acp.js", "--api", "--port", "7777"];
+        process.argv = ["node", "acp.js", "--acp", "--port", "7777"];
         const result = parseArgs();
-        expect(result.api).toBe(true);
+        expect(result.acp).toBe(true);
         expect(result.port).toBe(7777);
       } finally {
         // Restore original argv
@@ -159,45 +159,53 @@ describe("parseArgs", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// API Server Integration Tests
+// Server Mode Tests
 // ─────────────────────────────────────────────────────────────────
 
-describe("API Server Configuration", () => {
-  describe("option combinations", () => {
-    it("should enable API server when --api flag is set", () => {
-      const options = parseArgs(["--api"]);
-      expect(options.api).toBe(true);
+describe("Server Mode Configuration", () => {
+  describe("default behavior (full server mode)", () => {
+    it("should run full server mode when no --acp flag is set", () => {
+      const options = parseArgs([]);
+      expect(options.acp).toBeUndefined();
+      // When acp is undefined, main() runs full server mode
     });
 
-    it("should use specified port when --port is provided with --api", () => {
-      const options = parseArgs(["--api", "--port", "8080"]);
-      expect(options.api).toBe(true);
+    it("should use specified port in full server mode", () => {
+      const options = parseArgs(["--port", "8080"]);
+      expect(options.acp).toBeUndefined();
       expect(options.port).toBe(8080);
     });
 
-    it("should use specified host when --host is provided with --api", () => {
-      const options = parseArgs(["--api", "--host", "0.0.0.0"]);
-      expect(options.api).toBe(true);
+    it("should use specified host in full server mode", () => {
+      const options = parseArgs(["--host", "0.0.0.0"]);
+      expect(options.acp).toBeUndefined();
       expect(options.host).toBe("0.0.0.0");
     });
+  });
 
-    it("should allow --port without --api (port is stored but server not started)", () => {
-      const options = parseArgs(["--port", "9000"]);
-      expect(options.port).toBe(9000);
-      expect(options.api).toBeUndefined();
+  describe("stdio ACP mode (--acp flag)", () => {
+    it("should enable stdio ACP mode when --acp flag is set", () => {
+      const options = parseArgs(["--acp"]);
+      expect(options.acp).toBe(true);
+    });
+
+    it("should allow --cwd with --acp for embedded use", () => {
+      const options = parseArgs(["--acp", "--cwd", "/path/to/project"]);
+      expect(options.acp).toBe(true);
+      expect(options.cwd).toBe("/path/to/project");
     });
   });
 
   describe("default values behavior", () => {
     it("should use default port 3001 when not specified", () => {
-      const options = parseArgs(["--api"]);
+      const options = parseArgs([]);
       // Default is applied in main(), not parseArgs()
       expect(options.port).toBeUndefined();
       // The actual default (3001) is applied when creating the server
     });
 
     it("should use default host localhost when not specified", () => {
-      const options = parseArgs(["--api"]);
+      const options = parseArgs([]);
       // Default is applied in main(), not parseArgs()
       expect(options.host).toBeUndefined();
       // The actual default (localhost) is applied when creating the server

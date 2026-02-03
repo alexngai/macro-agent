@@ -377,7 +377,7 @@ Common issues and solutions when using macro-agent.
 1. **Check server logs**
    ```bash
    # Run with debug output
-   DEBUG=macro-agent:* npx multiagent start
+   DEBUG=macro-agent:* npx multiagent
    ```
 
 2. **Validate request body**
@@ -443,10 +443,10 @@ Common issues and solutions when using macro-agent.
 
 ```bash
 # All debug output
-DEBUG=macro-agent:* npx multiagent start
+DEBUG=macro-agent:* npx multiagent
 
 # Specific modules
-DEBUG=macro-agent:agent-manager,macro-agent:message-router npx multiagent start
+DEBUG=macro-agent:agent-manager,macro-agent:message-router npx multiagent
 ```
 
 ### Inspect event store
