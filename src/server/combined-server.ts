@@ -1,8 +1,9 @@
 /**
  * Combined Server
  *
- * Single HTTP server that hosts both:
+ * Single HTTP server that hosts:
  * - WebSocket ACP protocol on /acp
+ * - WebSocket MAP protocol on /map
  * - REST API + WebSocket subscriptions on /api/*
  */
 
@@ -17,9 +18,19 @@ import type { TaskManager } from "../task/task-manager.js";
 import type { MessageRouter } from "../router/message-router.js";
 import type { PeerManager } from "../peer/peer-manager.js";
 import type { CapabilityManager } from "../peer/capability-manager.js";
+import { getAncestors, type RelevanceAgentSource } from "../activity/index.js";
 import type { ActivityWatcher } from "../activity/watcher.js";
 import { setupACPWebSocket } from "../acp/websocket-server.js";
 import { createAPIApp, setupAPIWebSocket } from "../api/server.js";
+import {
+  createMAPAdapter,
+  createMAPWebSocketHandler,
+  type MAPAdapter,
+  type MAPAdapterServices,
+  type MAPWebSocketHandler,
+} from "../map/adapter/index.js";
+import type { Agent, AgentId } from "../store/types/index.js";
+import type { Address, SendOptions } from "../map/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -48,6 +59,12 @@ export interface CombinedServerConfig {
 
   /** Enable CORS for REST API (default: true) */
   cors?: boolean;
+
+  /** URL path for MAP connections (default: "/map") */
+  mapPath?: string;
+
+  /** Disable MAP protocol (default: false - MAP is enabled) */
+  disableMap?: boolean;
 }
 
 export interface CombinedServer {
@@ -63,11 +80,82 @@ export interface CombinedServer {
   /** Get number of ACP connections */
   getACPConnectionCount(): number;
 
+  /** Get number of MAP connections */
+  getMAPConnectionCount(): number;
+
   /** HTTP server */
   readonly httpServer: http.Server;
 
   /** Express app */
   readonly app: Express;
+
+  /** MAP adapter (for testing) */
+  readonly mapAdapter?: MAPAdapter;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MAP Services Wiring
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Get all descendants of an agent recursively.
+ */
+function getDescendantsRecursive(agentId: AgentId, agentManager: AgentManager): AgentId[] {
+  const descendants: AgentId[] = [];
+  const children = agentManager.getChildren(agentId);
+  for (const child of children) {
+    descendants.push(child.id);
+    descendants.push(...getDescendantsRecursive(child.id, agentManager));
+  }
+  return descendants;
+}
+
+/**
+ * Create MAPAdapterServices from CombinedServerServices.
+ * Wires the internal services to the MAP adapter interface.
+ */
+function createMAPServices(services: CombinedServerServices): MAPAdapterServices {
+  // Create agent source for getAncestors (needs lineage lookup)
+  // RelevanceAgentSource expects getAgent to return null (not undefined) when not found
+  const agentSource: RelevanceAgentSource = {
+    getAgent: (id) => services.agentManager.get(id),
+    listAgents: () => services.agentManager.list(),
+  };
+
+  // Map Agent → MAPAdapterServices AgentState (handle null→undefined, created_at→createdAt)
+  const mapAgent = (agent: Agent | null) =>
+    agent
+      ? {
+          id: agent.id,
+          role: agent.role,
+          state: agent.state,
+          parent: agent.parent ?? undefined,
+          createdAt: agent.created_at,
+        }
+      : undefined;
+
+  return {
+    getAgent: (id) => mapAgent(services.agentManager.get(id)),
+    listAgents: (filter) =>
+      services.agentManager.list(filter).map((a) => mapAgent(a)!),
+    sendMessage: async (
+      from: AgentId,
+      to: Address,
+      content: string,
+      options?: SendOptions
+    ) => {
+      const result = await services.messageRouter.sendToAddress({
+        from,
+        to,
+        content,
+        options: options ? { priority: options.priority } : undefined,
+      });
+      return { delivered: result.delivered };
+    },
+    getAncestors: (agentId) => getAncestors(agentId, agentSource),
+    getDescendants: (agentId) =>
+      getDescendantsRecursive(agentId, services.agentManager),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -83,6 +171,8 @@ export function createCombinedServer(
     host = "localhost",
     defaultCwd = process.cwd(),
     cors = true,
+    mapPath = "/map",
+    disableMap = false,
   } = config;
 
   // Create Express app with API routes
@@ -101,6 +191,19 @@ export function createCombinedServer(
   // Set up API WebSocket handling (pass app to share state)
   const apiHandler = setupAPIWebSocket(apiWss, services, app);
 
+  // Set up MAP protocol handling (unless disabled)
+  let mapAdapter: MAPAdapter | undefined;
+  let mapHandler: MAPWebSocketHandler | undefined;
+
+  if (!disableMap) {
+    const mapServices = createMAPServices(services);
+    mapAdapter = createMAPAdapter(
+      { name: "macro-agent", version: "1.0.0" },
+      mapServices
+    );
+    mapHandler = createMAPWebSocketHandler(mapAdapter);
+  }
+
   // Handle upgrade requests - route by path
   httpServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const pathname = new URL(request.url ?? "/", `http://${request.headers.host}`).pathname;
@@ -112,6 +215,11 @@ export function createCombinedServer(
     } else if (pathname === "/api/ws") {
       apiWss.handleUpgrade(request, socket, head, (ws) => {
         apiWss.emit("connection", ws, request);
+      });
+    } else if (pathname === mapPath && mapHandler) {
+      // MAP protocol connection
+      acpWss.handleUpgrade(request, socket, head, (ws) => {
+        mapHandler.handleConnection(ws, request);
       });
     } else {
       // Unknown WebSocket path
@@ -125,6 +233,7 @@ export function createCombinedServer(
     res.json({
       status: "ok",
       acp_connections: acpHandler.getConnectionCount(),
+      map_connections: mapHandler?.getConnectionCount() ?? 0,
       timestamp: Date.now(),
     });
   });
@@ -134,12 +243,20 @@ export function createCombinedServer(
   // ─────────────────────────────────────────────────────────────────
 
   async function start(): Promise<void> {
+    // Start MAP adapter if enabled
+    if (mapAdapter && !mapAdapter.isRunning()) {
+      await mapAdapter.start();
+    }
+
     return new Promise((resolve, reject) => {
       httpServer.on("error", reject);
       httpServer.listen(port, host, () => {
         httpServer.removeListener("error", reject);
         console.error(`[combined] Server listening on http://${host}:${port}`);
         console.error(`[combined]   ACP WebSocket: ws://${host}:${port}/acp`);
+        if (mapHandler) {
+          console.error(`[combined]   MAP WebSocket: ws://${host}:${port}${mapPath}`);
+        }
         console.error(`[combined]   API WebSocket: ws://${host}:${port}/api/ws`);
         console.error(`[combined]   REST API: http://${host}:${port}/api/*`);
         resolve();
@@ -152,6 +269,14 @@ export function createCombinedServer(
 
     // Close ACP connections
     acpHandler.closeAll();
+
+    // Close MAP connections
+    mapHandler?.closeAll();
+
+    // Stop MAP adapter
+    if (mapAdapter?.isRunning()) {
+      await mapAdapter.stop();
+    }
 
     // Close API WebSocket connections
     apiHandler.closeAll();
@@ -181,12 +306,18 @@ export function createCombinedServer(
     return acpHandler.getConnectionCount();
   }
 
+  function getMAPConnectionCount(): number {
+    return mapHandler?.getConnectionCount() ?? 0;
+  }
+
   return {
     start,
     stop,
     getUrl,
     getACPConnectionCount,
+    getMAPConnectionCount,
     httpServer,
     app,
+    mapAdapter,
   };
 }

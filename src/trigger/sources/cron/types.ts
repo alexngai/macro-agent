@@ -322,6 +322,11 @@ export interface CronService {
   run(id: string, opts?: { force?: boolean }): Promise<void>;
 
   /**
+   * Trigger a job immediately (alias for run with force: true)
+   */
+  triggerNow(id: string): Promise<void>;
+
+  /**
    * Get next scheduled run time across all jobs
    */
   getNextRunTime(): number | null;

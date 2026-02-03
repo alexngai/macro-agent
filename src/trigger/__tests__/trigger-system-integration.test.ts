@@ -421,6 +421,9 @@ describe("TriggerSystem Integration", () => {
         payload: { kind: "text", content: "High priority message" },
         wakeMode: "now",
         priority: "high",
+        // Use a custom routing target that built-in strategies don't handle,
+        // so the custom strategy's canHandle (based on priority) can match
+        routing: { target: { type: "custom-priority" } as any },
       });
 
       const result = await triggerSystem.router.route(event);

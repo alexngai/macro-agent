@@ -60,10 +60,12 @@ class JobStore {
   async list(filter?: CronJobFilter): Promise<CronJob[]> {
     let jobs = Array.from(this.jobs.values());
 
+    // Filter out disabled jobs by default unless includeDisabled is true
+    if (!filter?.includeDisabled) {
+      jobs = jobs.filter((j) => j.enabled);
+    }
+
     if (filter) {
-      if (!filter.includeDisabled) {
-        jobs = jobs.filter((j) => j.enabled);
-      }
       if (filter.namePattern) {
         const pattern = new RegExp(filter.namePattern, "i");
         jobs = jobs.filter((j) => pattern.test(j.name));
@@ -237,7 +239,7 @@ export function createCronService(
           }
         } else {
           // Compute next run time
-          job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt);
+          job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt) ?? undefined;
           await store.save(job);
         }
 
@@ -251,7 +253,7 @@ export function createCronService(
       } else {
         job.state.lastStatus = "error";
         job.state.lastError = result.error ?? "Trigger routing failed";
-        job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt);
+        job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt) ?? undefined;
         await store.save(job);
 
         emit({
@@ -280,7 +282,7 @@ export function createCronService(
       job.state.lastDurationMs = durationMs;
       job.state.lastStatus = "error";
       job.state.lastError = error instanceof Error ? error.message : String(error);
-      job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt);
+      job.state.nextRunAtMs = computeJobNextRunTime(job, finishedAt) ?? undefined;
       await store.save(job);
 
       emit({
@@ -311,7 +313,7 @@ export function createCronService(
 
       for (const job of jobs) {
         if (!job.state.nextRunAtMs) {
-          job.state.nextRunAtMs = computeJobNextRunTime(job, now);
+          job.state.nextRunAtMs = computeJobNextRunTime(job, now) ?? undefined;
           await store.save(job);
         }
       }
@@ -481,6 +483,11 @@ export function createCronService(
       }
 
       await executeJob(job);
+    },
+
+    /** Alias for run() - triggers job immediately */
+    async triggerNow(id: string): Promise<void> {
+      return this.run(id, { force: true });
     },
 
     getNextRunTime(): number | null {

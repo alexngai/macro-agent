@@ -86,7 +86,7 @@ function buildExtendedContext(
 
   // Get pending tasks from event store
   const pendingTasks: TaskSummary[] = [];
-  const tasks = context.eventStore.getAllTasks?.() ?? [];
+  const tasks = context.eventStore.listTasks?.() ?? [];
   for (const task of tasks) {
     if (task.status === "pending" || task.status === "in_progress") {
       pendingTasks.push({

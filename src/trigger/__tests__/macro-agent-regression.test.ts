@@ -136,7 +136,20 @@ interface MockSession {
   agentId: string;
   supportsInject: () => boolean;
   inject: (content: string) => Promise<{ success: boolean }>;
-  interruptWith: (content: string) => Promise<{ success: boolean }>;
+  interruptWith: (content: string) => AsyncIterable<unknown>;
+}
+
+/**
+ * Create a mock async iterator that optionally throws
+ */
+function createMockAsyncIterator(shouldThrow?: Error): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: shouldThrow
+        ? vi.fn().mockRejectedValue(shouldThrow)
+        : vi.fn().mockResolvedValue({ done: true }),
+    }),
+  };
 }
 
 function createMockSession(agentId: string): MockSession {
@@ -145,7 +158,7 @@ function createMockSession(agentId: string): MockSession {
     agentId,
     supportsInject: vi.fn().mockReturnValue(true),
     inject: vi.fn().mockResolvedValue({ success: true }),
-    interruptWith: vi.fn().mockResolvedValue({ success: true }),
+    interruptWith: vi.fn().mockReturnValue(createMockAsyncIterator()),
   };
 }
 
@@ -206,11 +219,40 @@ describe("AgentManager Integration", () => {
         deps._internal.agents.get("agent_head"),
       ]);
 
+      // Mock prompt to actually spawn an agent when called with spawn request
+      const originalPrompt = deps.agentManager.prompt;
+      deps.agentManager.prompt = vi.fn((id, msg) => {
+        // If this is a spawn request, create the new agent
+        if (typeof msg === "string" && msg.includes("Spawn a new")) {
+          const newAgentId = "agent_spawned_worker" as AgentId;
+          const newAgent: MockAgent = {
+            id: newAgentId,
+            state: "running",
+            parent: id as AgentId,
+            task: "Handle deployment webhook",
+            role: "worker",
+            config: {},
+            lineage: [id as AgentId],
+            created_at: Date.now(),
+            session_id: `session_${newAgentId}`,
+          };
+          deps._internal.agents.set(newAgentId, newAgent);
+          deps._internal.sessions.set(newAgentId, createMockSession(newAgentId));
+
+          // Update list mock to return the new agent
+          deps.agentManager.list = vi.fn().mockReturnValue([
+            deps._internal.agents.get("agent_head"),
+            newAgent,
+          ]);
+        }
+        return originalPrompt(id, msg);
+      });
+
       const result = await triggerSystem.router.route(event);
 
-      // Should have attempted to spawn
+      // Should have attempted to spawn (result.spawned is the actual field)
       expect(result.success).toBe(true);
-      expect(result.metadata?.spawnedNew).toBe(true);
+      expect(result.spawned).toBe(true);
     });
 
     it("should not spawn when agent with role exists", async () => {
@@ -271,6 +313,10 @@ describe("AgentManager Integration", () => {
       const session = deps._internal.sessions.get("agent_head")!;
       session.supportsInject = vi.fn().mockReturnValue(false);
       session.inject = vi.fn().mockRejectedValue(new Error("Not supported"));
+      // Also make interruptWith fail so we reach the prompt fallback
+      session.interruptWith = vi.fn().mockReturnValue(
+        createMockAsyncIterator(new Error("Interrupt not supported"))
+      );
 
       // Queue event for the agent
       triggerSystem.queue.enqueue("Test message", {
@@ -765,7 +811,9 @@ describe("Error Recovery", () => {
         if (i === 1) {
           // Make this agent's session fail
           session.inject = vi.fn().mockRejectedValue(new Error("Inject failed"));
-          session.interruptWith = vi.fn().mockRejectedValue(new Error("Interrupt failed"));
+          session.interruptWith = vi.fn().mockReturnValue(
+            createMockAsyncIterator(new Error("Interrupt failed"))
+          );
         }
 
         const agent: MockAgent = {
