@@ -687,13 +687,8 @@ export class MAPAdapterImpl implements MAPAdapter {
 
   private async sendToSession(session: ConnectionSession, message: JsonRpcMessage): Promise<void> {
     try {
-      // Reacquire writer lock
-      const writer = session.stream.writable.getWriter();
-      try {
-        await writer.write(message);
-      } finally {
-        writer.releaseLock();
-      }
+      // Use the existing writer from the session (acquired in acceptConnection)
+      await session.writer.write(message);
     } catch (error) {
       console.error("[MAPAdapter] Failed to send message:", error);
       throw error;
