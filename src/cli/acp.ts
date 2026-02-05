@@ -38,7 +38,10 @@
  *   });
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   AgentSideConnection,
   ndJsonStream,
@@ -89,7 +92,12 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
   const options: ACPServerOptions = {};
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--cwd" && args[i + 1]) {
+    if (args[i] === "--version" || args[i] === "-v") {
+      const __dirname = dirname(fileURLToPath(import.meta.url));
+      const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
+      console.log(pkg.version);
+      process.exit(0);
+    } else if (args[i] === "--cwd" && args[i + 1]) {
       options.cwd = args[i + 1];
       i++;
     } else if (args[i] === "--acp") {
