@@ -421,6 +421,7 @@ export class RPCHandler {
     context: HandlerContext
   ): Promise<JsonRpcResponse> {
     const { id, method, params } = request;
+    console.error(`[RPCHandler.handleRequest] method=${method} id=${id}`);
 
     try {
       // Find handler
@@ -430,15 +431,18 @@ export class RPCHandler {
       }
 
       // Execute through middleware chain
+      console.error(`[RPCHandler.handleRequest] Executing handler for ${method}`);
       const result = await this.executeWithMiddleware(
         method,
         params,
         context,
         handler
       );
+      console.error(`[RPCHandler.handleRequest] Handler success for ${method}`);
 
       return createSuccessResponse(id, result ?? null);
     } catch (error) {
+      console.error(`[RPCHandler.handleRequest] Error in ${method}:`, error);
       return this.errorToResponse(id, error);
     }
   }

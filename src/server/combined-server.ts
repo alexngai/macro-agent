@@ -155,6 +155,10 @@ function createMAPServices(services: CombinedServerServices): MAPAdapterServices
     getAncestors: (agentId) => getAncestors(agentId, agentSource),
     getDescendants: (agentId) =>
       getDescendantsRecursive(agentId, services.agentManager),
+    // Full services for ACP-over-MAP support
+    agentManager: services.agentManager,
+    eventStore: services.eventStore,
+    taskManager: services.taskManager,
   };
 }
 
@@ -196,7 +200,10 @@ export function createCombinedServer(
   let mapHandler: MAPWebSocketHandler | undefined;
 
   if (!disableMap) {
-    const mapServices = createMAPServices(services);
+    const mapServices = {
+      ...createMAPServices(services),
+      defaultCwd,
+    };
     mapAdapter = createMAPAdapter(
       { name: "macro-agent", version: "1.0.0" },
       mapServices

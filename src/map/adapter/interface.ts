@@ -75,7 +75,7 @@ export interface ExtensionContext {
  */
 export type ExtensionHandler = (
   context: ExtensionContext,
-  params: unknown
+  params: unknown,
 ) => Promise<unknown>;
 
 // =============================================================================
@@ -154,7 +154,7 @@ export interface AdapterLimits {
  */
 export type AuthenticateHandler = (
   participantType: ParticipantType,
-  credentials: AuthCredentials
+  credentials: AuthCredentials,
 ) => Promise<AuthResult>;
 
 /**
@@ -233,6 +233,28 @@ export interface AgentFilter {
 }
 
 /**
+ * ACP capability advertisement (matches MAP SDK's ACPCapability).
+ */
+export interface ACPCapability {
+  /** ACP protocol version supported (e.g., '2024-10-07') */
+  version?: string;
+  /** ACP features supported by this agent */
+  features?: string[];
+}
+
+/**
+ * Agent capabilities advertised via MAP (matches MAP SDK's ParticipantCapabilities).
+ */
+export interface AgentCapabilities {
+  /** Protocols supported by this agent (e.g., ["acp"]) */
+  protocols?: string[];
+  /** ACP capability details (present if 'acp' is in protocols array) */
+  acp?: ACPCapability;
+  /** Additional capability flags */
+  [key: string]: unknown;
+}
+
+/**
  * Agent info returned by queries.
  */
 export interface AgentInfo {
@@ -244,6 +266,8 @@ export interface AgentInfo {
   scopes: ScopeId[];
   metadata?: Record<string, unknown>;
   createdAt: number;
+  /** Agent capabilities (protocols, features) */
+  capabilities?: AgentCapabilities;
 }
 
 /**
@@ -368,7 +392,7 @@ export interface MAPAdapter {
     participantId: ParticipantId,
     to: Address,
     payload: MessagePayload,
-    options?: SendOptions
+    options?: SendOptions,
   ): Promise<SendResult>;
 
   // ===========================================================================
@@ -388,7 +412,7 @@ export interface MAPAdapter {
    */
   createSubscription(
     participantId: ParticipantId,
-    filter?: SubscriptionFilter
+    filter?: SubscriptionFilter,
   ): Promise<SubscriptionId>;
 
   /**
@@ -440,7 +464,7 @@ export interface MAPAdapter {
    */
   getAgent(
     participantId: ParticipantId,
-    agentId: AgentId
+    agentId: AgentId,
   ): AgentInfo | undefined;
 
   /**
@@ -460,7 +484,7 @@ export interface MAPAdapter {
    */
   getScope(
     participantId: ParticipantId,
-    scopeId: ScopeId
+    scopeId: ScopeId,
   ): ScopeInfo | undefined;
 
   // ===========================================================================

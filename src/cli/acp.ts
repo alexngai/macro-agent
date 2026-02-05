@@ -62,6 +62,8 @@ import {
   createWakeHandler,
   createSessionProviderFromAgentManager,
 } from "../agent/wake.js";
+import type { SessionChecker, WakeDecision } from "../router/wake.js";
+import type { AgentId, EventId } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration
@@ -145,8 +147,102 @@ async function main() {
 
   // Initialize services
   const eventStore = await createEventStore({ inMemory: false });
-  const messageRouter = createMessageRouter(eventStore);
-  const agentManager = createAgentManager(eventStore, messageRouter);
+
+  // We need to create agentManager first (with a placeholder router),
+  // then wire the sessionChecker/wakeHandler into the router,
+  // then update agentManager with the real router.
+  // However, to avoid circular dependency, we'll create the session checker
+  // lazily since it only needs agentManager methods.
+
+  // Create a deferred agentManager reference for the session checker
+  let agentManager: ReturnType<typeof createAgentManager>;
+
+  // Create session checker that the MessageRouter uses to decide wake actions
+  const sessionChecker: SessionChecker = {
+    hasActiveSession(agentId: AgentId): boolean {
+      return agentManager?.hasActiveSession(agentId) ?? false;
+    },
+    isPrompting(agentId: AgentId): boolean {
+      return agentManager?.isPrompting(agentId) ?? false;
+    },
+    supportsInjection(_agentId: AgentId): boolean {
+      // Default to true; actual injection support is checked during inject()
+      return true;
+    },
+    isStopped(agentId: AgentId): boolean {
+      const agent = agentManager?.get(agentId);
+      return agent?.state === "stopped";
+    },
+  };
+
+  // Create wake handler that the MessageRouter calls when messages should wake agents
+  const routerWakeHandler = async (
+    agentId: AgentId,
+    decision: WakeDecision,
+    messageId: EventId
+  ): Promise<void> => {
+    if (!agentManager) return;
+
+    const session = agentManager.getSession(agentId);
+    if (!session) {
+      // No session, message is queued - agent will see it on next check_messages
+      console.error(`[acp] Message ${messageId} queued for agent ${agentId} (no session)`);
+      return;
+    }
+
+    // Format the message notification
+    const message = `[New Message Received]\nMessage ID: ${messageId}\nUse check_messages to read your pending messages.`;
+
+    if (decision.shouldInterrupt) {
+      // Interrupt the current work
+      try {
+        const iterable = session.interruptWith(message);
+        const iterator = iterable[Symbol.asyncIterator]();
+        await iterator.next(); // Start the interrupt
+        console.error(`[acp] Interrupted agent ${agentId} for message ${messageId}`);
+      } catch (error) {
+        console.error(`[acp] Failed to interrupt agent ${agentId}:`, error);
+      }
+    } else if (decision.action === "inject") {
+      // Try to inject into current session
+      try {
+        const result = await session.inject(message);
+        if (result.success) {
+          console.error(`[acp] Injected message notification to agent ${agentId}`);
+        } else {
+          console.error(`[acp] Injection not supported for agent ${agentId}, message queued`);
+        }
+      } catch (error) {
+        console.error(`[acp] Failed to inject to agent ${agentId}:`, error);
+      }
+    } else if (decision.shouldWake) {
+      // Wake the agent by starting a new prompt
+      try {
+        const promptIterable = agentManager.prompt(agentId, message);
+        // Fire and forget - just start the iteration
+        (async () => {
+          try {
+            for await (const _ of promptIterable) {
+              break; // Exit after first update
+            }
+          } catch {
+            // Ignore background errors
+          }
+        })();
+        console.error(`[acp] Woke agent ${agentId} for message ${messageId}`);
+      } catch (error) {
+        console.error(`[acp] Failed to wake agent ${agentId}:`, error);
+      }
+    }
+  };
+
+  const messageRouter = createMessageRouter(eventStore, {
+    sessionChecker,
+    wakeHandler: routerWakeHandler,
+  });
+
+  // Now create the agentManager with the real router
+  agentManager = createAgentManager(eventStore, messageRouter);
   const taskManager = createTaskManager(eventStore);
 
   // Create ActivityWatcher for event-driven agent waking

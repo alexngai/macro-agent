@@ -219,16 +219,16 @@ export class SubscriptionManagerImpl implements SubscriptionManager {
 
   subscribe(participantId: ParticipantId, filter?: SubscriptionFilter): SubscriptionId {
     // Check subscription limit for this participant
-    const existing = this.participantSubscriptions.get(participantId);
-    const currentCount = existing?.size ?? 0;
-    const maxPerConnection = this.config.limits?.maxSubscriptionsPerConnection;
+      const existing = this.participantSubscriptions.get(participantId);
+      const currentCount = existing?.size ?? 0;
+      const maxPerConnection = this.config.limits?.maxSubscriptionsPerConnection;
 
-    if (maxPerConnection !== undefined && currentCount >= maxPerConnection) {
-      throw new SubscriptionError(
-        `Maximum subscriptions per connection exceeded (limit: ${maxPerConnection})`,
-        "MAX_SUBSCRIPTIONS_EXCEEDED"
-      );
-    }
+      if (maxPerConnection !== undefined && currentCount >= maxPerConnection) {
+        throw new SubscriptionError(
+          `Maximum subscriptions per connection exceeded (limit: ${maxPerConnection})`,
+          "MAX_SUBSCRIPTIONS_EXCEEDED"
+        );
+      }
 
     // Generate subscription ID
     const subscriptionId = createSubscriptionId(`sub-${ulid()}`);

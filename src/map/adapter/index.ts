@@ -76,6 +76,14 @@ export {
   type MAPAdapterServices,
 } from "./map-adapter.js";
 
+// ACP-over-MAP support
+export {
+  ACPOverMAPHandler,
+  type ACPEnvelope,
+  type ACPOverMAPConfig,
+  type ACPNotificationEmitter,
+} from "./acp-over-map.js";
+
 // Event translation
 export {
   translateEvent,

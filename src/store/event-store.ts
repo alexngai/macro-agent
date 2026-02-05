@@ -1196,8 +1196,14 @@ function applyMessageEvent(
   const target = event.target;
   if (!target) return;
 
-  const payload = event.payload as { content: string; correlation_id?: string };
-  const content = payload.content;
+  const payload = event.payload as { content?: unknown; correlation_id?: string };
+  // Handle various payload formats - content may be a string, object, or missing
+  const rawContent = payload.content;
+  const content = typeof rawContent === 'string'
+    ? rawContent
+    : rawContent != null
+      ? JSON.stringify(rawContent)
+      : '[no content]';
 
   // Truncate if needed (1000 chars limit)
   const MAX_CONTENT_LENGTH = 1000;
