@@ -68,6 +68,7 @@ import type {
   MAPPeerConfig,
 } from "../federation/types.js";
 import { ACPOverMAPHandler, type ACPEnvelope } from "./acp-over-map.js";
+import { createMailHandlers } from "./mail-handler-adapter.js";
 
 // =============================================================================
 // Connection Session
@@ -147,6 +148,11 @@ export interface MAPAdapterServices {
    * Default working directory for ACP sessions.
    */
   defaultCwd?: string;
+
+  /**
+   * Mail service for conversation tracking.
+   */
+  mailService?: import("../../mail/mail-service.js").MailService;
 }
 
 /**
@@ -715,6 +721,14 @@ export class MAPAdapterImpl implements MAPAdapter {
         };
         return handler(extCtx, params);
       };
+    }
+
+    // Add mail protocol handlers if mail service is available
+    if (this.services.mailService) {
+      const mailHandlers = createMailHandlers(this.services.mailService);
+      for (const [method, handler] of Object.entries(mailHandlers)) {
+        handlers[method] = handler;
+      }
     }
 
     // Capability requirements for methods

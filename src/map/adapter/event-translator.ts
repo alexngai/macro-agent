@@ -54,6 +54,9 @@ const EVENT_TYPE_MAP: Record<EventType, MAPEventType | MAPEventType[] | null> = 
   subscription: null, // Internal only, not exposed
   peer_message: null, // Federation, handled separately
   peer_request: null, // Federation, handled separately
+  conversation: null, // Mail: handled by mail module
+  turn: null, // Mail: handled by mail module
+  thread: null, // Mail: handled by mail module
 };
 
 /**

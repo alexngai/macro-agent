@@ -31,6 +31,9 @@ import {
 } from "../map/adapter/index.js";
 import type { Agent, AgentId } from "../store/types/index.js";
 import type { Address, SendOptions } from "../map/types.js";
+import { createMailService, type MailService } from "../mail/mail-service.js";
+import { createConversationMap, type ConversationMap } from "../mail/conversation-map.js";
+import { createTurnRecorder } from "../mail/turn-recorder.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -91,6 +94,12 @@ export interface CombinedServer {
 
   /** MAP adapter (for testing) */
   readonly mapAdapter?: MAPAdapter;
+
+  /** Mail service (for conversation tracking) */
+  readonly mailService?: MailService;
+
+  /** Conversation map (for agent-to-conversation tracking) */
+  readonly conversationMap?: ConversationMap;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -179,8 +188,30 @@ export function createCombinedServer(
     disableMap = false,
   } = config;
 
-  // Create Express app with API routes
-  const app = createAPIApp(services, { cors });
+  // Set up mail service and conversation map (always created, independent of MAP)
+  const mailService = createMailService({ eventStore: services.eventStore });
+  const conversationMap = createConversationMap();
+
+  // Wire mail services into AgentManager for conversation lifecycle
+  if (services.agentManager.setMailServices) {
+    services.agentManager.setMailServices(mailService, conversationMap);
+  }
+
+  // Wire turn recorder into MessageRouter for automatic turn tracking
+  if (services.messageRouter.setTurnRecorder) {
+    const turnRecorder = createTurnRecorder({
+      mailService,
+      conversationMap,
+      eventStore: services.eventStore,
+    });
+    services.messageRouter.setTurnRecorder(turnRecorder);
+  }
+
+  // Create Express app with API routes (include mail services)
+  const app = createAPIApp(
+    { ...services, mailService, conversationMap },
+    { cors }
+  );
 
   // Create HTTP server with Express
   const httpServer = http.createServer(app);
@@ -203,6 +234,7 @@ export function createCombinedServer(
     const mapServices = {
       ...createMAPServices(services),
       defaultCwd,
+      mailService,
     };
     mapAdapter = createMAPAdapter(
       { name: "macro-agent", version: "1.0.0" },
@@ -326,5 +358,7 @@ export function createCombinedServer(
     httpServer,
     app,
     mapAdapter,
+    mailService,
+    conversationMap,
   };
 }
