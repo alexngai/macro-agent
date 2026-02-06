@@ -8,3 +8,4 @@ export * from "./agents.js";
 export * from "./tasks.js";
 export * from "./messages.js";
 export * from "./config.js";
+export * from "./conversations.js";

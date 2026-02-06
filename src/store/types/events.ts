@@ -17,7 +17,10 @@ export type EventType =
   | "task"
   | "subscription"
   | "peer_message"
-  | "peer_request";
+  | "peer_request"
+  | "conversation"
+  | "turn"
+  | "thread";
 
 // Status types for status events
 export type StatusType =

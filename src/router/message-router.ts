@@ -35,6 +35,7 @@ import type {
   SendToAddressRequest,
   AddressSendResult,
   Address,
+  TurnRecorderCallback,
 } from "./types.js";
 import { RoutingError, AddressRoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
 import {
@@ -166,6 +167,13 @@ export interface MessageRouter {
    * - Optionally subscribes parent to agent's subtree
    */
   setupDefaultSubscriptions(options: DefaultSubscriptionOptions): void;
+
+  /**
+   * Set turn recorder for conversation tracking.
+   * Called after direct message (agent/task address) delivery.
+   * Supports late binding since mail services may be created after router.
+   */
+  setTurnRecorder(recorder: TurnRecorderCallback): void;
 }
 
 /**
@@ -222,6 +230,9 @@ export function createMessageRouter(
   const sessionChecker = config.sessionChecker;
   const wakeHandler = config.wakeHandler;
   const federationHandler = config.federationHandler;
+
+  // Turn recorder for conversation tracking (late-bound)
+  let turnRecorder: TurnRecorderCallback | undefined;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -333,6 +344,15 @@ export function createMessageRouter(
 
       delivered.push(to.agent);
 
+      // Record turn for conversation tracking
+      if (turnRecorder) {
+        try {
+          turnRecorder({ from, toAgent: to.agent, content, messageId: event.id, addressType: "agent" });
+        } catch {
+          // Never fail delivery due to turn recording
+        }
+      }
+
       return {
         id: event.id,
         from,
@@ -401,6 +421,15 @@ export function createMessageRouter(
       }
 
       delivered.push(targetAgentId);
+
+      // Record turn for conversation tracking
+      if (turnRecorder) {
+        try {
+          turnRecorder({ from, toAgent: targetAgentId, content, messageId: event.id, addressType: "task" });
+        } catch {
+          // Never fail delivery due to turn recording
+        }
+      }
 
       return {
         id: event.id,
@@ -1090,6 +1119,10 @@ export function createMessageRouter(
     }
   }
 
+  function setTurnRecorder(recorder: TurnRecorderCallback): void {
+    turnRecorder = recorder;
+  }
+
   return {
     sendToAddress,
     emitStatus,
@@ -1102,5 +1135,6 @@ export function createMessageRouter(
     getSubscriptions,
     getSubscribers,
     setupDefaultSubscriptions,
+    setTurnRecorder,
   };
 }
