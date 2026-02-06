@@ -539,8 +539,7 @@ export function createMessageRouter(
         getAgent: (id) => eventStore.getAgent(id),
         // Get agents subscribed to a scope/topic
         getScopeMembers: (scope) => {
-          const subscribers = eventStore.getSubscribers({ type: "topic", target: scope });
-          return subscribers.map(s => s.agent_id);
+          return eventStore.getSubscribers({ type: "topic", target: scope });
         },
       };
 
