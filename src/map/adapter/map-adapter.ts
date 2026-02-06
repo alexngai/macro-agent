@@ -1,17 +1,33 @@
 /**
- * MAPAdapter - Core MAP Protocol Adapter Implementation
+ * MAPAdapter - External MAP Protocol Interface
  *
- * The MAPAdapter is the external-facing component that:
- * - Accepts MAP protocol connections from clients, agents, and gateways
- * - Manages participant lifecycle and authentication
- * - Handles subscriptions and event streaming
- * - Dispatches extension method calls
- * - Enforces system-level permissions (Layer 1)
+ * ## Routing Architecture Role
  *
- * The adapter delegates to internal components:
- * - MessageRouter: For message routing and delivery
+ * MAPAdapter is the **external protocol translation layer** for MAP clients.
+ * It translates MAP protocol messages into internal routing calls.
+ *
+ * ```
+ * External → MAPAdapter → MessageRouter → EventStore
+ * (MAP RPC)   (this)      (routing)       (persistence)
+ * ```
+ *
+ * **Responsibilities:**
+ * - Accept MAP protocol connections (JSON-RPC over WebSocket/streams)
+ * - Manage participant lifecycle (connect, disconnect, capabilities)
+ * - Handle authentication and permission enforcement (Layer 1)
+ * - Translate MAP addresses to internal routing
+ * - Stream events to subscribed participants
+ * - Dispatch extension method calls (spawn, wake, tasks, etc.)
+ *
+ * **Delegates to internal components:**
+ * - MessageRouter: For message routing and delivery (sendToAddress)
  * - AgentManager: For agent lifecycle operations
- * - EventStore: For event persistence and replay
+ * - EventStore: For event persistence and subscription
+ *
+ * **Not responsible for:**
+ * - Internal agent-to-agent messaging (use MessageRouter directly)
+ * - Batch event delivery (use TriggerRouter/WakeManager)
+ * - Legacy channel-based routing (use MessageRouter.send())
  *
  * @see specs/s-5qir_map_integration_for_macro_agent.md
  */
@@ -34,10 +50,12 @@ import type {
 import type {
   ParticipantId,
   ParticipantType,
+  ParticipantCapabilities,
   ConnectedParticipant,
   SubscriptionId,
   SubscriptionFilter,
   EventNotification,
+  AuthCredentials,
 } from "./types.js";
 import type { Address, SendOptions, ScopeId } from "../types.js";
 import type { AgentId } from "../../store/types/index.js";
@@ -718,13 +736,93 @@ export class MAPAdapterImpl implements MAPAdapter {
       throw RPCError.notFound("participant", participantId);
     }
 
-    // TODO: Handle authentication when auth hook is provided
-    // For now, return the already-assigned capabilities
+    // Parse connect request parameters
+    const connectParams = params as {
+      type?: ParticipantType;
+      name?: string;
+      credentials?: AuthCredentials;
+    } | undefined;
+
+    const requestedType = connectParams?.type ?? participant.type;
+    const credentials = connectParams?.credentials;
+
+    // Handle authentication if handler is configured and credentials provided
+    if (this.config.authenticate && credentials) {
+      const authResult = await this.config.authenticate(requestedType, credentials);
+
+      if (!authResult.allowed) {
+        throw RPCError.authenticationFailed(authResult.error ?? "Authentication failed");
+      }
+
+      // Update capabilities based on auth result
+      const newCapabilities = authResult.capabilities ?? this.getDefaultCapabilities(requestedType);
+      this.connections.updateCapabilities(participantId, newCapabilities);
+
+      // Return updated participant info
+      const updatedParticipant = this.connections.getParticipant(participantId);
+      return {
+        participantId: participant.id,
+        capabilities: updatedParticipant?.capabilities ?? newCapabilities,
+      };
+    }
+
+    // No auth handler or no credentials - use default capabilities for the type
+    if (requestedType !== participant.type) {
+      const defaultCapabilities = this.getDefaultCapabilities(requestedType);
+      this.connections.updateCapabilities(participantId, defaultCapabilities);
+
+      const updatedParticipant = this.connections.getParticipant(participantId);
+      return {
+        participantId: participant.id,
+        capabilities: updatedParticipant?.capabilities ?? defaultCapabilities,
+      };
+    }
 
     return {
       participantId: participant.id,
       capabilities: participant.capabilities,
     };
+  }
+
+  /**
+   * Get default capabilities for a participant type.
+   */
+  private getDefaultCapabilities(type: ParticipantType): ParticipantCapabilities {
+    switch (type) {
+      case "agent":
+        return this.config.defaultAgentCapabilities ?? {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canSpawn: true,
+          canStop: true,
+          canManageScopes: true,
+          canManageTasks: true,
+          canManageFederation: true,
+        };
+      case "gateway":
+        return {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canSpawn: false,
+          canStop: false,
+          canManageScopes: false,
+          canManageTasks: false,
+          canManageFederation: true,
+        };
+      case "client":
+      default:
+        return this.config.defaultClientCapabilities ?? {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canSpawn: false,
+          canStop: false,
+          canManageScopes: false,
+          canManageTasks: false,
+        };
+    }
   }
 
   private async handleDisconnect(participantId: ParticipantId): Promise<{ success: boolean }> {

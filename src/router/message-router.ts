@@ -1,13 +1,42 @@
 /**
- * MessageRouter - High-level message routing service
+ * MessageRouter - Core Internal Message Routing Service
  *
- * Provides message routing between agents with support for:
- * - Direct agent-to-agent messaging
- * - Task-based routing (to assigned agent)
- * - Topic-based pub/sub
- * - Lineage routing (ancestors to descendants)
- * - Subtree routing (status events to parent subscribers)
- * - Message acknowledgment
+ * ## Routing Architecture
+ *
+ * MessageRouter is the **core internal routing authority** for macro-agent.
+ * It handles all message delivery between internal agents.
+ *
+ * ```
+ * External → MAPAdapter/TriggerRouter → MessageRouter → EventStore
+ *            (protocol translation)     (routing logic)   (persistence)
+ * ```
+ *
+ * **Three routing entry points exist:**
+ *
+ * 1. **MessageRouter** (this module)
+ *    - Internal routing for agent-to-agent communication
+ *    - Supports: send(), sendToAddress(), emitStatus()
+ *    - Used by: AgentManager, MCP tools, internal components
+ *
+ * 2. **MAPAdapter** (src/map/adapter/)
+ *    - External MAP protocol interface for clients/agents/gateways
+ *    - Translates MAP protocol → internal routing
+ *    - Delegates message delivery to MessageRouter
+ *
+ * 3. **TriggerRouter** (src/trigger/router/)
+ *    - External event routing (webhooks, cron, system events)
+ *    - Queues events for batch delivery
+ *    - Uses WakeManager for delivery scheduling
+ *
+ * ## Supported Routing Methods
+ *
+ * **Legacy Channel-based** (send, sendMessage):
+ * - Direct agent, task, topic, lineage, subtree, broadcast
+ *
+ * **MAP Address-based** (sendToAddress):
+ * - Agent, agents, task, scope, role, broadcast, hierarchical, federated
+ *
+ * @module router/message-router
  */
 
 import { nanoid } from "nanoid";
@@ -479,11 +508,17 @@ export function createMessageRouter(
       const agentSource: RoleAgentSource = {
         listAgents: () => eventStore.listAgents(),
         getAgent: (id) => eventStore.getAgent(id),
+        // Get agents subscribed to a scope/topic
+        getScopeMembers: (scope) => {
+          const subscribers = eventStore.getSubscribers({ type: "topic", target: scope });
+          return subscribers.map(s => s.agent_id);
+        },
       };
 
       const recipientIds = resolveRoleTarget(agentSource, {
         role: to.role,
-        coordinatorId: to.within,
+        // RoleAddress.within is a ScopeId (subscription-based), not a coordinatorId (hierarchy-based)
+        scope: to.within,
       });
 
       if (recipientIds.length === 0) {

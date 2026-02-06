@@ -39,8 +39,16 @@ export type BroadcastScope = "all" | "coordinators" | "workers" | "monitors";
 export interface RoleTarget {
   /** Role name to target (e.g., "worker", "integrator", "monitor") */
   role: string;
-  /** Optional: scope to specific coordinator's agents */
+  /**
+   * Optional: Filter to agents within a coordinator's subtree (hierarchy-based).
+   * Agents must be descendants of the specified coordinator.
+   */
   coordinatorId?: AgentId;
+  /**
+   * Optional: Filter to agents that are members of a scope (subscription-based).
+   * Requires EventStore scope/topic membership lookup.
+   */
+  scope?: string;
 }
 
 // Message sender identification

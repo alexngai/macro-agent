@@ -116,6 +116,8 @@ export const MAP_ERRORS = {
   RATE_LIMIT_EXCEEDED: -32011,
   /** Resource limit exceeded. */
   RESOURCE_LIMIT_EXCEEDED: -32012,
+  /** Authentication failed. */
+  AUTHENTICATION_FAILED: -32013,
   /** Invalid address. */
   INVALID_ADDRESS: -32020,
   /** Routing failed. */
@@ -332,6 +334,10 @@ export class RPCError extends Error {
 
   static routingFailed(message: string): RPCError {
     return new RPCError(MAP_ERRORS.ROUTING_FAILED, message);
+  }
+
+  static authenticationFailed(message: string): RPCError {
+    return new RPCError(MAP_ERRORS.AUTHENTICATION_FAILED, message);
   }
 }
 

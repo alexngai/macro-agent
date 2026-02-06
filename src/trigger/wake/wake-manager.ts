@@ -18,7 +18,7 @@ import type {
   TriggerWakeManager,
   WakeManagerConfig,
   WakeRequest,
-  WakeResult,
+  WakeCycleStatus,
   WakeCycleResult,
   AgentDrainResult,
 } from "./types.js";
@@ -325,7 +325,7 @@ export function createWakeManager(
       return pendingReason !== null || Boolean(coalesceTimer) || scheduled;
     },
 
-    async runWakeCycle(opts?: { reason?: string }): Promise<WakeResult> {
+    async runWakeCycle(opts?: { reason?: string }): Promise<WakeCycleStatus> {
       if (wakingInProgress) {
         return { status: "skipped", reason: "wake-in-progress" };
       }

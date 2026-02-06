@@ -31,6 +31,11 @@ export interface RoleAgentInfo {
 export interface RoleAgentSource {
   listAgents(): RoleAgentInfo[];
   getAgent(agentId: AgentId): RoleAgentInfo | null;
+  /**
+   * Optional: Get agents subscribed to a scope/topic.
+   * Used when filtering by scope membership.
+   */
+  getScopeMembers?(scope: string): AgentId[];
 }
 
 // =============================================================================
@@ -90,8 +95,12 @@ export function getSubtreeIds(
 /**
  * Resolve a role channel to recipient agent IDs.
  *
+ * Supports two filtering mechanisms (can be combined):
+ * - coordinatorId: Filter to agents within a coordinator's subtree (hierarchy-based)
+ * - scope: Filter to agents that are members of a scope (subscription-based)
+ *
  * @param agentSource - Source for listing/getting agents
- * @param target - Role target with role name and optional coordinator scope
+ * @param target - Role target with role name and optional filters
  * @returns Array of agent IDs for fan-out delivery
  */
 export function resolveRoleTarget(
@@ -104,6 +113,13 @@ export function resolveRoleTarget(
   let subtreeIds: Set<AgentId> | null = null;
   if (target.coordinatorId) {
     subtreeIds = getSubtreeIds(target.coordinatorId, agentSource);
+  }
+
+  // Get scope member IDs if scope filtering is requested
+  let scopeMemberIds: Set<AgentId> | null = null;
+  if (target.scope && agentSource.getScopeMembers) {
+    const members = agentSource.getScopeMembers(target.scope);
+    scopeMemberIds = new Set(members);
   }
 
   return agents
@@ -120,6 +136,11 @@ export function resolveRoleTarget(
 
       // If coordinator scoping, check if agent is in subtree
       if (subtreeIds && !subtreeIds.has(agent.id)) {
+        return false;
+      }
+
+      // If scope filtering, check if agent is a scope member
+      if (scopeMemberIds && !scopeMemberIds.has(agent.id)) {
         return false;
       }
 
