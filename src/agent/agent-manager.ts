@@ -237,6 +237,17 @@ export interface AgentManager {
    */
   onLifecycleEvent(callback: AgentLifecycleCallback): () => void;
 
+  // ── Mail Services (Late Binding) ─────────────────────────────
+
+  /**
+   * Set mail services for conversation tracking.
+   * Used for late binding when mailService is created after AgentManager.
+   */
+  setMailServices(
+    mailService: import("../mail/mail-service.js").MailService,
+    conversationMap: import("../mail/conversation-map.js").ConversationMap
+  ): void;
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   /**
@@ -280,6 +291,18 @@ export interface AgentManagerConfig {
    * with coordinator agent lifecycle.
    */
   healthCheckService?: HealthCheckService;
+
+  /**
+   * Optional MailService for conversation tracking.
+   * When provided, spawn creates task conversations and terminate closes them.
+   */
+  mailService?: import("../mail/mail-service.js").MailService;
+
+  /**
+   * Optional ConversationMap for agent-to-conversation tracking.
+   * Required when mailService is provided.
+   */
+  conversationMap?: import("../mail/conversation-map.js").ConversationMap;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -298,7 +321,13 @@ export function createAgentManager(
     workspaceManager,
     roleRegistry = new DefaultRoleRegistry(),
     healthCheckService,
+    mailService: initialMailService,
+    conversationMap: initialConversationMap,
   } = config;
+
+  // Mutable mail services (support late binding via setMailServices)
+  let mailService = initialMailService;
+  let conversationMap = initialConversationMap;
 
   // Active sessions tracked in memory
   const activeSessions = new Map<AgentId, ActiveSession>();
@@ -488,6 +517,52 @@ export function createAgentManager(
         role: role ?? undefined,
       });
 
+      // ─────────────────────────────────────────────────────────────────
+      // Mail: Create task conversation for this agent
+      // ─────────────────────────────────────────────────────────────────
+      if (mailService && conversationMap) {
+        try {
+          const parentConversationId = parent
+            ? conversationMap.getAgentConversation(parent) ??
+              conversationMap.getSessionConversation(parent)
+            : undefined;
+
+          const { conversationId: taskConvId } =
+            mailService.createConversation({
+              type: "task",
+              subject: task?.slice(0, 80),
+              createdBy: parent ?? agentId,
+              parentConversationId: parentConversationId,
+            });
+
+          // Join parent and child as participants
+          if (parent) {
+            mailService.joinConversation({
+              conversationId: taskConvId,
+              participantId: parent,
+              participantType: "agent",
+              role: "initiator",
+              agentId: parent,
+            });
+          }
+          mailService.joinConversation({
+            conversationId: taskConvId,
+            participantId: agentId,
+            participantType: "agent",
+            role: "worker",
+            agentId,
+          });
+
+          conversationMap.setAgentConversation(agentId, taskConvId);
+        } catch (err) {
+          // Never fail spawn due to mail errors
+          console.warn(
+            `[AgentManager] Failed to create task conversation for ${agentId}:`,
+            err
+          );
+        }
+      }
+
       // Track active session
       const activeSession: ActiveSession = {
         agentId,
@@ -625,6 +700,38 @@ export function createAgentManager(
           `[AgentManager] Failed to deallocate workspace for ${agentId}: ${wsError}`
         );
         // Continue with termination even if workspace cleanup fails
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Mail: Close task conversation on terminate
+    // ─────────────────────────────────────────────────────────────────
+    if (mailService && conversationMap) {
+      try {
+        const convId = conversationMap.getAgentConversation(agentId);
+        if (convId) {
+          mailService.closeConversation({
+            conversationId: convId,
+            closedBy: agentId,
+            reason: reason === "completed" ? "completed" : "failed",
+          });
+        }
+        // Close any peer conversations
+        const peerConvIds =
+          conversationMap.closePeerConversationsFor(agentId);
+        for (const peerConvId of peerConvIds) {
+          mailService.closeConversation({
+            conversationId: peerConvId,
+            closedBy: agentId,
+            reason: "participant_left",
+          });
+        }
+        conversationMap.removeAgent(agentId);
+      } catch (err) {
+        console.warn(
+          `[AgentManager] Failed to close conversation for ${agentId}:`,
+          err
+        );
       }
     }
 
@@ -1161,6 +1268,18 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Mail Services (Late Binding)
+  // ─────────────────────────────────────────────────────────────────
+
+  function setMailServices(
+    ms: import("../mail/mail-service.js").MailService,
+    cm: import("../mail/conversation-map.js").ConversationMap
+  ): void {
+    mailService = ms;
+    conversationMap = cm;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Cleanup
   // ─────────────────────────────────────────────────────────────────
 
@@ -1209,6 +1328,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,
+    setMailServices,
     close,
   };
 }

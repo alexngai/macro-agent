@@ -65,6 +65,10 @@ export interface DoneToolDeps {
     /** Get merge queue for coordinating worker merges */
     getMergeQueue?(): AllHandlerDeps["mergeQueue"];
   };
+  /** Optional MailService for recording completion turns */
+  mailService?: import("../../mail/mail-service.js").MailService;
+  /** Optional ConversationMap for agent-to-conversation lookup */
+  conversationMap?: import("../../mail/conversation-map.js").ConversationMap;
 }
 
 // =============================================================================
@@ -158,7 +162,7 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
     details?: Record<string, unknown>;
     task_id?: string;
   }): Promise<DoneResult> => {
-    const { eventStore, agentManager, messageRouter, taskManager, workspaceManager } = deps;
+    const { eventStore, agentManager, messageRouter, taskManager, workspaceManager, mailService, conversationMap } = deps;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Step 1: Check capability
@@ -231,6 +235,37 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
       });
     } catch {
       // Continue even if emit fails
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 4b: Record completion turn and close conversation (Mail)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (mailService && conversationMap) {
+      try {
+        const convId = conversationMap.getAgentConversation(context.agent_id);
+        if (convId) {
+          // Record completion turn
+          mailService.recordTurn({
+            conversationId: convId,
+            participant: context.agent_id,
+            contentType: "event",
+            content: {
+              event: `agent.${args.status}`,
+              summary: args.summary,
+              details: args.details,
+            },
+          });
+
+          // Close the conversation
+          mailService.closeConversation({
+            conversationId: convId,
+            closedBy: context.agent_id,
+            reason: args.status,
+          });
+        }
+      } catch {
+        // Never fail done() due to mail errors
+      }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

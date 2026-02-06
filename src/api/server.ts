@@ -42,6 +42,14 @@ import type {
   WSTaskUpdate,
   InjectContextRequest,
   InjectContextResponse,
+  MailConversationSummary,
+  MailConversationDetail,
+  MailConversationListResponse,
+  MailTurnSummary,
+  MailTurnListResponse,
+  MailConversationQueryParams,
+  WSTurnAdded,
+  WSConversationUpdate,
 } from "./types.js";
 import {
   injectContext,
@@ -72,6 +80,10 @@ export interface APIServices {
   agentManager: AgentManager;
   taskManager: TaskManager;
   messageRouter: MessageRouter;
+  /** Optional mail service for conversation tracking */
+  mailService?: import("../mail/mail-service.js").MailService;
+  /** Optional conversation map for agent-to-conversation tracking */
+  conversationMap?: import("../mail/conversation-map.js").ConversationMap;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -195,6 +207,140 @@ export function createAPISharedState(): APISharedState {
     wsClients,
     broadcast,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Conversation API Routes (shared between standalone and app mode)
+// ─────────────────────────────────────────────────────────────────
+
+import type { Conversation, ConversationTurn } from "../store/types/conversations.js";
+
+function conversationToSummary(conv: Conversation): MailConversationSummary {
+  return {
+    id: conv.id,
+    type: conv.type,
+    status: conv.status,
+    subject: conv.subject ?? "",
+    created_by: conv.createdBy,
+    created_at: conv.createdAt,
+    updated_at: conv.updatedAt,
+    participant_count: conv.participantCount,
+    parent_conversation_id: conv.parentConversationId || undefined,
+  };
+}
+
+function conversationToDetail(conv: Conversation): MailConversationDetail {
+  return {
+    ...conversationToSummary(conv),
+    closed_at: conv.closedAt || undefined,
+    closed_by: conv.closedBy || undefined,
+    close_reason: conv.closeReason || undefined,
+  };
+}
+
+function turnToSummary(turn: ConversationTurn): MailTurnSummary {
+  return {
+    id: turn.id,
+    conversation_id: turn.conversationId,
+    participant: turn.participant,
+    content_type: turn.contentType,
+    content: turn.content,
+    timestamp: turn.timestamp,
+    source_type: turn.sourceType || undefined,
+    source_message_id: turn.sourceMessageId || undefined,
+  };
+}
+
+/**
+ * Register conversation API routes on an Express app.
+ * Used by both standalone and shared server modes.
+ */
+function registerConversationRoutes(
+  app: Express,
+  services: Pick<APIServices, "mailService">,
+  sendError: (res: Response, status: number, code: string, message: string) => void
+): void {
+  if (!services.mailService) return;
+  const { mailService } = services;
+
+  // GET /api/conversations - List conversations
+  app.get("/api/conversations", (req: Request, res: Response) => {
+    const params = req.query as Record<string, string | undefined>;
+    let conversations = mailService.listConversations({
+      type: params.type as any,
+      status: params.status as any,
+    });
+
+    const total = conversations.length;
+    const offset = parseInt(params.offset as string) || 0;
+    const limit = parseInt(params.limit as string) || 50;
+    conversations = conversations.slice(offset, offset + limit);
+
+    const response: MailConversationListResponse = {
+      conversations: conversations.map(conversationToSummary),
+      total,
+    };
+    res.json(response);
+  });
+
+  // GET /api/conversations/:id - Get conversation detail
+  app.get("/api/conversations/:id", (req: Request, res: Response) => {
+    const conv = mailService.getConversation(req.params.id);
+    if (!conv) {
+      return sendError(res, 404, "CONVERSATION_NOT_FOUND", `Conversation not found: ${req.params.id}`);
+    }
+    res.json(conversationToDetail(conv));
+  });
+
+  // GET /api/conversations/:id/turns - List turns for a conversation
+  app.get("/api/conversations/:id/turns", (req: Request, res: Response) => {
+    const conv = mailService.getConversation(req.params.id);
+    if (!conv) {
+      return sendError(res, 404, "CONVERSATION_NOT_FOUND", `Conversation not found: ${req.params.id}`);
+    }
+
+    const turns = mailService.listTurns({ conversationId: req.params.id });
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = parseInt(req.query.offset as string) || 0;
+    const paged = turns.slice(offset, offset + limit);
+
+    const response: MailTurnListResponse = {
+      turns: paged.map(turnToSummary),
+      total: turns.length,
+    };
+    res.json(response);
+  });
+
+  // POST /api/conversations/:id/close - Close a conversation
+  app.post("/api/conversations/:id/close", (req: Request, res: Response) => {
+    const conv = mailService.getConversation(req.params.id);
+    if (!conv) {
+      return sendError(res, 404, "CONVERSATION_NOT_FOUND", `Conversation not found: ${req.params.id}`);
+    }
+    if (conv.status !== "active") {
+      return sendError(res, 400, "ALREADY_CLOSED", `Conversation already ${conv.status}`);
+    }
+
+    const body = req.body as { reason?: string };
+    mailService.closeConversation({
+      conversationId: req.params.id,
+      closedBy: "api",
+      reason: body.reason ?? "completed",
+    });
+
+    res.json({ success: true });
+  });
+
+  // GET /api/conversations/:id/participants - List participants
+  app.get("/api/conversations/:id/participants", (req: Request, res: Response) => {
+    const conv = mailService.getConversation(req.params.id);
+    if (!conv) {
+      return sendError(res, 404, "CONVERSATION_NOT_FOUND", `Conversation not found: ${req.params.id}`);
+    }
+
+    const participants = mailService.listParticipants(req.params.id);
+    res.json({ participants, total: participants.length });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -366,6 +512,25 @@ export function createAPIServer(
       state.headManagerId = headManager.id;
       state.startedAt = Date.now();
 
+      // Create session conversation for mail tracking
+      if (services.mailService && services.conversationMap) {
+        try {
+          const { conversationId } = services.mailService.createConversation({
+            type: "session",
+            subject: "User session",
+            createdBy: "user",
+          });
+          services.mailService.joinConversation({
+            conversationId,
+            participantId: headManager.id,
+            role: "worker",
+          });
+          services.conversationMap.setSessionConversation(headManager.id, conversationId);
+        } catch {
+          // Never fail init due to mail errors
+        }
+      }
+
       const response: InitResponse = {
         success: true,
         head_manager_id: headManager.id,
@@ -410,6 +575,23 @@ export function createAPIServer(
         timestamp: Date.now(),
       });
 
+      // Record user turn in session conversation
+      if (services.mailService && services.conversationMap && state.headManagerId) {
+        try {
+          const sessionConvId = services.conversationMap.getSessionConversation(state.headManagerId);
+          if (sessionConvId) {
+            services.mailService.recordTurn({
+              conversationId: sessionConvId,
+              participant: "user",
+              contentType: "text",
+              content: body.message,
+            });
+          }
+        } catch {
+          // Never fail message handling due to mail errors
+        }
+      }
+
       // Broadcast to conversation channel
       broadcastToChannel("conversation", {
         type: "message",
@@ -451,6 +633,23 @@ export function createAPIServer(
         agent_id: state.headManagerId,
         timestamp: Date.now(),
       });
+
+      // Record assistant turn in session conversation
+      if (services.mailService && services.conversationMap && state.headManagerId) {
+        try {
+          const sessionConvId = services.conversationMap.getSessionConversation(state.headManagerId);
+          if (sessionConvId) {
+            services.mailService.recordTurn({
+              conversationId: sessionConvId,
+              participant: state.headManagerId,
+              contentType: "text",
+              content: responseContent,
+            });
+          }
+        } catch {
+          // Never fail message handling due to mail errors
+        }
+      }
 
       // Broadcast response
       broadcastToChannel("conversation", {
@@ -686,6 +885,9 @@ export function createAPIServer(
     }
   });
 
+  // Register conversation API routes (if mail service available)
+  registerConversationRoutes(app, services, sendError);
+
   // ─────────────────────────────────────────────────────────────────
   // HTTP Server
   // ─────────────────────────────────────────────────────────────────
@@ -755,6 +957,34 @@ export function createAPIServer(
 
     broadcastToChannel("tasks", update);
   });
+
+  // Listen for conversation changes (if available)
+  if (eventStore.onConversationChange) {
+    eventStore.onConversationChange((conversationId, conversation) => {
+      if (!conversation) return;
+
+      const update: WSConversationUpdate = {
+        type: "conversation_update",
+        conversation: conversationToSummary(conversation),
+      };
+
+      broadcastToChannel("conversations", update);
+      broadcastToChannel(`conversation:${conversationId}`, update);
+    });
+  }
+
+  // Listen for turn changes (if available)
+  if (eventStore.onTurnChange) {
+    eventStore.onTurnChange((conversationId, turn) => {
+      const update: WSTurnAdded = {
+        type: "turn_added",
+        conversation_id: conversationId,
+        turn: turnToSummary(turn),
+      };
+
+      broadcastToChannel(`conversation:${conversationId}`, update);
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // Server Lifecycle
@@ -900,7 +1130,7 @@ export function createAPIServer(
  * @returns Express app
  */
 export function createAPIApp(
-  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter">,
+  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter"> & Pick<Partial<APIServices>, "mailService" | "conversationMap">,
   config: { cors?: boolean } = {}
 ): Express {
   const { cors = true } = config;
@@ -1051,6 +1281,25 @@ export function createAPIApp(
       state.headManagerId = headManager.id;
       state.startedAt = Date.now();
 
+      // Create session conversation for mail tracking
+      if (services.mailService && services.conversationMap) {
+        try {
+          const { conversationId } = services.mailService.createConversation({
+            type: "session",
+            subject: "User session",
+            createdBy: "user",
+          });
+          services.mailService.joinConversation({
+            conversationId,
+            participantId: headManager.id,
+            role: "worker",
+          });
+          services.conversationMap.setSessionConversation(headManager.id, conversationId);
+        } catch {
+          // Never fail init due to mail errors
+        }
+      }
+
       const response: InitResponse = {
         success: true,
         head_manager_id: headManager.id,
@@ -1116,6 +1365,23 @@ export function createAPIApp(
         timestamp: Date.now(),
       });
 
+      // Record user turn in session conversation
+      if (services.mailService && services.conversationMap && state.headManagerId) {
+        try {
+          const sessionConvId = services.conversationMap.getSessionConversation(state.headManagerId);
+          if (sessionConvId) {
+            services.mailService.recordTurn({
+              conversationId: sessionConvId,
+              participant: "user",
+              contentType: "text",
+              content: body.message,
+            });
+          }
+        } catch {
+          // Never fail message handling due to mail errors
+        }
+      }
+
       // Broadcast to conversation channel
       state.broadcast("conversation", {
         type: "message",
@@ -1157,6 +1423,23 @@ export function createAPIApp(
         agent_id: state.headManagerId,
         timestamp: Date.now(),
       });
+
+      // Record assistant turn in session conversation
+      if (services.mailService && services.conversationMap && state.headManagerId) {
+        try {
+          const sessionConvId = services.conversationMap.getSessionConversation(state.headManagerId);
+          if (sessionConvId) {
+            services.mailService.recordTurn({
+              conversationId: sessionConvId,
+              participant: state.headManagerId,
+              contentType: "text",
+              content: responseContent,
+            });
+          }
+        } catch {
+          // Never fail message handling due to mail errors
+        }
+      }
 
       // Broadcast response
       state.broadcast("conversation", {
@@ -1393,6 +1676,9 @@ export function createAPIApp(
     }
   });
 
+  // Register conversation API routes (if mail service available)
+  registerConversationRoutes(app, services, sendError);
+
   return app;
 }
 
@@ -1497,6 +1783,34 @@ export function setupAPIWebSocket(
 
     broadcast("tasks", update);
   });
+
+  // Listen for conversation changes (if available)
+  if (eventStore.onConversationChange) {
+    eventStore.onConversationChange((conversationId, conversation) => {
+      if (!conversation) return;
+
+      const update: WSConversationUpdate = {
+        type: "conversation_update",
+        conversation: conversationToSummary(conversation),
+      };
+
+      broadcast("conversations", update);
+      broadcast(`conversation:${conversationId}`, update);
+    });
+  }
+
+  // Listen for turn changes (if available)
+  if (eventStore.onTurnChange) {
+    eventStore.onTurnChange((conversationId, turn) => {
+      const update: WSTurnAdded = {
+        type: "turn_added",
+        conversation_id: conversationId,
+        turn: turnToSummary(turn),
+      };
+
+      broadcast(`conversation:${conversationId}`, update);
+    });
+  }
 
   return {
     getConnectionCount(): number {

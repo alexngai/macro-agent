@@ -32,6 +32,16 @@ import type {
   TaskId,
   EventId,
   Timestamp,
+  Conversation,
+  ConversationTurn,
+  ConversationThread,
+  ConversationParticipant,
+  ConversationFilter,
+  TurnFilter,
+  ConversationChangeCallback,
+  TurnChangeCallback,
+  ConversationType,
+  ConversationStatus,
 } from './types/index.js';
 import { CURRENT_EVENT_VERSION } from './types/events.js';
 import { migrateEvent } from './migrations.js';
@@ -163,11 +173,19 @@ export interface EventStore {
   getSubscriptions(agentId: AgentId): Subscription[];
   getSubscribers(subscription: Subscription): AgentId[];
 
+  // Conversation views
+  getConversation(conversationId: string): Conversation | null;
+  listConversations(filter?: ConversationFilter): Conversation[];
+  listTurns(filter: TurnFilter): ConversationTurn[];
+  listParticipants(conversationId: string, active?: boolean): ConversationParticipant[];
+
   // Reactive updates
   onAgentChange(callback: AgentChangeCallback): Unsubscribe;
   onAgentChange(agentId: AgentId, callback: AgentChangeCallback): Unsubscribe;
   onTaskChange(callback: TaskChangeCallback): Unsubscribe;
   onMessageChange(agentId: AgentId, callback: MessageCallback): Unsubscribe;
+  onConversationChange(callback: ConversationChangeCallback): Unsubscribe;
+  onTurnChange(callback: TurnChangeCallback): Unsubscribe;
 
   // Lifecycle
   persist(): Promise<void>;
@@ -308,6 +326,8 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   const agentIdListeners = new Map<AgentId, Set<AgentChangeCallback>>();
   const taskListeners = new Set<TaskChangeCallback>();
   const messageListeners = new Map<AgentId, Set<MessageCallback>>();
+  const conversationListeners = new Set<ConversationChangeCallback>();
+  const turnListeners = new Set<TurnChangeCallback>();
 
   /**
    * Emit a new event to the store
@@ -334,7 +354,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     });
 
     // Update materialized views
-    applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange);
+    applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifyConversationChange, notifyTurnChange);
 
     return event;
   }
@@ -641,6 +661,130 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   }
 
   /**
+   * Notify conversation change listeners
+   */
+  function notifyConversationChange(conversationId: string, conversation: Conversation | null): void {
+    for (const callback of conversationListeners) {
+      callback(conversationId, conversation);
+    }
+  }
+
+  /**
+   * Notify turn change listeners
+   */
+  function notifyTurnChange(conversationId: string, turn: ConversationTurn): void {
+    for (const callback of turnListeners) {
+      callback(conversationId, turn);
+    }
+  }
+
+  /**
+   * Subscribe to conversation changes
+   */
+  function onConversationChange(callback: ConversationChangeCallback): Unsubscribe {
+    conversationListeners.add(callback);
+    return () => conversationListeners.delete(callback);
+  }
+
+  /**
+   * Subscribe to turn changes
+   */
+  function onTurnChange(callback: TurnChangeCallback): Unsubscribe {
+    turnListeners.add(callback);
+    return () => turnListeners.delete(callback);
+  }
+
+  // ─── Conversation View Queries ───
+
+  function getConversation(conversationId: string): Conversation | null {
+    const row = store.getRow('conversations', conversationId);
+    if (!row.id) return null;
+    return rowToConversation(row);
+  }
+
+  function listConversations(filter?: ConversationFilter): Conversation[] {
+    const conversations: Conversation[] = [];
+    const rowIds = store.getRowIds('conversations');
+
+    for (const rowId of rowIds) {
+      const row = store.getRow('conversations', rowId);
+      if (!row.id) continue;
+
+      const conversation = rowToConversation(row);
+
+      if (filter) {
+        if (filter.type && conversation.type !== filter.type) continue;
+        if (filter.status && conversation.status !== filter.status) continue;
+        if (filter.parentConversationId && conversation.parentConversationId !== filter.parentConversationId) continue;
+        if (filter.participantId) {
+          // Check participants table for membership
+          const partRow = store.getRow('participants', `${conversation.id}:${filter.participantId}`);
+          if (!partRow.id) continue;
+          // Skip if participant has left
+          if (partRow.left_at && (partRow.left_at as number) > 0) continue;
+        }
+      }
+
+      conversations.push(conversation);
+    }
+
+    return conversations;
+  }
+
+  function listTurns(filter: TurnFilter): ConversationTurn[] {
+    const turns: ConversationTurn[] = [];
+    const rowIds = store.getRowIds('turns');
+
+    for (const rowId of rowIds) {
+      const row = store.getRow('turns', rowId);
+      if (!row.id) continue;
+
+      const turn = rowToTurn(row);
+
+      // Filter by conversation (required)
+      if (turn.conversationId !== filter.conversationId) continue;
+
+      // Optional filters
+      if (filter.threadId && turn.threadId !== filter.threadId) continue;
+      if (filter.contentType && turn.contentType !== filter.contentType) continue;
+      if (filter.participantId && turn.participant !== filter.participantId) continue;
+
+      turns.push(turn);
+    }
+
+    // Sort
+    const order = filter.order ?? 'asc';
+    turns.sort((a, b) => order === 'asc' ? a.timestamp - b.timestamp : b.timestamp - a.timestamp);
+
+    // Limit
+    if (filter.limit) {
+      return turns.slice(0, filter.limit);
+    }
+
+    return turns;
+  }
+
+  function listParticipants(conversationId: string, active?: boolean): ConversationParticipant[] {
+    const participants: ConversationParticipant[] = [];
+    const rowIds = store.getRowIds('participants');
+
+    for (const rowId of rowIds) {
+      const row = store.getRow('participants', rowId);
+      if (!row.id) continue;
+
+      if (row.conversation_id !== conversationId) continue;
+
+      const participant = rowToParticipant(row);
+
+      if (active && participant.leftAt) continue;
+
+      participants.push(participant);
+    }
+
+    return participants;
+  }
+
+  /**
    * Persist store to disk
    */
   async function persist(): Promise<void> {
@@ -904,7 +1048,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       });
 
       // Update materialized views
-      applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange);
+      applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifyConversationChange, notifyTurnChange);
     }
   }
 
@@ -950,6 +1094,10 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     listTasks,
     getMessages,
     getFullMessage,
+    getConversation,
+    listConversations,
+    listTurns,
+    listParticipants,
 
     // Subscriptions
     addSubscription,
@@ -961,6 +1109,8 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     onAgentChange,
     onTaskChange,
     onMessageChange,
+    onConversationChange,
+    onTurnChange,
 
     // Lifecycle
     persist,
@@ -992,6 +1142,10 @@ function initializeTables(store: Store): void {
   store.getRowIds('tasks');
   store.getRowIds('messages');
   store.getRowIds('subscriptions');
+  store.getRowIds('conversations');
+  store.getRowIds('turns');
+  store.getRowIds('threads');
+  store.getRowIds('participants');
 }
 
 /**
@@ -1007,6 +1161,18 @@ function rebuildViews(store: Store): void {
   }
   for (const rowId of store.getRowIds('messages')) {
     store.delRow('messages', rowId);
+  }
+  for (const rowId of store.getRowIds('conversations')) {
+    store.delRow('conversations', rowId);
+  }
+  for (const rowId of store.getRowIds('turns')) {
+    store.delRow('turns', rowId);
+  }
+  for (const rowId of store.getRowIds('threads')) {
+    store.delRow('threads', rowId);
+  }
+  for (const rowId of store.getRowIds('participants')) {
+    store.delRow('participants', rowId);
   }
 
   // Replay all events to rebuild views
@@ -1036,7 +1202,7 @@ function rebuildViews(store: Store): void {
   // Apply each event (no-op callbacks since we're rebuilding)
   const noop = () => {};
   for (const event of events) {
-    applyEventToViews(store, event, noop, noop, noop);
+    applyEventToViews(store, event, noop, noop, noop, noop, noop);
   }
 }
 
@@ -1049,6 +1215,8 @@ function applyEventToViews(
   notifyAgentChange: (agentId: AgentId, agent: Agent | null) => void,
   notifyTaskChange: (taskId: TaskId, task: Task | null) => void,
   notifyMessageChange: (agentId: AgentId) => void,
+  notifyConversationChange: (conversationId: string, conversation: Conversation | null) => void,
+  notifyTurnChange: (conversationId: string, turn: ConversationTurn) => void,
 ): void {
   switch (event.type) {
     case 'spawn':
@@ -1065,6 +1233,15 @@ function applyEventToViews(
       break;
     case 'task':
       applyTaskEvent(store, event, notifyTaskChange);
+      break;
+    case 'conversation':
+      applyConversationEvent(store, event, notifyConversationChange);
+      break;
+    case 'turn':
+      applyTurnEvent(store, event, notifyTurnChange);
+      break;
+    case 'thread':
+      applyThreadEvent(store, event);
       break;
     case 'peer_message':
     case 'peer_request':
@@ -1196,8 +1373,14 @@ function applyMessageEvent(
   const target = event.target;
   if (!target) return;
 
-  const payload = event.payload as { content: string; correlation_id?: string };
-  const content = payload.content;
+  const payload = event.payload as { content?: unknown; correlation_id?: string };
+  // Handle various payload formats - content may be a string, object, or missing
+  const rawContent = payload.content;
+  const content = typeof rawContent === 'string'
+    ? rawContent
+    : rawContent != null
+      ? JSON.stringify(rawContent)
+      : '[no content]';
 
   // Truncate if needed (1000 chars limit)
   const MAX_CONTENT_LENGTH = 1000;
@@ -1485,5 +1668,223 @@ function rowToTask(row: Record<string, unknown>): Task {
     agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
     retryPolicy: row.retry_policy ? JSON.parse(row.retry_policy as string) : undefined,
     retryState: row.retry_state ? JSON.parse(row.retry_state as string) : undefined,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversation Event Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Apply conversation event to conversations view
+ */
+function applyConversationEvent(
+  store: Store,
+  event: Event,
+  notify: (conversationId: string, conversation: Conversation | null) => void,
+): void {
+  const payload = event.payload;
+  const conversationId = payload.conversation_id as string;
+
+  switch (payload.action) {
+    case 'created': {
+      store.setRow('conversations', conversationId, {
+        id: conversationId,
+        type: payload.conversation_type as string,
+        status: 'active',
+        subject: (payload.subject as string) ?? '',
+        parent_conversation_id: (payload.parent_conversation_id as string) ?? '',
+        created_by: event.source.agent_id ?? 'unknown',
+        created_at: event.timestamp,
+        updated_at: event.timestamp,
+        closed_at: 0,
+        closed_by: '',
+        close_reason: '',
+        participant_count: 0,
+        metadata: payload.metadata ? JSON.stringify(payload.metadata) : '',
+      });
+      break;
+    }
+    case 'closed': {
+      const closeReason = (payload.close_reason as string) ?? '';
+      // Map close_reason to valid ConversationStatus
+      const validStatuses = new Set(['completed', 'failed', 'archived']);
+      const closedStatus = validStatuses.has(closeReason) ? closeReason : 'completed';
+      store.setPartialRow('conversations', conversationId, {
+        status: closedStatus,
+        closed_at: event.timestamp,
+        updated_at: event.timestamp,
+        closed_by: (payload.closed_by as string) ?? event.source.agent_id ?? '',
+        close_reason: closeReason,
+      });
+      break;
+    }
+    case 'participant_joined': {
+      const participantId = payload.participant_id as string;
+      const partId = `${conversationId}:${participantId}`;
+      store.setRow('participants', partId, {
+        id: participantId,
+        conversation_id: conversationId,
+        type: (payload.participant_type as string) ?? 'agent',
+        role: (payload.participant_role as string) ?? 'worker',
+        joined_at: event.timestamp,
+        left_at: 0,
+        agent_id: (payload.agent_id as string) ?? '',
+      });
+      // Increment participant count
+      const existing = store.getRow('conversations', conversationId);
+      if (existing.id) {
+        const count = (existing.participant_count as number) || 0;
+        store.setPartialRow('conversations', conversationId, {
+          participant_count: count + 1,
+          updated_at: event.timestamp,
+        });
+      }
+      break;
+    }
+    case 'participant_left': {
+      const leftParticipantId = payload.participant_id as string;
+      const partId = `${conversationId}:${leftParticipantId}`;
+      store.setPartialRow('participants', partId, {
+        left_at: event.timestamp,
+      });
+      // Decrement participant count
+      const existing = store.getRow('conversations', conversationId);
+      if (existing.id) {
+        const count = (existing.participant_count as number) || 0;
+        store.setPartialRow('conversations', conversationId, {
+          participant_count: Math.max(0, count - 1),
+          updated_at: event.timestamp,
+        });
+      }
+      break;
+    }
+  }
+
+  const conversation = rowToConversation(store.getRow('conversations', conversationId));
+  notify(conversationId, conversation);
+}
+
+/**
+ * Apply turn event to turns view
+ */
+function applyTurnEvent(
+  store: Store,
+  event: Event,
+  notify: (conversationId: string, turn: ConversationTurn) => void,
+): void {
+  const payload = event.payload;
+
+  if (payload.action !== 'recorded') return;
+
+  const turnId = payload.turn_id as string;
+  const conversationId = payload.conversation_id as string;
+  const content = payload.content;
+
+  store.setRow('turns', turnId, {
+    id: turnId,
+    conversation_id: conversationId,
+    participant: (payload.participant as string) ?? event.source.agent_id ?? '',
+    timestamp: event.timestamp,
+    content_type: (payload.content_type as string) ?? 'text',
+    content: typeof content === 'string' ? content : JSON.stringify(content),
+    thread_id: (payload.thread_id as string) ?? '',
+    in_reply_to: (payload.in_reply_to as string) ?? '',
+    source_type: (payload.source_type as string) ?? 'explicit',
+    source_message_id: (payload.source_message_id as string) ?? '',
+    metadata: payload.metadata ? JSON.stringify(payload.metadata) : '',
+  });
+
+  // Update conversation's updatedAt
+  const convRow = store.getRow('conversations', conversationId);
+  if (convRow.id) {
+    store.setPartialRow('conversations', conversationId, {
+      updated_at: event.timestamp,
+    });
+  }
+
+  const turn = rowToTurn(store.getRow('turns', turnId));
+  notify(conversationId, turn);
+}
+
+/**
+ * Apply thread event to threads view
+ */
+function applyThreadEvent(
+  store: Store,
+  event: Event,
+): void {
+  const payload = event.payload;
+
+  if (payload.action !== 'created') return;
+
+  const threadId = payload.thread_id as string;
+  store.setRow('threads', threadId, {
+    id: threadId,
+    conversation_id: (payload.conversation_id as string) ?? '',
+    root_turn_id: (payload.root_turn_id as string) ?? '',
+    subject: (payload.subject as string) ?? '',
+    parent_thread_id: (payload.parent_thread_id as string) ?? '',
+    created_by: event.source.agent_id ?? 'unknown',
+    created_at: event.timestamp,
+    turn_count: 0,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversation Row Conversion Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+function rowToConversation(row: Record<string, unknown>): Conversation {
+  return {
+    id: row.id as string,
+    type: row.type as ConversationType,
+    status: row.status as ConversationStatus,
+    subject: (row.subject as string) || undefined,
+    parentConversationId: (row.parent_conversation_id as string) || undefined,
+    createdBy: row.created_by as string,
+    createdAt: row.created_at as Timestamp,
+    updatedAt: row.updated_at as Timestamp,
+    closedAt: (row.closed_at as number) || undefined,
+    closedBy: (row.closed_by as string) || undefined,
+    closeReason: (row.close_reason as string) || undefined,
+    participantCount: (row.participant_count as number) || 0,
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
+  };
+}
+
+function rowToTurn(row: Record<string, unknown>): ConversationTurn {
+  const rawContent = row.content as string;
+  let content: unknown;
+  try {
+    content = JSON.parse(rawContent);
+  } catch {
+    content = rawContent;
+  }
+
+  return {
+    id: row.id as string,
+    conversationId: row.conversation_id as string,
+    participant: row.participant as string,
+    timestamp: row.timestamp as Timestamp,
+    contentType: row.content_type as string,
+    content,
+    threadId: (row.thread_id as string) || undefined,
+    inReplyTo: (row.in_reply_to as string) || undefined,
+    sourceType: (row.source_type as string) as ConversationTurn['sourceType'],
+    sourceMessageId: (row.source_message_id as string) || undefined,
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
+  };
+}
+
+function rowToParticipant(row: Record<string, unknown>): ConversationParticipant {
+  return {
+    id: row.id as string,
+    conversationId: row.conversation_id as string,
+    type: row.type as ConversationParticipant['type'],
+    role: row.role as ConversationParticipant['role'],
+    joinedAt: row.joined_at as Timestamp,
+    leftAt: (row.left_at as number) || undefined,
+    agentId: (row.agent_id as string) || undefined,
   };
 }

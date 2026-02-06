@@ -1,6 +1,6 @@
 {
   "name": "macro-agent",
-  "version": "0.0.7",
+  "version": "0.0.10",
   "description": "Interact with multiple agents as if they were a single agent.",
   "type": "module",
   "main": "dist/index.js",
@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@multi-agent-protocol/sdk": "^0.0.4",
+    "@multi-agent-protocol/sdk": "^0.0.8",
     "@sudocode-ai/claude-code-acp": "^0.13.8",
     "acp-factory": "^0.1.9",
     "better-sqlite3": "^12.5.0",

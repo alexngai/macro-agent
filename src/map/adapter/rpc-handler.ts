@@ -313,13 +313,14 @@ export class RPCError extends Error {
     return new RPCError(MAP_ERRORS.PERMISSION_DENIED, message);
   }
 
-  static notFound(type: "agent" | "scope" | "subscription" | "participant" | "peer", id: string): RPCError {
+  static notFound(type: "agent" | "scope" | "subscription" | "participant" | "peer" | "conversation", id: string): RPCError {
     const codes = {
       agent: MAP_ERRORS.AGENT_NOT_FOUND,
       scope: MAP_ERRORS.SCOPE_NOT_FOUND,
       subscription: MAP_ERRORS.SUBSCRIPTION_NOT_FOUND,
       participant: MAP_ERRORS.PARTICIPANT_NOT_FOUND,
       peer: MAP_ERRORS.NOT_CONNECTED, // Use NOT_CONNECTED for peer not found
+      conversation: JSON_RPC_ERRORS.INTERNAL_ERROR,
     };
     return new RPCError(codes[type], `${type} not found: ${id}`);
   }
@@ -427,6 +428,7 @@ export class RPCHandler {
     context: HandlerContext
   ): Promise<JsonRpcResponse> {
     const { id, method, params } = request;
+    console.error(`[RPCHandler.handleRequest] method=${method} id=${id}`);
 
     try {
       // Find handler
@@ -436,15 +438,18 @@ export class RPCHandler {
       }
 
       // Execute through middleware chain
+      console.error(`[RPCHandler.handleRequest] Executing handler for ${method}`);
       const result = await this.executeWithMiddleware(
         method,
         params,
         context,
         handler
       );
+      console.error(`[RPCHandler.handleRequest] Handler success for ${method}`);
 
       return createSuccessResponse(id, result ?? null);
     } catch (error) {
+      console.error(`[RPCHandler.handleRequest] Error in ${method}:`, error);
       return this.errorToResponse(id, error);
     }
   }
