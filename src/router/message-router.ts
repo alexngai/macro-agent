@@ -62,6 +62,7 @@ import {
   isFederatedAddress,
   describeAddress,
 } from "../map/types.js";
+import type { DeliveryHint, HierarchicalAddress } from "../map/types.js";
 import type { FederationHandler } from "../map/federation/types.js";
 import { getSystemFromAddress } from "../map/federation/federation-handler.js";
 import {
@@ -323,7 +324,7 @@ export function createMessageRouter(
       if (sessionChecker && wakeHandler) {
         const decision = getWakeDecisionWithHint(
           to.agent,
-          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
           sessionChecker
         );
         if (decision.shouldWake || decision.shouldInterrupt) {
@@ -392,7 +393,7 @@ export function createMessageRouter(
       if (sessionChecker && wakeHandler) {
         const decision = getWakeDecisionWithHint(
           targetAgentId,
-          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
           sessionChecker
         );
         if (decision.shouldWake || decision.shouldInterrupt) {
@@ -451,7 +452,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             subscriberId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -537,7 +538,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             recipientId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -610,7 +611,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             recipientId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -676,7 +677,7 @@ export function createMessageRouter(
 
     // Resolve the hierarchical address
     const resolved = resolveHierarchicalAddress(
-      to as import("../map/types.js").HierarchicalAddress,
+      to as HierarchicalAddress,
       from,
       hierarchySource
     );
@@ -735,7 +736,7 @@ export function createMessageRouter(
           recipientId,
           {
             priority: priority as MessagePriority,
-            deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined,
+            deliveryHint: delivery as DeliveryHint | undefined,
           },
           sessionChecker
         );

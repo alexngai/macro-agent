@@ -14,3 +14,6 @@ export * from "./types.js";
 
 // Adapter types
 export * from "./adapter/index.js";
+
+// Federation types and handler
+export * from "./federation/index.js";
