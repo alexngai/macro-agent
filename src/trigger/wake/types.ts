@@ -4,6 +4,25 @@
  * Types for the wake manager that handles polling agents
  * with pending events and delivering them.
  *
+ * ## Wake System Architecture
+ *
+ * There are two wake mechanisms in macro-agent:
+ *
+ * 1. **Single-Agent Wake** (agent/wake.ts, activity/types.ts)
+ *    - For immediately waking a single agent with an Activity
+ *    - Priority-driven (urgent/high/normal/low)
+ *    - Uses inject/interrupt fallback chain
+ *    - Returns `WakeResult` (success: boolean, method: WakeMethod)
+ *
+ * 2. **Batch Wake Cycles** (trigger/wake/*)
+ *    - For periodic delivery of queued system events
+ *    - Heartbeat-based polling with coalescing
+ *    - Processes all agents with pending events
+ *    - Returns `WakeCycleStatus` (status: ran/skipped/failed)
+ *
+ * Use single-agent wake for: Immediate message delivery, activity notifications
+ * Use batch wake cycles for: Scheduled event delivery, system-wide polling
+ *
  * @module trigger/wake/types
  */
 
@@ -28,9 +47,12 @@ export interface WakeRequest {
 }
 
 /**
- * Result of a wake operation
+ * Status of a batch wake cycle.
+ *
+ * Note: This is different from `WakeResult` in activity/types.ts which
+ * represents the outcome of waking a single agent.
  */
-export interface WakeResult {
+export interface WakeCycleStatus {
   status: "ran" | "skipped" | "failed";
   /** Duration if ran */
   durationMs?: number;
@@ -41,9 +63,14 @@ export interface WakeResult {
 }
 
 /**
+ * @deprecated Use WakeCycleStatus instead. Renamed for clarity.
+ */
+export type WakeResult = WakeCycleStatus;
+
+/**
  * Wake handler function type
  */
-export type WakeHandler = (opts: { reason?: string }) => Promise<WakeResult>;
+export type WakeHandler = (opts: { reason?: string }) => Promise<WakeCycleStatus>;
 
 /**
  * Wake manager configuration
@@ -80,9 +107,9 @@ export interface TriggerWakeManager {
   /**
    * Run a single wake cycle immediately
    * @param opts - Optional reason for the cycle
-   * @returns Wake result
+   * @returns Wake cycle status
    */
-  runWakeCycle(opts?: { reason?: string }): Promise<WakeResult>;
+  runWakeCycle(opts?: { reason?: string }): Promise<WakeCycleStatus>;
 
   /**
    * Start the wake manager (enables heartbeat if configured)

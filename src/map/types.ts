@@ -337,8 +337,10 @@ export function isFederatedAddress(addr: Address): addr is FederatedAddress {
 /**
  * Message priority levels.
  * Higher priority messages may wake sleeping agents.
+ * Re-exported from router/types.ts to maintain single source of truth.
  */
-export type MessagePriority = "low" | "normal" | "high" | "urgent";
+import type { MessagePriority } from "../router/types.js";
+export type { MessagePriority };
 
 /**
  * Delivery hint for message routing.

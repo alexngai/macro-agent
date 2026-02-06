@@ -4,6 +4,21 @@
  * Implements progressive waking for agents based on activity and priority.
  * Supports inject/interrupt fallback chain.
  *
+ * ## Wake System Architecture
+ *
+ * This module provides **single-agent wake** functionality:
+ * - Immediately wake a single agent with an Activity
+ * - Priority-driven decision making (urgent/high/normal/low)
+ * - Inject → Interrupt → Queue fallback chain
+ * - Returns `WakeResult` from activity/types.ts
+ *
+ * For **batch wake cycles** (periodic delivery to multiple agents),
+ * see trigger/wake/wake-manager.ts which provides:
+ * - Heartbeat-based polling
+ * - Coalesced wake requests
+ * - Queue-based event delivery
+ * - Returns `WakeCycleStatus`
+ *
  * @module agent/wake
  * @see s-9rld In-Flight Steering spec section 3.4
  */
