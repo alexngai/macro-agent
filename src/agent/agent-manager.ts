@@ -237,6 +237,21 @@ export interface AgentManager {
    */
   onLifecycleEvent(callback: AgentLifecycleCallback): () => void;
 
+  // ── Team Integration ─────────────────────────────────────────
+
+  /**
+   * Set a spawn interceptor that transforms SpawnAgentOptions before spawning.
+   * Used by TeamRuntime to inject team topics, prompts, MCP servers, and env vars.
+   */
+  setSpawnInterceptor(
+    interceptor: SpawnInterceptor | null
+  ): void;
+
+  /**
+   * Get the RoleRegistry used by this AgentManager.
+   */
+  getRoleRegistry(): RoleRegistry;
+
   // ── Mail Services (Late Binding) ─────────────────────────────
 
   /**
@@ -306,6 +321,18 @@ export interface AgentManagerConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Spawn Interceptor
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Function that transforms SpawnAgentOptions before an agent is spawned.
+ * Used by TeamRuntime to inject team-specific configuration.
+ */
+export type SpawnInterceptor = (
+  options: SpawnAgentOptions
+) => SpawnAgentOptions | Promise<SpawnAgentOptions>;
+
+// ─────────────────────────────────────────────────────────────────
 // AgentManager Implementation
 // ─────────────────────────────────────────────────────────────────
 
@@ -329,6 +356,9 @@ export function createAgentManager(
   let mailService = initialMailService;
   let conversationMap = initialConversationMap;
 
+  // Mutable spawn interceptor (set by TeamRuntime)
+  let spawnInterceptor: SpawnInterceptor | null = null;
+
   // Active sessions tracked in memory
   const activeSessions = new Map<AgentId, ActiveSession>();
 
@@ -342,7 +372,12 @@ export function createAgentManager(
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────
 
-  async function spawn(options: SpawnAgentOptions): Promise<SpawnedAgent> {
+  async function spawn(rawOptions: SpawnAgentOptions): Promise<SpawnedAgent> {
+    // Apply spawn interceptor if set (used by TeamRuntime for team context injection)
+    const options = spawnInterceptor
+      ? await spawnInterceptor(rawOptions)
+      : rawOptions;
+
     const {
       task,
       task_id,
@@ -353,6 +388,8 @@ export function createAgentManager(
       topics = [],
       config: agentConfig,
       agentType = defaultAgentType,
+      customPrompt,
+      interactionPatterns,
       // Workspace-related fields (Phase 2)
       role,
       streamId,
@@ -417,10 +454,19 @@ export function createAgentManager(
 
     let systemPrompt = generateSystemPrompt(promptContext);
 
-    // Append role-specific system prompt if defined
+    // Append role prompt: team customPrompt takes precedence over resolvedRole.systemPrompt
     const resolvedRole = roleRegistry.resolveRole(role ?? "worker");
-    if (resolvedRole.systemPrompt) {
+    if (customPrompt) {
+      systemPrompt += `\n\n# Role Instructions\n\n${customPrompt}`;
+    } else if (resolvedRole.systemPrompt) {
       systemPrompt += `\n\n# Role-Specific Instructions\n\n${resolvedRole.systemPrompt}`;
+    }
+
+    // Append team interaction pattern sections (pull mode, trunk integration, etc.)
+    if (interactionPatterns && interactionPatterns.length > 0) {
+      for (const pattern of interactionPatterns) {
+        systemPrompt += `\n\n${pattern}`;
+      }
     }
 
     eventStore.emit({
@@ -1308,6 +1354,14 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     lifecycleListeners.clear();
   }
 
+  function setSpawnInterceptor(interceptor: SpawnInterceptor | null): void {
+    spawnInterceptor = interceptor;
+  }
+
+  function getRoleRegistry(): RoleRegistry {
+    return roleRegistry;
+  }
+
   return {
     spawn,
     terminate,
@@ -1328,6 +1382,8 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,
+    setSpawnInterceptor,
+    getRoleRegistry,
     setMailServices,
     close,
   };

@@ -549,6 +549,29 @@ export function createAPIServer(
     res.json(status);
   });
 
+  // GET /api/team - Get active team info
+  app.get("/api/team", (_req: Request, res: Response) => {
+    // Check for team config in EventStore
+    const statusEvents = eventStore.query({ type: "status", limit: 50 });
+    const teamConfigEvent = statusEvents.find(
+      (e) => e.payload?.team_config != null
+    );
+
+    if (!teamConfigEvent?.payload?.team_config) {
+      res.json({ active: false });
+      return;
+    }
+
+    const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
+    res.json({
+      active: true,
+      name: tc.teamName,
+      strategy: tc.strategy,
+      taskMode: tc.taskMode,
+      enforcement: tc.enforcement,
+    });
+  });
+
   // POST /api/conversation/message - Send message to head manager
   app.post("/api/conversation/message", async (req: Request, res: Response) => {
     // Reject new messages during shutdown

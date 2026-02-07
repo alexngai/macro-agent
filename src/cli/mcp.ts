@@ -176,6 +176,18 @@ async function main() {
       }
     });
 
+    // Read team config from EventStore (stored by TeamRuntime.initialize)
+    let teamTaskMode: string | undefined;
+    const teamEvents = eventStore.query({ type: "status", limit: 50 });
+    const teamConfigEvent = teamEvents.find(
+      (e) => e.payload?.team_config != null
+    );
+    if (teamConfigEvent?.payload?.team_config) {
+      const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
+      teamTaskMode = tc.taskMode as string | undefined;
+      debugLog(`[MCP] Found team config: team=${tc.teamName}, strategy=${tc.strategy}, taskMode=${tc.taskMode}`);
+    }
+
     // Create MCP server with agent context
     const mcpServer = createMCPServer(
       {
@@ -191,6 +203,7 @@ async function main() {
         taskManager,
         messageRouter,
         activityWatcher,
+        taskMode: teamTaskMode as "push" | "pull" | undefined,
       }
     );
 

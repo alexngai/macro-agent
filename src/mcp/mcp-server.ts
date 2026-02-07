@@ -82,6 +82,8 @@ export interface MCPServices {
   taskToolProvider?: TaskToolProvider;
   /** Optional role registry for role-based tool filtering */
   roleRegistry?: RoleRegistry;
+  /** Optional task mode from team config (push or pull) */
+  taskMode?: "push" | "pull";
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1093,6 +1095,7 @@ export function createMCPServer(
         agentManager,
         messageRouter,
         taskManager,
+        roleRegistry,
       });
 
       try {

@@ -1,0 +1,103 @@
+name: self-driving
+description: "Autonomous codebase development with continuous planning"
+version: 1
+
+roles:
+  - planner
+  - grinder
+  - judge
+
+topology:
+  root:
+    role: planner
+    prompt: prompts/planner.md
+    config:
+      model: sonnet
+
+  companions:
+    - role: judge
+      prompt: prompts/judge.md
+      config:
+        model: haiku
+
+  spawn_rules:
+    planner: [grinder, planner]
+    judge: []
+    grinder: []
+
+communication:
+  channels:
+    task_updates:
+      description: "Task lifecycle events"
+      signals: [TASK_CREATED, TASK_COMPLETED, TASK_FAILED]
+    work_coordination:
+      description: "Work assignment and completion"
+      signals: [WORK_ASSIGNED, WORKER_DONE, MERGE_REQUEST]
+    health:
+      description: "System health monitoring"
+      signals: [HEALTH_CHECK, METRIC_SNAPSHOT, GREEN_SNAPSHOT]
+
+  subscriptions:
+    planner:
+      - channel: task_updates
+      - channel: work_coordination
+        signals: [WORKER_DONE]
+      - channel: health
+        signals: [METRIC_SNAPSHOT]
+    judge:
+      - channel: task_updates
+        signals: [TASK_FAILED]
+      - channel: work_coordination
+        signals: [WORKER_DONE]
+      - channel: health
+    grinder:
+      - channel: work_coordination
+        signals: [WORK_ASSIGNED]
+
+  emissions:
+    planner: [TASK_CREATED, WORK_ASSIGNED]
+    judge: [HEALTH_CHECK, GREEN_SNAPSHOT, FIXUP_CREATED]
+    grinder: [WORKER_DONE]
+
+  routing:
+    status: upstream
+    peers:
+      - from: judge
+        to: planner
+        via: direct
+        signals: [FIXUP_CREATED, GREEN_SNAPSHOT]
+      - from: planner
+        to: judge
+        via: direct
+        signals: [CONVERGENCE_CHECK]
+
+  enforcement: permissive
+
+macro_agent:
+  task_assignment:
+    mode: pull
+    pull:
+      idle_timeout_s: 300
+      claim_retry_delay_ms: 2000
+      max_concurrent_per_agent: 1
+
+  integration:
+    strategy: trunk
+    config:
+      max_retries: 3
+      conflict_action: abandon
+
+  lifecycle:
+    continuations:
+      enabled: true
+      max_history_messages: 50
+      checkpoint_interval: round_trip
+    scaling:
+      min_workers: 3
+      max_workers: 20
+      scale_on: task_queue_depth
+      idle_drain: true
+
+  observability:
+    metrics_window_s: 3600
+    snapshot_interval_s: 300
