@@ -56,6 +56,9 @@ export interface CreateTaskOptions {
 
   /** Optional binding to external system (e.g., sudocode issue ID) */
   external_id?: string;
+
+  /** Optional tags for classification and filtering (pull model) */
+  tags?: string[];
 }
 
 /**
@@ -131,6 +134,9 @@ export interface TaskFilter {
 
   /** Filter tasks assigned before this timestamp (for stale assignment detection) */
   assignedBefore?: Timestamp;
+
+  /** Filter by tags (task must have at least one matching tag) */
+  tags?: string[];
 }
 
 /**
@@ -160,6 +166,25 @@ export interface AssignOptions {
 
   /** Optional lease timeout in milliseconds (default: none) */
   leaseMs?: number;
+}
+
+// =============================================================================
+// Claim Filter (Pull Model)
+// =============================================================================
+
+/**
+ * Filter options for claiming tasks.
+ * Used by the pull model to find eligible tasks for an agent.
+ */
+export interface ClaimFilter {
+  /** Only claim tasks with at least one matching tag */
+  tags?: string[];
+
+  /** Only claim root tasks (no parent) */
+  rootTasksOnly?: boolean;
+
+  /** Only claim tasks created by a specific agent */
+  created_by?: AgentId;
 }
 
 // =============================================================================
@@ -283,6 +308,24 @@ export interface TaskBackend {
 
   /** Get tasks that this task blocks */
   getBlocking(taskId: TaskId): Promise<ExtendedTask[]>;
+
+  // ─── Pull Model (Claim/Unclaim) ──────────────────────────────
+  /**
+   * Claim the next available task matching the filter.
+   * Atomically assigns the task to the agent. Returns null if no matching task
+   * is available or if another agent claimed it first (contention).
+   */
+  claim?(agentId: AgentId, filter?: ClaimFilter): Promise<ExtendedTask | null>;
+
+  /**
+   * Release a claimed task back to pending status.
+   */
+  unclaim?(taskId: TaskId): Promise<void>;
+
+  /**
+   * List tasks available for claiming (pending, not blocked, not assigned).
+   */
+  listClaimable?(filter?: ClaimFilter): Promise<ExtendedTask[]>;
 
   // ─── History ─────────────────────────────────────────────────
   /** Get agent assignment history for a task */

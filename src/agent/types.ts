@@ -94,6 +94,20 @@ export interface SpawnAgentOptions {
 }
 
 /**
+ * Options for continuing a terminated agent
+ */
+export interface ContinueAgentOptions {
+  /** Maximum number of conversation turns to include in context (default: 50) */
+  maxMessages?: number;
+
+  /** Override the task description for the continuation */
+  task?: string;
+
+  /** Additional context to prepend to the continuation prompt */
+  additionalContext?: string;
+}
+
+/**
  * Custom agent configuration
  */
 export interface AgentConfig {

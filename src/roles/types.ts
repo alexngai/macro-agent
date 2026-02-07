@@ -41,7 +41,8 @@ export type TaskCapability =
   | "task.create"
   | "task.assign"
   | "task.update"
-  | "task.close";
+  | "task.close"
+  | "task.claim";
 
 /** Execution capabilities */
 export type ExecCapability =

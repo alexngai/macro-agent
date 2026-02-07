@@ -36,6 +36,7 @@ import type {
   SystemPromptContext,
   AgentLifecycleCallback,
   AgentConfig,
+  ContinueAgentOptions,
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
 import type { RoleRegistry, Capability } from "../roles/types.js";
@@ -102,6 +103,20 @@ export interface AgentManager {
    * Resume a stopped agent by loading its existing session.
    */
   resume(agentId: AgentId): Promise<SpawnedAgent>;
+
+  /**
+   * Continue a terminated agent by spawning a new agent with the same
+   * role and task, injecting the prior conversation context as a
+   * resume prefix in the system prompt.
+   *
+   * @param agentId - ID of the agent to continue
+   * @param options - Continuation options
+   * @returns The newly spawned continuation agent
+   */
+  continueAgent(
+    agentId: AgentId,
+    options?: ContinueAgentOptions
+  ): Promise<SpawnedAgent>;
 
   // ── Queries ────────────────────────────────────────────────────
 
@@ -1362,10 +1377,83 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     return roleRegistry;
   }
 
+  /**
+   * Continue a terminated agent by spawning a new agent with the same
+   * role and task, injecting prior conversation context as a resume prefix.
+   */
+  async function continueAgent(
+    agentId: AgentId,
+    options?: ContinueAgentOptions
+  ): Promise<SpawnedAgent> {
+    const agent = eventStore.getAgent(agentId);
+    if (!agent) {
+      throw new AgentManagerError(
+        `Agent not found: ${agentId}`,
+        "AGENT_NOT_FOUND",
+        agentId
+      );
+    }
+
+    // Build resume context from EventStore events
+    const maxMessages = options?.maxMessages ?? 50;
+    const events = eventStore.query({
+      type: "status",
+      source_agent_id: agentId,
+      limit: maxMessages,
+    });
+
+    // Format conversation turns as resume context
+    const contextLines: string[] = [];
+    if (options?.additionalContext) {
+      contextLines.push(options.additionalContext);
+    }
+
+    if (events.length > 0) {
+      contextLines.push("## Prior Session Context");
+      contextLines.push(`Continuing from agent ${agentId} (${events.length} events).`);
+      for (const event of events.slice(-20)) {
+        const summary = event.payload?.summary;
+        if (summary && typeof summary === "string") {
+          contextLines.push(`- ${summary}`);
+        }
+      }
+    }
+
+    const resumeContext = contextLines.join("\n");
+
+    // Spawn a continuation agent with same role, task, and context
+    const taskDescription =
+      options?.task ??
+      agent.task ??
+      `Continue work from ${agentId}`;
+
+    const newAgent = await spawn({
+      task: taskDescription,
+      role: agent.role,
+      parent: agent.parent ?? undefined,
+      cwd: agent.cwd ?? defaultCwd,
+      customPrompt: resumeContext || undefined,
+    });
+
+    // Emit continuation event
+    eventStore.emit({
+      type: "status",
+      source: { agent_id: newAgent.id },
+      payload: {
+        status_type: "started",
+        summary: `Continuation of agent ${agentId}`,
+        continuation_of: agentId,
+      },
+    });
+
+    return newAgent;
+  }
+
   return {
     spawn,
     terminate,
     resume,
+    continueAgent,
     get,
     list,
     getChildren,

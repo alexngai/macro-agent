@@ -60,6 +60,12 @@ export interface WorkerHandlerDeps {
 
   /** Get workspace path for an agent (for resolver → integrator inline merge) */
   getWorkspacePath?: (agentId: string) => string | undefined;
+
+  /** Optional integration strategy (from team config) */
+  integrationStrategy?: import("../../workspace/strategies/types.js").IntegrationStrategy;
+
+  /** Optional task mode from team config */
+  taskMode?: "push" | "pull";
 }
 
 // =============================================================================
@@ -326,9 +332,42 @@ export async function handleWorkerDone(
             `Failed to emit RESOLVER_DONE: ${error instanceof Error ? error.message : "unknown"}`,
           );
         }
+      } else if (deps.integrationStrategy) {
+        // ───────────────────────────────────────────────────────────────────────
+        // Strategy-based integration (team config)
+        // ───────────────────────────────────────────────────────────────────────
+        try {
+          const landResult = await deps.integrationStrategy.land({
+            sourceBranch,
+            targetBranch,
+            workspacePath: context.workspacePath!,
+            agentId: context.agentId,
+            taskId: context.taskId,
+            streamId: context.streamId,
+          });
+
+          if (landResult.status === "landed") {
+            cleanupActions.push(
+              `Strategy '${deps.integrationStrategy.name}' landed ${sourceBranch} → ${targetBranch}${landResult.commitHash ? ` (${landResult.commitHash.slice(0, 8)})` : ""}${landResult.mergeRequestId ? ` (MR: ${landResult.mergeRequestId})` : ""}`,
+            );
+            signalsEmitted.push("WORKER_INTEGRATED");
+          } else if (landResult.status === "conflict") {
+            warnings.push(
+              `Strategy '${deps.integrationStrategy.name}' conflict: ${landResult.error ?? "unknown conflict"}`,
+            );
+          } else {
+            warnings.push(
+              `Strategy '${deps.integrationStrategy.name}' failed: ${landResult.error ?? "unknown error"}`,
+            );
+          }
+        } catch (strategyError) {
+          warnings.push(
+            `Integration strategy error: ${strategyError instanceof Error ? strategyError.message : "unknown"}`,
+          );
+        }
       } else {
         // ───────────────────────────────────────────────────────────────────────
-        // Regular workers emit MERGE_REQUEST and submit to queue
+        // Regular workers emit MERGE_REQUEST and submit to queue (fallback)
         // ───────────────────────────────────────────────────────────────────────
         try {
           // Emit the signal for notification
@@ -449,11 +488,17 @@ export async function handleWorkerDone(
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Return result - shouldTerminate=true for completed/failed workers
+  // Return result
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // In pull mode, completed workers stay alive to claim more tasks
+  const shouldTerminate =
+    deps.taskMode === "pull" && args.status === "completed"
+      ? false
+      : true;
+
   return {
-    shouldTerminate: true,
+    shouldTerminate,
     signalsEmitted,
     cleanupActions,
     warnings: warnings.length > 0 ? warnings : undefined,

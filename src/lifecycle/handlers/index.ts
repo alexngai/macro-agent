@@ -55,6 +55,12 @@ export interface AllHandlerDeps {
 
   /** Optional workspace path resolver for integrators */
   getWorkspacePath?: (agentId: string) => string | undefined;
+
+  /** Optional integration strategy (from team config) */
+  integrationStrategy?: import("../../workspace/strategies/types.js").IntegrationStrategy;
+
+  /** Optional task mode from team config */
+  taskMode?: "push" | "pull";
 }
 
 // =============================================================================
@@ -75,6 +81,8 @@ export function createHandlerRegistry(
     agentManager: deps.agentManager,
     mergeQueue: deps.mergeQueue,
     getWorkspacePath: deps.getWorkspacePath,
+    integrationStrategy: deps.integrationStrategy,
+    taskMode: deps.taskMode,
   };
   registry.set("worker", (context, args, cleanupStatus) =>
     handleWorkerDone(context, args, cleanupStatus, workerDeps)

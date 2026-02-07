@@ -42,6 +42,7 @@ export class TeamRuntime {
   private rootAgentId?: string;
   private companionAgentIds: string[] = [];
   private roleRegistry: RoleRegistry;
+  private lifecycleUnsubscribe?: () => void;
 
   constructor(
     private readonly manifest: TeamManifest,
@@ -148,6 +149,9 @@ export class TeamRuntime {
       this.setupPeerSubscriptions(root.id as AgentId, companionId as AgentId);
     }
 
+    // 4. Set up continuation monitoring for daemon agents (P4.2)
+    this.monitorContinuations();
+
     return {
       rootId: root.id,
       companionIds,
@@ -159,10 +163,14 @@ export class TeamRuntime {
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Tear down team: remove spawn interceptor.
+   * Tear down team: remove spawn interceptor, stop continuation monitoring.
    */
   async teardown(): Promise<void> {
     this.services.agentManager.setSpawnInterceptor(null);
+    if (this.lifecycleUnsubscribe) {
+      this.lifecycleUnsubscribe();
+      this.lifecycleUnsubscribe = undefined;
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -192,6 +200,57 @@ export class TeamRuntime {
   /** Get companion agent IDs (after bootstrap) */
   getCompanionAgentIds(): string[] {
     return [...this.companionAgentIds];
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Continuation Monitoring (P4.2)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Monitor agent lifecycle events for auto-continuation of daemon agents.
+   *
+   * When a root or companion agent terminates unexpectedly and the team's
+   * lifecycle config enables continuations, automatically spawn a continuation.
+   */
+  private monitorContinuations(): void {
+    const lifecycleConfig = this.manifest.macro_agent.lifecycle;
+    if (!lifecycleConfig?.continuations?.enabled) return;
+
+    const { agentManager } = this.services;
+    const monitoredAgents = new Set([
+      this.rootAgentId,
+      ...this.companionAgentIds,
+    ]);
+
+    this.lifecycleUnsubscribe = agentManager.onLifecycleEvent((event) => {
+      if (event.type !== "stopped") return;
+      if (!monitoredAgents.has(event.agent.id)) return;
+
+      // Only auto-continue on unexpected stops (not explicit completion)
+      const reason = (event as { reason?: string }).reason;
+      if (reason === "completed" || reason === "cancelled") return;
+
+      // Schedule auto-continuation (async, fire-and-forget)
+      setTimeout(async () => {
+        try {
+          const newAgent = await agentManager.continueAgent(event.agent.id);
+          // Update monitoring set
+          monitoredAgents.delete(event.agent.id);
+          monitoredAgents.add(newAgent.id);
+
+          if (event.agent.id === this.rootAgentId) {
+            this.rootAgentId = newAgent.id;
+          } else {
+            const idx = this.companionAgentIds.indexOf(event.agent.id);
+            if (idx >= 0) {
+              this.companionAgentIds[idx] = newAgent.id;
+            }
+          }
+        } catch {
+          // Failed to continue — agent is gone
+        }
+      }, 1000);
+    });
   }
 
   // ─────────────────────────────────────────────────────────────

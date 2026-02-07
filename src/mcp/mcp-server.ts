@@ -36,6 +36,21 @@ import {
   formatInjectContextResult,
   INJECT_CONTEXT_TOOL_INFO,
 } from "./tools/inject_context.js";
+import {
+  ClaimTaskSchema,
+  createClaimTaskHandler,
+  CLAIM_TASK_TOOL_INFO,
+} from "./tools/claim_task.js";
+import {
+  UnclaimTaskSchema,
+  createUnclaimTaskHandler,
+  UNCLAIM_TASK_TOOL_INFO,
+} from "./tools/unclaim_task.js";
+import {
+  ListClaimableTasksSchema,
+  createListClaimableTasksHandler,
+  LIST_CLAIMABLE_TASKS_TOOL_INFO,
+} from "./tools/list_claimable_tasks.js";
 import type { TaskToolProvider } from "../task/backend/types.js";
 import type { RoleRegistry, RoleDefinition } from "../roles/types.js";
 import { DefaultRoleRegistry } from "../roles/registry.js";
@@ -84,6 +99,10 @@ export interface MCPServices {
   roleRegistry?: RoleRegistry;
   /** Optional task mode from team config (push or pull) */
   taskMode?: "push" | "pull";
+  /** Optional integration strategy from team config */
+  integrationStrategy?: import("../workspace/strategies/types.js").IntegrationStrategy;
+  /** Optional task backend for pull model tools (claim/unclaim) */
+  taskBackend?: import("../task/backend/types.js").TaskBackend;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1096,6 +1115,8 @@ export function createMCPServer(
         messageRouter,
         taskManager,
         roleRegistry,
+        integrationStrategy: services.integrationStrategy,
+        taskMode: services.taskMode,
       });
 
       try {
@@ -1134,6 +1155,49 @@ export function createMCPServer(
           "INVALID_INPUT"
         );
       }
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Tools: claim_task, unclaim_task, list_claimable_tasks (pull model)
+  // ─────────────────────────────────────────────────────────────────
+
+  if (services.taskBackend && shouldRegisterTool("claim_task")) {
+    server.registerTool(CLAIM_TASK_TOOL_INFO.name, {
+      description: CLAIM_TASK_TOOL_INFO.description,
+      inputSchema: ClaimTaskSchema,
+    }, async (args) => {
+      const handler = createClaimTaskHandler(context, {
+        taskBackend: services.taskBackend!,
+      });
+      const result = await handler(args as { tags?: string[]; root_tasks_only?: boolean });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    });
+  }
+
+  if (services.taskBackend && shouldRegisterTool("unclaim_task")) {
+    server.registerTool(UNCLAIM_TASK_TOOL_INFO.name, {
+      description: UNCLAIM_TASK_TOOL_INFO.description,
+      inputSchema: UnclaimTaskSchema,
+    }, async (args) => {
+      const handler = createUnclaimTaskHandler(context, {
+        taskBackend: services.taskBackend!,
+      });
+      const result = await handler(args as { task_id: string });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    });
+  }
+
+  if (services.taskBackend && shouldRegisterTool("list_claimable_tasks")) {
+    server.registerTool(LIST_CLAIMABLE_TASKS_TOOL_INFO.name, {
+      description: LIST_CLAIMABLE_TASKS_TOOL_INFO.description,
+      inputSchema: ListClaimableTasksSchema,
+    }, async (args) => {
+      const handler = createListClaimableTasksHandler(context, {
+        taskBackend: services.taskBackend!,
+      });
+      const result = await handler(args as { tags?: string[]; root_tasks_only?: boolean; limit?: number });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     });
   }
 

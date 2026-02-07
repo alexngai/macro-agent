@@ -48,6 +48,7 @@ export const TASK_CAPABILITIES = {
   ASSIGN: "task.assign" as const,
   UPDATE: "task.update" as const,
   CLOSE: "task.close" as const,
+  CLAIM: "task.claim" as const,
 };
 
 /** Execution capabilities */
@@ -101,6 +102,7 @@ export const ALL_CAPABILITIES: Set<Capability> = new Set([
   TASK_CAPABILITIES.ASSIGN,
   TASK_CAPABILITIES.UPDATE,
   TASK_CAPABILITIES.CLOSE,
+  TASK_CAPABILITIES.CLAIM,
   // Exec
   EXEC_CAPABILITIES.COMMAND,
   EXEC_CAPABILITIES.BUILD,
@@ -159,6 +161,7 @@ export const CAPABILITY_TOOL_MAP: CapabilityToolMap = {
   [TASK_CAPABILITIES.ASSIGN]: ["sudocode_upsert_issue", "assign_task"],
   [TASK_CAPABILITIES.UPDATE]: ["sudocode_upsert_issue", "update_task"],
   [TASK_CAPABILITIES.CLOSE]: ["sudocode_upsert_issue", "close_task"],
+  [TASK_CAPABILITIES.CLAIM]: ["claim_task", "unclaim_task", "list_claimable_tasks"],
 
   // Execution operations
   [EXEC_CAPABILITIES.COMMAND]: ["bash"],

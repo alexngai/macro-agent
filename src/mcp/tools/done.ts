@@ -71,6 +71,10 @@ export interface DoneToolDeps {
   mailService?: import("../../mail/mail-service.js").MailService;
   /** Optional ConversationMap for agent-to-conversation lookup */
   conversationMap?: import("../../mail/conversation-map.js").ConversationMap;
+  /** Optional integration strategy (from team config) */
+  integrationStrategy?: import("../../workspace/strategies/types.js").IntegrationStrategy;
+  /** Optional task mode from team config */
+  taskMode?: "push" | "pull";
 }
 
 // =============================================================================
@@ -294,6 +298,8 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
       getWorkspacePath: workspaceManager
         ? (agentId: string) => workspaceManager.getWorkspace(agentId)?.path
         : undefined,
+      integrationStrategy: deps.integrationStrategy,
+      taskMode: deps.taskMode,
     };
 
     const handlerResult = await dispatchDone(
