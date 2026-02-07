@@ -1,17 +1,33 @@
 /**
- * MAPAdapter - Core MAP Protocol Adapter Implementation
+ * MAPAdapter - External MAP Protocol Interface
  *
- * The MAPAdapter is the external-facing component that:
- * - Accepts MAP protocol connections from clients, agents, and gateways
- * - Manages participant lifecycle and authentication
- * - Handles subscriptions and event streaming
- * - Dispatches extension method calls
- * - Enforces system-level permissions (Layer 1)
+ * ## Routing Architecture Role
  *
- * The adapter delegates to internal components:
- * - MessageRouter: For message routing and delivery
+ * MAPAdapter is the **external protocol translation layer** for MAP clients.
+ * It translates MAP protocol messages into internal routing calls.
+ *
+ * ```
+ * External → MAPAdapter → MessageRouter → EventStore
+ * (MAP RPC)   (this)      (routing)       (persistence)
+ * ```
+ *
+ * **Responsibilities:**
+ * - Accept MAP protocol connections (JSON-RPC over WebSocket/streams)
+ * - Manage participant lifecycle (connect, disconnect, capabilities)
+ * - Handle authentication and permission enforcement (Layer 1)
+ * - Translate MAP addresses to internal routing
+ * - Stream events to subscribed participants
+ * - Dispatch extension method calls (spawn, wake, tasks, etc.)
+ *
+ * **Delegates to internal components:**
+ * - MessageRouter: For message routing and delivery (sendToAddress)
  * - AgentManager: For agent lifecycle operations
- * - EventStore: For event persistence and replay
+ * - EventStore: For event persistence and subscription
+ *
+ * **Not responsible for:**
+ * - Internal agent-to-agent messaging (use MessageRouter directly)
+ * - Batch event delivery (use TriggerRouter/WakeManager)
+ * - Legacy channel-based routing (use MessageRouter.send())
  *
  * @see specs/s-5qir_map_integration_for_macro_agent.md
  */
@@ -34,13 +50,20 @@ import type {
 import type {
   ParticipantId,
   ParticipantType,
+  ParticipantCapabilities,
   ConnectedParticipant,
   SubscriptionId,
   SubscriptionFilter,
   EventNotification,
+  AuthCredentials,
   MAPEventType,
 } from "./types.js";
-import { isAgentAddress, type Address, type SendOptions, type ScopeId } from "../types.js";
+import {
+  isAgentAddress,
+  type Address,
+  type SendOptions,
+  type ScopeId,
+} from "../types.js";
 import type { AgentId } from "../../store/types/index.js";
 import {
   createConnectionManager,
@@ -68,6 +91,7 @@ import type {
   MAPPeerConfig,
 } from "../federation/types.js";
 import { ACPOverMAPHandler, type ACPEnvelope } from "./acp-over-map.js";
+import { createMailHandlers } from "./mail-handler-adapter.js";
 
 // =============================================================================
 // Connection Session
@@ -147,6 +171,11 @@ export interface MAPAdapterServices {
    * Default working directory for ACP sessions.
    */
   defaultCwd?: string;
+
+  /**
+   * Mail service for conversation tracking.
+   */
+  mailService?: import("../../mail/mail-service.js").MailService;
 }
 
 /**
@@ -196,7 +225,8 @@ export class MAPAdapterImpl implements MAPAdapter {
   private readonly services: MAPAdapterServices;
   private readonly acpOverMapHandler: ACPOverMAPHandler | null = null;
   /** Sequence numbers per subscription for proper event ordering */
-  private readonly subscriptionSequences: Map<SubscriptionId, number> = new Map();
+  private readonly subscriptionSequences: Map<SubscriptionId, number> =
+    new Map();
 
   private running = false;
 
@@ -512,8 +542,7 @@ export class MAPAdapterImpl implements MAPAdapter {
 
   emitEvent(event: EventNotification): void {
     // Match event against subscriptions
-    const { subscriptions: matchingSubs } =
-      this.subscriptions.match(event);
+    const { subscriptions: matchingSubs } = this.subscriptions.match(event);
 
     // Send to each matched subscription with proper SDK format
     // SDK EventNotificationParams: { subscriptionId, sequenceNumber, eventId?, timestamp?, event, causedBy? }
@@ -528,9 +557,10 @@ export class MAPAdapterImpl implements MAPAdapter {
         const params = {
           subscriptionId: subscription.id,
           sequenceNumber: currentSeq,
-          eventId: event.eventId,     // For deduplication
+          eventId: event.eventId, // For deduplication
           timestamp: event.timestamp, // Envelope timestamp
-          event: {                    // The actual event object
+          event: {
+            // The actual event object
             id: event.eventId,
             type: event.type,
             timestamp: event.timestamp,
@@ -717,6 +747,14 @@ export class MAPAdapterImpl implements MAPAdapter {
       };
     }
 
+    // Add mail protocol handlers if mail service is available
+    if (this.services.mailService) {
+      const mailHandlers = createMailHandlers(this.services.mailService);
+      for (const [method, handler] of Object.entries(mailHandlers)) {
+        handlers[method] = handler;
+      }
+    }
+
     // Capability requirements for methods
     const capabilityRequirements: Record<
       string,
@@ -829,13 +867,107 @@ export class MAPAdapterImpl implements MAPAdapter {
       throw RPCError.notFound("participant", participantId);
     }
 
-    // TODO: Handle authentication when auth hook is provided
-    // For now, return the already-assigned capabilities
+    // Parse connect request parameters
+    const connectParams = params as
+      | {
+          type?: ParticipantType;
+          name?: string;
+          credentials?: AuthCredentials;
+        }
+      | undefined;
+
+    const requestedType = connectParams?.type ?? participant.type;
+    const credentials = connectParams?.credentials;
+
+    // Handle authentication if handler is configured and credentials provided
+    if (this.config.authenticate && credentials) {
+      const authResult = await this.config.authenticate(
+        requestedType,
+        credentials,
+      );
+
+      if (!authResult.allowed) {
+        throw RPCError.authenticationFailed(
+          authResult.error ?? "Authentication failed",
+        );
+      }
+
+      // Update capabilities based on auth result
+      const newCapabilities =
+        authResult.capabilities ?? this.getDefaultCapabilities(requestedType);
+      this.connections.updateCapabilities(participantId, newCapabilities);
+
+      // Return updated participant info
+      const updatedParticipant = this.connections.getParticipant(participantId);
+      return {
+        participantId: participant.id,
+        capabilities: updatedParticipant?.capabilities ?? newCapabilities,
+      };
+    }
+
+    // No auth handler or no credentials - use default capabilities for the type
+    if (requestedType !== participant.type) {
+      const defaultCapabilities = this.getDefaultCapabilities(requestedType);
+      this.connections.updateCapabilities(participantId, defaultCapabilities);
+
+      const updatedParticipant = this.connections.getParticipant(participantId);
+      return {
+        participantId: participant.id,
+        capabilities: updatedParticipant?.capabilities ?? defaultCapabilities,
+      };
+    }
 
     return {
       participantId: participant.id,
       capabilities: participant.capabilities,
     };
+  }
+
+  /**
+   * Get default capabilities for a participant type.
+   */
+  private getDefaultCapabilities(
+    type: ParticipantType,
+  ): ParticipantCapabilities {
+    switch (type) {
+      case "agent":
+        return (
+          this.config.defaultAgentCapabilities ?? {
+            canQuery: true,
+            canSubscribe: true,
+            canMessage: true,
+            canSpawn: true,
+            canStop: true,
+            canManageScopes: true,
+            canManageTasks: true,
+            canManageFederation: true,
+          }
+        );
+      case "gateway":
+        return {
+          canQuery: true,
+          canSubscribe: true,
+          canMessage: true,
+          canSpawn: false,
+          canStop: false,
+          canManageScopes: false,
+          canManageTasks: false,
+          canManageFederation: true,
+        };
+      case "client":
+      default:
+        return (
+          this.config.defaultClientCapabilities ?? {
+            canQuery: true,
+            canSubscribe: true,
+            canMessage: true,
+            canSpawn: false,
+            canStop: false,
+            canManageScopes: false,
+            canManageTasks: false,
+          }
+        );
+    }
   }
 
   private async handleDisconnect(
@@ -903,8 +1035,15 @@ export class MAPAdapterImpl implements MAPAdapter {
 
     // Check if this is an ACP-over-MAP message
     // SDK sends ACP envelope directly as payload (not wrapped in content)
-    const rawPayload = payload as unknown as Record<string, unknown> | undefined;
-    if (rawPayload && typeof rawPayload === 'object' && 'acp' in rawPayload && 'acpContext' in rawPayload) {
+    const rawPayload = payload as unknown as
+      | Record<string, unknown>
+      | undefined;
+    if (
+      rawPayload &&
+      typeof rawPayload === "object" &&
+      "acp" in rawPayload &&
+      "acpContext" in rawPayload
+    ) {
       // This is an ACP envelope - route through ACP-over-MAP handler
       return this.handleACPOverMAP(participantId, to, rawPayload, ctx);
     }
@@ -923,7 +1062,9 @@ export class MAPAdapterImpl implements MAPAdapter {
     ctx: HandlerContext,
   ): Promise<SendResult> {
     if (!this.acpOverMapHandler) {
-      throw RPCError.internalError("ACP-over-MAP not available - missing services");
+      throw RPCError.internalError(
+        "ACP-over-MAP not available - missing services",
+      );
     }
 
     const acp = envelope.acp as {
@@ -940,7 +1081,9 @@ export class MAPAdapterImpl implements MAPAdapter {
       direction: string;
     };
 
-    console.error(`[ACP-over-MAP] Received - method=${acp.method} to=${JSON.stringify(to)}`);
+    console.error(
+      `[ACP-over-MAP] Received - method=${acp.method} to=${JSON.stringify(to)}`,
+    );
 
     // For now, we only support messages to specific agents
     if (!isAgentAddress(to)) {
@@ -953,7 +1096,12 @@ export class MAPAdapterImpl implements MAPAdapter {
     if (!acp.method) {
       // This is a response - route it normally
       console.error(`[ACP-over-MAP] Routing response back`);
-      return this.sendMessage(participantId, to, { content: envelope }, undefined);
+      return this.sendMessage(
+        participantId,
+        to,
+        { content: envelope },
+        undefined,
+      );
     }
 
     // Create notification emitter to stream session updates
@@ -981,7 +1129,7 @@ export class MAPAdapterImpl implements MAPAdapter {
     const responseEnvelope = await this.acpOverMapHandler.processRequest(
       targetAgentId,
       acpEnvelope,
-      emitNotification
+      emitNotification,
     );
 
     console.error(`[ACP-over-MAP] Request processed - method=${acp.method}`);
@@ -1167,9 +1315,7 @@ export class MAPAdapterImpl implements MAPAdapter {
     }
   }
 
-  private async handleFederationList(
-    participantId: ParticipantId,
-  ): Promise<{
+  private async handleFederationList(participantId: ParticipantId): Promise<{
     peers: Array<{ systemId: string; status: string; connectedAt: number }>;
   }> {
     if (!this.services.federationHandler) {

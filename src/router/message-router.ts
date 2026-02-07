@@ -1,13 +1,42 @@
 /**
- * MessageRouter - High-level message routing service
+ * MessageRouter - Core Internal Message Routing Service
  *
- * Provides message routing between agents with support for:
- * - Direct agent-to-agent messaging
- * - Task-based routing (to assigned agent)
- * - Topic-based pub/sub
- * - Lineage routing (ancestors to descendants)
- * - Subtree routing (status events to parent subscribers)
- * - Message acknowledgment
+ * ## Routing Architecture
+ *
+ * MessageRouter is the **core internal routing authority** for macro-agent.
+ * It handles all message delivery between internal agents.
+ *
+ * ```
+ * External → MAPAdapter/TriggerRouter → MessageRouter → EventStore
+ *            (protocol translation)     (routing logic)   (persistence)
+ * ```
+ *
+ * **Three routing entry points exist:**
+ *
+ * 1. **MessageRouter** (this module)
+ *    - Internal routing for agent-to-agent communication
+ *    - Supports: send(), sendToAddress(), emitStatus()
+ *    - Used by: AgentManager, MCP tools, internal components
+ *
+ * 2. **MAPAdapter** (src/map/adapter/)
+ *    - External MAP protocol interface for clients/agents/gateways
+ *    - Translates MAP protocol → internal routing
+ *    - Delegates message delivery to MessageRouter
+ *
+ * 3. **TriggerRouter** (src/trigger/router/)
+ *    - External event routing (webhooks, cron, system events)
+ *    - Queues events for batch delivery
+ *    - Uses WakeManager for delivery scheduling
+ *
+ * ## Supported Routing Methods
+ *
+ * **Legacy Channel-based** (send, sendMessage):
+ * - Direct agent, task, topic, lineage, subtree, broadcast
+ *
+ * **MAP Address-based** (sendToAddress):
+ * - Agent, agents, task, scope, role, broadcast, hierarchical, federated
+ *
+ * @module router/message-router
  */
 
 import { nanoid } from "nanoid";
@@ -35,6 +64,7 @@ import type {
   SendToAddressRequest,
   AddressSendResult,
   Address,
+  TurnRecorderCallback,
 } from "./types.js";
 import { RoutingError, AddressRoutingError, DEFAULT_TRUNCATION_CONFIG } from "./types.js";
 import {
@@ -62,6 +92,7 @@ import {
   isFederatedAddress,
   describeAddress,
 } from "../map/types.js";
+import type { DeliveryHint, HierarchicalAddress } from "../map/types.js";
 import type { FederationHandler } from "../map/federation/types.js";
 import { getSystemFromAddress } from "../map/federation/federation-handler.js";
 import {
@@ -166,6 +197,13 @@ export interface MessageRouter {
    * - Optionally subscribes parent to agent's subtree
    */
   setupDefaultSubscriptions(options: DefaultSubscriptionOptions): void;
+
+  /**
+   * Set turn recorder for conversation tracking.
+   * Called after direct message (agent/task address) delivery.
+   * Supports late binding since mail services may be created after router.
+   */
+  setTurnRecorder(recorder: TurnRecorderCallback): void;
 }
 
 /**
@@ -222,6 +260,9 @@ export function createMessageRouter(
   const sessionChecker = config.sessionChecker;
   const wakeHandler = config.wakeHandler;
   const federationHandler = config.federationHandler;
+
+  // Turn recorder for conversation tracking (late-bound)
+  let turnRecorder: TurnRecorderCallback | undefined;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -323,7 +364,7 @@ export function createMessageRouter(
       if (sessionChecker && wakeHandler) {
         const decision = getWakeDecisionWithHint(
           to.agent,
-          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
           sessionChecker
         );
         if (decision.shouldWake || decision.shouldInterrupt) {
@@ -332,6 +373,15 @@ export function createMessageRouter(
       }
 
       delivered.push(to.agent);
+
+      // Record turn for conversation tracking
+      if (turnRecorder) {
+        try {
+          turnRecorder({ from, toAgent: to.agent, content, messageId: event.id, addressType: "agent" });
+        } catch {
+          // Never fail delivery due to turn recording
+        }
+      }
 
       return {
         id: event.id,
@@ -392,7 +442,7 @@ export function createMessageRouter(
       if (sessionChecker && wakeHandler) {
         const decision = getWakeDecisionWithHint(
           targetAgentId,
-          { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+          { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
           sessionChecker
         );
         if (decision.shouldWake || decision.shouldInterrupt) {
@@ -401,6 +451,15 @@ export function createMessageRouter(
       }
 
       delivered.push(targetAgentId);
+
+      // Record turn for conversation tracking
+      if (turnRecorder) {
+        try {
+          turnRecorder({ from, toAgent: targetAgentId, content, messageId: event.id, addressType: "task" });
+        } catch {
+          // Never fail delivery due to turn recording
+        }
+      }
 
       return {
         id: event.id,
@@ -451,7 +510,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             subscriberId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -478,11 +537,16 @@ export function createMessageRouter(
       const agentSource: RoleAgentSource = {
         listAgents: () => eventStore.listAgents(),
         getAgent: (id) => eventStore.getAgent(id),
+        // Get agents subscribed to a scope/topic
+        getScopeMembers: (scope) => {
+          return eventStore.getSubscribers({ type: "topic", target: scope });
+        },
       };
 
       const recipientIds = resolveRoleTarget(agentSource, {
         role: to.role,
-        coordinatorId: to.within,
+        // RoleAddress.within is a ScopeId (subscription-based), not a coordinatorId (hierarchy-based)
+        scope: to.within,
       });
 
       if (recipientIds.length === 0) {
@@ -537,7 +601,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             recipientId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -610,7 +674,7 @@ export function createMessageRouter(
         if (sessionChecker && wakeHandler) {
           const decision = getWakeDecisionWithHint(
             recipientId,
-            { priority: priority as MessagePriority, deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined },
+            { priority: priority as MessagePriority, deliveryHint: delivery as DeliveryHint | undefined },
             sessionChecker
           );
           if (decision.shouldWake || decision.shouldInterrupt) {
@@ -676,7 +740,7 @@ export function createMessageRouter(
 
     // Resolve the hierarchical address
     const resolved = resolveHierarchicalAddress(
-      to as import("../map/types.js").HierarchicalAddress,
+      to as HierarchicalAddress,
       from,
       hierarchySource
     );
@@ -735,7 +799,7 @@ export function createMessageRouter(
           recipientId,
           {
             priority: priority as MessagePriority,
-            deliveryHint: delivery as import("../map/types.js").DeliveryHint | undefined,
+            deliveryHint: delivery as DeliveryHint | undefined,
           },
           sessionChecker
         );
@@ -1090,6 +1154,10 @@ export function createMessageRouter(
     }
   }
 
+  function setTurnRecorder(recorder: TurnRecorderCallback): void {
+    turnRecorder = recorder;
+  }
+
   return {
     sendToAddress,
     emitStatus,
@@ -1102,5 +1170,6 @@ export function createMessageRouter(
     getSubscriptions,
     getSubscribers,
     setupDefaultSubscriptions,
+    setTurnRecorder,
   };
 }

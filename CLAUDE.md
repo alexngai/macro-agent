@@ -188,6 +188,17 @@ Inject context into running agents:
 - **kebab-case** for file names
 - **SCREAMING_SNAKE** for constants
 
+#### ID Field Naming Convention
+
+Different layers use different naming for ID fields by design:
+
+| Layer | Convention | Example | Rationale |
+|-------|------------|---------|-----------|
+| **Internal** (store, router, activity) | `agent_id`, `task_id` | `source.agent_id` | Database/event conventions, explicit |
+| **MAP Protocol** (map/types) | `agent`, `task` | `address.agent` | Protocol spec, cleaner syntax |
+
+The `store/types/events.ts` module bridges these conventions when converting between internal events and MAP addresses.
+
 ### Testing
 
 - **Unit tests**: `*.test.ts` - Fast, mocked dependencies

@@ -39,8 +39,16 @@ export type BroadcastScope = "all" | "coordinators" | "workers" | "monitors";
 export interface RoleTarget {
   /** Role name to target (e.g., "worker", "integrator", "monitor") */
   role: string;
-  /** Optional: scope to specific coordinator's agents */
+  /**
+   * Optional: Filter to agents within a coordinator's subtree (hierarchy-based).
+   * Agents must be descendants of the specified coordinator.
+   */
   coordinatorId?: AgentId;
+  /**
+   * Optional: Filter to agents that are members of a scope (subscription-based).
+   * Requires EventStore scope/topic membership lookup.
+   */
+  scope?: string;
 }
 
 // Message sender identification
@@ -265,6 +273,33 @@ export class AddressRoutingError extends Error {
     this.name = "AddressRoutingError";
   }
 }
+
+// =============================================================================
+// Turn Recording
+// =============================================================================
+
+/**
+ * Information passed to a turn recorder callback.
+ * Only agent and task addresses produce turns.
+ */
+export interface TurnRecordInfo {
+  /** Sending agent ID */
+  from: AgentId;
+  /** Receiving agent ID (resolved for task addresses) */
+  toAgent: AgentId;
+  /** Message content */
+  content: string;
+  /** Event ID of the emitted message event */
+  messageId: EventId;
+  /** Type of address that was sent to */
+  addressType: "agent" | "task";
+}
+
+/**
+ * Callback invoked when a direct message (agent or task address) is sent.
+ * Used to record the message as a conversation turn.
+ */
+export type TurnRecorderCallback = (info: TurnRecordInfo) => void;
 
 // Re-export Address and related types for convenience
 export type { Address, SendOptions, DeliveryHint };

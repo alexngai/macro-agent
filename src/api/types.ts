@@ -182,7 +182,9 @@ export type WSMessageType =
   | "task_update"
   | "message"
   | "status"
-  | "error";
+  | "error"
+  | "conversation_update"
+  | "turn_added";
 
 export interface WSMessage {
   type: WSMessageType;
@@ -275,6 +277,67 @@ export interface InjectContextResponse {
 
   /** Additional notes */
   note?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Mail Conversations
+// ─────────────────────────────────────────────────────────────────
+
+export interface MailConversationSummary {
+  id: string;
+  type: string;
+  status: string;
+  subject: string;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  participant_count: number;
+  parent_conversation_id?: string;
+}
+
+export interface MailConversationDetail extends MailConversationSummary {
+  closed_at?: Timestamp;
+  closed_by?: string;
+  close_reason?: string;
+}
+
+export interface MailConversationListResponse {
+  conversations: MailConversationSummary[];
+  total: number;
+}
+
+export interface MailTurnSummary {
+  id: string;
+  conversation_id: string;
+  participant: string;
+  content_type: string;
+  content: unknown;
+  timestamp: Timestamp;
+  source_type?: string;
+  source_message_id?: string;
+}
+
+export interface MailTurnListResponse {
+  turns: MailTurnSummary[];
+  total: number;
+}
+
+export interface MailConversationQueryParams {
+  type?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface WSTurnAdded {
+  type: "turn_added";
+  conversation_id: string;
+  turn: MailTurnSummary;
+}
+
+export interface WSConversationUpdate {
+  type: "conversation_update";
+  conversation: MailConversationSummary;
 }
 
 // ─────────────────────────────────────────────────────────────────

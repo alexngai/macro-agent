@@ -1,8 +1,35 @@
 /**
- * Trigger Router Implementation
+ * TriggerRouter - External Event Routing
  *
- * Routes trigger events to appropriate agents using pluggable
- * routing strategies. Manages strategy registration and selection.
+ * ## Routing Architecture Role
+ *
+ * TriggerRouter handles **external system events** (webhooks, cron, etc.)
+ * and routes them to appropriate agents using pluggable strategies.
+ *
+ * ```
+ * External Events → TriggerRouter → SystemEventQueue → WakeManager → Agent
+ * (webhooks, cron)   (this)         (queueing)         (delivery)
+ * ```
+ *
+ * **Responsibilities:**
+ * - Route external events to target agents via configurable strategies
+ * - Queue events for deferred delivery (SystemEventQueue)
+ * - Support multiple routing strategies (direct, head, role-based, etc.)
+ * - Trigger wake cycles for sleeping agents
+ *
+ * **Routing Strategies:**
+ * - direct: Route to specific agent ID
+ * - head: Route to coordinator/head of hierarchy
+ * - role: Route to agents by role
+ * - broadcast: Fan-out to multiple agents
+ *
+ * **Differs from MessageRouter:**
+ * - TriggerRouter: External events → agents (one-way, queued)
+ * - MessageRouter: Agent ↔ agent communication (bidirectional, immediate)
+ *
+ * **Differs from MAPAdapter:**
+ * - TriggerRouter: System events (webhooks, cron, internal signals)
+ * - MAPAdapter: MAP protocol clients (external agents, UIs)
  *
  * @module trigger/router/trigger-router
  */

@@ -107,10 +107,9 @@ export type Channel =
 // Message Priority
 // =============================================================================
 
-/**
- * Message priority levels
- */
-export type MessagePriority = "low" | "normal" | "high" | "urgent";
+// MessagePriority is imported from types.ts to avoid duplication
+import type { MessagePriority } from "./types.js";
+export type { MessagePriority } from "./types.js";
 
 /**
  * Priority level numeric values for ordering
