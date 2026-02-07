@@ -1,6 +1,6 @@
 # Self-Driving Codebases: Implementation Summary
 
-Implementation of modular team templates, pluggable integration strategies, task pull model, session continuations, and observability for macro-agent. Completed across 6 phases.
+Implementation of modular team templates, pluggable integration strategies, task pull model, session continuations, and observability for macro-agent. Completed across 6 phases plus a post-phase fix to bridge status routing to topic subscribers.
 
 ## Design Decisions
 
@@ -310,6 +310,41 @@ Additional cross-subsystem integration tests in `src/teams/__tests__/cross-subsy
 
 ---
 
+## Post-Phase Fix: Status → Topic Routing Bridge
+
+### Problem
+
+`emitStatus()` in `message-router.ts` only routed lifecycle signals to **subtree subscribers** (parents/ancestors via hierarchical subscriptions). Topic subscribers set up by the team communication topology never received these events.
+
+This meant that when a worker emitted `WORKER_DONE`, only its parent coordinator received the notification. Peer agents on the same topic (e.g., two workers sharing `work_coordination`, or a monitor on `health`) saw nothing.
+
+Two completely separate message pathways existed:
+- **Status/subtree path**: `emitStatus()` → `routeStatusToSubtreeSubscribers()` — hierarchical only
+- **Topic/scope path**: `sendToAddress({ to: { scope } })` — only used by the `send_message` MCP tool (requires explicit agent action)
+
+### Fix (`src/router/message-router.ts`)
+
+Added `routeStatusToTopicSubscribers()` to `emitStatus()`. After routing to subtree subscribers, it now:
+
+1. Looks up all topics the emitting agent is subscribed to
+2. Finds all other agents subscribed to those same topics
+3. Delivers the status notification to each (as a message event with `via: "topic"`)
+4. Deduplicates against agents already notified via subtree routing
+
+`routeStatusToSubtreeSubscribers()` now returns `Set<AgentId>` (the agents it notified) so the topic routing step can skip them.
+
+### Tests (`src/router/__tests__/message-router.test.ts`)
+
+6 new tests:
+- Topic co-subscriber routing (peer agents on shared topic)
+- Self-exclusion (emitter doesn't receive own status)
+- Dedup with subtree (parent on both subtree and topic gets one notification)
+- Multi-subscriber fanout (3 agents on shared topic)
+- No-topic-no-routing (agent without topic subs doesn't leak to topic subscribers)
+- Cross-topic dedup (agent on 2 shared topics gets one notification, not two)
+
+---
+
 ## File Inventory
 
 ### New Files (30)
@@ -356,7 +391,7 @@ docs/teams.md
 docs/implementation-summary.md
 ```
 
-### Modified Files (12)
+### Modified Files (13)
 
 ```
 src/agent/agent-manager.ts      # setSpawnInterceptor(), continueAgent(), customPrompt
@@ -371,6 +406,7 @@ src/task/backend/memory.ts      # claim(), unclaim(), listClaimable() implementa
 src/roles/types.ts              # "task.claim" in TaskCapability union
 src/roles/capabilities.ts       # TASK_CAPABILITIES.CLAIM, ALL_CAPABILITIES, CAPABILITY_TOOL_MAP
 src/api/server.ts               # /api/team, /api/metrics/* endpoints
+src/router/message-router.ts    # emitStatus → topic routing bridge, routeStatusToTopicSubscribers()
 ```
 
 ---
@@ -385,3 +421,130 @@ All changes are additive. When no team is loaded:
 - `continueAgent()` exists but is never called
 - Metrics endpoints return zero-value results
 - `/api/team` returns `{ active: false }`
+- Topic routing in `emitStatus()` is a no-op when agents have no topic subscriptions
+
+---
+
+## Communication Topology: Current State and Remaining Gaps
+
+The team communication system defines a rich configuration surface in YAML (channels, subscriptions, emissions, peer routing, enforcement modes). The infrastructure for loading and validating this config is complete. However, several config features are not yet wired into runtime behavior.
+
+### What Works
+
+| Feature | Status | How It Works |
+|---------|--------|-------------|
+| **Channel subscriptions** | Working | Spawn interceptor reads `communication.subscriptions[role]` → injects topic names → `setupDefaultSubscriptions()` subscribes agent to topics |
+| **Status → subtree routing** | Working | `emitStatus()` → `routeStatusToSubtreeSubscribers()` delivers to parents/ancestors |
+| **Status → topic routing** | Working | `emitStatus()` → `routeStatusToTopicSubscribers()` delivers to topic co-subscribers with dedup |
+| **Explicit messaging via topics** | Working | `sendToAddress({ to: { scope: "topic_name" } })` delivers to all topic subscribers with wake logic |
+| **Peer visibility (root ↔ companion)** | Working | `setupPeerSubscriptions()` creates mutual subtree subscriptions between root and companions |
+| **Role auto-subscription** | Working | Agents auto-subscribe to `{ type: "role", target: roleName }` channel if role is provided |
+| **Message delivery via `check_messages`** | Working | Status notifications delivered via both subtree and topic routing appear in the agent's message inbox |
+
+### Gaps to Address
+
+#### 1. Signal Filtering — Not Implemented
+
+**Config surface**: `ChannelSubscription.signals?: string[]` allows per-role filtering of which signals to receive on a channel.
+
+```yaml
+subscriptions:
+  judge:
+    - channel: work_coordination
+      signals: [WORKER_DONE]  # Only receive WORKER_DONE, not WORK_ASSIGNED
+```
+
+**Current behavior**: `getTopicsForRole()` in `team-runtime.ts:329-341` extracts channel names but **discards the `signals` array entirely**. All agents on a topic receive all signals regardless of their configured filter.
+
+**Impact**: Medium. In a permissive model, agents can ignore irrelevant signals. But high-traffic topics will deliver unnecessary messages to agents that only care about specific signals.
+
+**Where to fix**: `routeStatusToTopicSubscribers()` in `message-router.ts` would need access to the per-agent signal filter to skip delivery when the status's `details.signal` doesn't match. This requires either storing signal filters alongside subscriptions in EventStore, or passing them through a separate lookup.
+
+#### 2. Emission Restrictions — Not Enforced
+
+**Config surface**: `communication.emissions` maps roles to allowed signals.
+
+```yaml
+emissions:
+  planner: [TASK_CREATED, WORK_ASSIGNED]
+  grinder: [WORKER_DONE]
+```
+
+**Current behavior**: The loader validates that emission role names exist, and the enforcement mode is stored in the EventStore `team_config` event. But no code path checks whether an agent's emitted signal is in its allowed emissions list. Any role can emit any signal.
+
+**Impact**: Low for permissive mode (which is the current default). Would become important if strict or audit enforcement is needed.
+
+**Where to fix**: `emitStatus()` in `message-router.ts` or the `emit_status` MCP tool in `mcp-server.ts` would need to look up the agent's role and check the emission allowlist. The team config is already in EventStore but would need a retrieval helper.
+
+#### 3. Peer Routing from Config — Not Wired
+
+**Config surface**: `communication.routing.peers` defines directed connections between roles.
+
+```yaml
+routing:
+  peers:
+    - from: judge
+      to: planner
+      via: direct
+      signals: [FIXUP_CREATED, GREEN_SNAPSHOT]
+```
+
+**Current behavior**: `setupPeerSubscriptions()` in `team-runtime.ts:418-427` **ignores** the `routing.peers` config entirely. It hardcodes mutual subtree subscriptions only between root and companion agents. The `via` field (direct/topic/scope) and per-peer `signals` filter are unused.
+
+**Impact**: Medium. Peer routing config is the primary way teams define non-hierarchical communication patterns. Currently, peers only see each other if they're on the same topic or in a parent-child relationship.
+
+**Where to fix**: `TeamRuntime.bootstrap()` should read `manifest.communication.routing.peers`, resolve role names to spawned agent IDs, and set up the appropriate subscriptions based on `via`. For `via: "direct"`, create mutual agent subscriptions. For `via: "topic"`, ensure both are on the named topic. For `via: "scope"`, use scope-based addressing.
+
+#### 4. Enforcement Mode — Stored but Never Applied
+
+**Config surface**: `communication.enforcement: "strict" | "permissive" | "audit"`
+
+**Current behavior**: The enforcement value is stored in the `team_config` EventStore event during `initialize()`. No code ever retrieves it or branches on its value.
+
+**Impact**: Low while using permissive mode (the default). If strict mode is desired (reject messages that violate the topology), this needs implementation.
+
+**Where to fix**: Would require a middleware layer in `sendToAddress()` and `emitStatus()` that checks enforcement mode and validates messages against the topology before routing. Audit mode would log violations without blocking.
+
+#### 5. Wake Logic for Topic-Routed Status — Missing
+
+**Config surface**: Not configurable — this is an internal routing behavior gap.
+
+**Current behavior**: `sendToAddress()` with scope/topic addressing correctly calls `wakeHandler` for each subscriber (lines 506-523). But `routeStatusToTopicSubscribers()` only emits message events — it does **not** call `wakeHandler`. This means status notifications delivered via topic routing won't wake sleeping agents.
+
+Note: `routeStatusToSubtreeSubscribers()` also lacks wake logic, so this is consistent — status routing has never had wake support. Only explicit `sendToAddress()` messages trigger wake.
+
+**Impact**: Medium. In practice, agents that are actively running will see status notifications in their next `check_messages` call. But sleeping/idle agents won't be proactively woken by status events from peers.
+
+**Where to fix**: Add wake logic to `routeStatusToTopicSubscribers()` (and optionally `routeStatusToSubtreeSubscribers()`) that mirrors the pattern in `sendToAddress()` scope handling.
+
+#### 6. Role Channels in Team Config — Underused
+
+**Config surface**: Agents auto-subscribe to `{ type: "role", target: roleName }` channels. `sendToAddress()` supports `{ role: "worker" }` addressing.
+
+**Current behavior**: Role channels work independently of team config. Team YAML defines communication via named `channels` and `subscriptions`, not via role channels. The two systems exist in parallel but are not integrated.
+
+**Impact**: Low. Role channels provide a useful shortcut (`send to all workers`) that works out of the box. Team configs can reference them via `send_message` MCP tool. No integration gap per se, but team config could benefit from a way to express role-based subscriptions directly.
+
+### Summary Matrix
+
+| Feature | Config Loaded | Validated | Runtime Wired | Notes |
+|---------|:---:|:---:|:---:|-------|
+| Channel subscriptions | Yes | Yes | **Yes** | Fully functional via spawn interceptor |
+| Status → subtree routing | N/A | N/A | **Yes** | Core router feature |
+| Status → topic routing | N/A | N/A | **Yes** | Added in post-phase fix |
+| Signal filtering | Yes | Partial | **No** | Signals array loaded but discarded |
+| Emission restrictions | Yes | Partial | **No** | Role names validated, not enforced at emit time |
+| Peer routing from config | Yes | Partial | **No** | Config loaded, `setupPeerSubscriptions()` ignores it |
+| Enforcement mode | Yes | Yes | **No** | Stored in EventStore, never retrieved |
+| Wake on status delivery | N/A | N/A | **No** | Neither subtree nor topic status routing calls wakeHandler |
+| Role channels | N/A | N/A | **Yes** | Works independently of team config |
+
+### Recommended Priority
+
+**Address first** (enables core team interactions):
+1. Peer routing from config — Without this, non-hierarchical communication patterns in team YAML have no effect
+2. Wake logic for status delivery — Ensures sleeping agents respond to lifecycle events
+
+**Address when needed** (enforcement features):
+3. Signal filtering — Reduces noise on high-traffic topics
+4. Emission restrictions + enforcement mode — Required only if moving beyond permissive model
