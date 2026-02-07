@@ -1,0 +1,89 @@
+name: structured
+description: "Hierarchical development with explicit task assignment and merge queue"
+version: 1
+
+roles:
+  - lead
+  - developer
+  - reviewer
+
+topology:
+  root:
+    role: lead
+    prompt: prompts/lead.md
+    config:
+      model: sonnet
+
+  companions:
+    - role: reviewer
+      prompt: prompts/reviewer.md
+      config:
+        model: haiku
+
+  spawn_rules:
+    lead: [developer, lead]
+    reviewer: []
+    developer: []
+
+communication:
+  channels:
+    task_updates:
+      description: "Task lifecycle events"
+      signals: [TASK_CREATED, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED]
+    merge_flow:
+      description: "Merge queue and integration events"
+      signals: [MERGE_REQUEST, MERGE_COMPLETED, MERGE_CONFLICT]
+    review_flow:
+      description: "Code review signals"
+      signals: [REVIEW_REQUESTED, REVIEW_APPROVED, REVIEW_REJECTED]
+
+  subscriptions:
+    lead:
+      - channel: task_updates
+      - channel: merge_flow
+      - channel: review_flow
+        signals: [REVIEW_APPROVED, REVIEW_REJECTED]
+    reviewer:
+      - channel: merge_flow
+        signals: [MERGE_REQUEST]
+      - channel: review_flow
+    developer:
+      - channel: task_updates
+        signals: [TASK_ASSIGNED]
+
+  emissions:
+    lead: [TASK_CREATED, TASK_ASSIGNED]
+    reviewer: [REVIEW_APPROVED, REVIEW_REJECTED]
+    developer: [MERGE_REQUEST, TASK_COMPLETED, TASK_FAILED]
+
+  routing:
+    status: upstream
+    peers:
+      - from: reviewer
+        to: lead
+        via: direct
+        signals: [REVIEW_APPROVED, REVIEW_REJECTED]
+
+  enforcement: permissive
+
+macro_agent:
+  task_assignment:
+    mode: push
+
+  integration:
+    strategy: queue
+    config:
+      require_review: true
+
+  lifecycle:
+    continuations:
+      enabled: false
+    scaling:
+      min_workers: 1
+      max_workers: 10
+      scale_on: manual
+      idle_drain: false
+
+  observability:
+    metrics_window_s: 1800
+    snapshot_interval_s: 600
