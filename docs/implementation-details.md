@@ -1101,14 +1101,27 @@ Phases 2, 3, and 4 can be developed in parallel once Phase 1.3 (TeamRuntime) is 
 
 ---
 
-## Remaining Open Questions
+## Resolved Open Questions
 
-1. **YAML library choice**: The codebase doesn't currently have a YAML parser. Options: `js-yaml` (most common, 6MB), `yaml` (modern, smaller). Need to check if there's a preference. `js-yaml` is the pragmatic default.
+These questions were resolved during spec review. See `docs/spec-self-driving-support.md` for the binding decisions (RD1-RD7).
 
-2. **Git operations for trunk strategy**: Does the codebase have existing git utility functions? If not, we need a thin wrapper. The workspace module may already have some.
+1. **YAML library**: `js-yaml` (RD7).
 
-3. **Optimistic strategy validation**: The `OptimisticIntegrationStrategy` needs a background validation loop. Is this a separate agent? A timer in TeamRuntime? Or is it the judge role's responsibility? Current design says the judge runs build/test periodically — the optimistic strategy just pushes and emits an event. The judge picks it up. This means the optimistic strategy itself is simple (push + emit), and validation is a team-level concern handled by the judge role prompt.
+2. **Git operations for trunk strategy**: Need a thin wrapper around child_process git commands. Check if `src/workspace/` has existing helpers to reuse.
 
-4. **Team template hot-reloading**: Should changes to team.yaml be picked up without restart? Deferred — not needed for Phase 1. The `RoleRegistry` already supports file watching, so this could be added later.
+3. **Optimistic strategy validation**: The strategy is thin — push + emit event. Validation is the judge agent's responsibility via its role prompt (RD5).
 
-5. **Multiple teams**: Can multiple teams be active simultaneously? Deferred — single team focus for now. The architecture supports it (each team would have its own TeamRuntime) but the CLI only accepts one `--team` flag.
+4. **MCP subprocess team context**: Store `team_config` event in EventStore. MCP subprocess reads it to reconstruct strategy and taskMode (RD2). No HTTP API between processes.
+
+5. **Team selection**: Via `.macro-agent/config.json` (new file), CLI `--team` overrides (RD6).
+
+6. **spawn_rules vs capabilities**: spawn_rules are syntactic sugar — TeamLoader translates them into capability additions (RD3).
+
+7. **Team prompt vs base role prompt**: Team prompt replaces base systemPrompt entirely (RD4).
+
+8. **done() hardcoded roles**: Must be fixed as prerequisite (RD1). Replace with RoleRegistry lookup.
+
+### Deferred
+
+- **Team template hot-reloading**: Not needed for Phase 1. The `RoleRegistry` already supports file watching, so this could be added later.
+- **Multiple simultaneous teams**: Single team focus for now. Architecture supports it but CLI only accepts one `--team` flag.
