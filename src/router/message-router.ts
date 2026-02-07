@@ -943,15 +943,20 @@ export function createMessageRouter(
       },
     });
 
-    // Route to subtree subscribers
-    routeStatusToSubtreeSubscribers(from.agent_id, {
+    const statusNotification: StatusNotification = {
       agent_id: from.agent_id,
       task_id: from.task_id,
       status_type,
       summary,
       details,
       timestamp: event.timestamp,
-    });
+    };
+
+    // Route to subtree subscribers (hierarchical: parents/ancestors)
+    const subtreeRecipients = routeStatusToSubtreeSubscribers(from.agent_id, statusNotification);
+
+    // Route to topic co-subscribers (non-hierarchical: peers sharing topics)
+    routeStatusToTopicSubscribers(from.agent_id, statusNotification, subtreeRecipients);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1088,13 +1093,15 @@ export function createMessageRouter(
   /**
    * Route status event to subtree subscribers.
    * Parents who have subscribed to an agent's subtree receive status notifications.
+   * Returns the set of agents that were notified (for dedup with topic routing).
    */
   function routeStatusToSubtreeSubscribers(
     agentId: AgentId,
     status: StatusNotification
-  ): void {
+  ): Set<AgentId> {
+    const notified = new Set<AgentId>();
     const agent = eventStore.getAgent(agentId);
-    if (!agent) return;
+    if (!agent) return notified;
 
     // Find all agents with subtree subscription that includes this agent
     // This includes:
@@ -1149,6 +1156,69 @@ export function createMessageRouter(
         payload: {
           content: statusContent,
           via: "subtree",
+        },
+      });
+
+      notified.add(subscriberId);
+    }
+
+    return notified;
+  }
+
+  /**
+   * Route status event to topic co-subscribers.
+   * Agents sharing topic subscriptions with the emitting agent receive status notifications.
+   * This enables non-hierarchical visibility: peers on the same topic see each other's status.
+   * Skips agents already notified via subtree routing to avoid duplicates.
+   */
+  function routeStatusToTopicSubscribers(
+    agentId: AgentId,
+    status: StatusNotification,
+    alreadyNotified: Set<AgentId>
+  ): void {
+    // Find all topics the emitting agent is subscribed to
+    const subscriptions = eventStore.getSubscriptions(agentId);
+    const topicSubscriptions = subscriptions.filter(
+      (s) => s.type === "topic"
+    );
+
+    if (topicSubscriptions.length === 0) return;
+
+    // Collect unique recipients across all shared topics
+    const topicRecipients = new Set<AgentId>();
+    for (const sub of topicSubscriptions) {
+      const subscribers = eventStore.getSubscribers({
+        type: "topic",
+        target: sub.target,
+      });
+      for (const subscriberId of subscribers) {
+        // Skip self and already-notified (from subtree routing)
+        if (subscriberId !== agentId && !alreadyNotified.has(subscriberId)) {
+          topicRecipients.add(subscriberId);
+        }
+      }
+    }
+
+    if (topicRecipients.size === 0) return;
+
+    const statusContent = JSON.stringify({
+      type: "status_notification",
+      ...status,
+    });
+
+    // Deliver to each topic co-subscriber
+    for (const recipientId of topicRecipients) {
+      eventStore.emit({
+        type: "message",
+        source: {
+          agent_id: agentId,
+        },
+        target: {
+          agent_id: recipientId,
+        },
+        payload: {
+          content: statusContent,
+          via: "topic",
         },
       });
     }

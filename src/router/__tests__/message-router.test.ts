@@ -452,6 +452,159 @@ describe("MessageRouter", () => {
       expect(parsed.status_type).toBe("failed");
       expect(parsed.details.error).toBe("Connection timeout");
     });
+
+    it("should route status to topic co-subscribers", () => {
+      // Two peer agents (no parent-child relationship) sharing a topic
+      createAgent("worker_a");
+      createAgent("worker_b");
+
+      router.subscribe("worker_a", { type: "topic", target: "work_coordination" });
+      router.subscribe("worker_b", { type: "topic", target: "work_coordination" });
+
+      // worker_a emits a status
+      router.emitStatus({
+        from: { agent_id: "worker_a" },
+        status_type: "completed",
+        summary: "Task A done",
+      });
+
+      // worker_b should receive the notification via topic routing
+      const messages = router.getMessages("worker_b");
+      const statusMsg = messages.find((m) =>
+        m.content.includes("status_notification")
+      );
+      expect(statusMsg).toBeDefined();
+
+      const parsed = JSON.parse(statusMsg!.content);
+      expect(parsed.status_type).toBe("completed");
+      expect(parsed.summary).toBe("Task A done");
+    });
+
+    it("should not send topic status to self", () => {
+      createAgent("worker_a");
+
+      router.subscribe("worker_a", { type: "topic", target: "work_coordination" });
+
+      router.emitStatus({
+        from: { agent_id: "worker_a" },
+        status_type: "checkpoint",
+        summary: "Progress",
+      });
+
+      // worker_a should NOT receive a notification about its own status
+      const messages = router.getMessages("worker_a");
+      const statusMsgs = messages.filter((m) =>
+        m.content.includes("status_notification")
+      );
+      expect(statusMsgs).toHaveLength(0);
+    });
+
+    it("should not duplicate delivery to agents already notified via subtree", () => {
+      // manager_1 is parent of worker_1, AND both share a topic
+      createAgent("manager_1");
+      createAgent("worker_1", "manager_1");
+
+      // Set up subtree subscription (parent subscribes to child)
+      router.setupDefaultSubscriptions({
+        agent_id: "worker_1",
+        parent_id: "manager_1",
+      });
+
+      // Also subscribe both to a shared topic
+      router.subscribe("manager_1", { type: "topic", target: "task_updates" });
+      router.subscribe("worker_1", { type: "topic", target: "task_updates" });
+
+      router.emitStatus({
+        from: { agent_id: "worker_1" },
+        status_type: "completed",
+        summary: "Done",
+      });
+
+      // manager_1 should receive exactly ONE notification (via subtree, not duplicated by topic)
+      const messages = router.getMessages("manager_1");
+      const statusMsgs = messages.filter((m) =>
+        m.content.includes("status_notification")
+      );
+      expect(statusMsgs).toHaveLength(1);
+    });
+
+    it("should route status to multiple topic co-subscribers", () => {
+      createAgent("worker_a");
+      createAgent("worker_b");
+      createAgent("monitor_1");
+
+      // All three share the health topic
+      router.subscribe("worker_a", { type: "topic", target: "health" });
+      router.subscribe("worker_b", { type: "topic", target: "health" });
+      router.subscribe("monitor_1", { type: "topic", target: "health" });
+
+      router.emitStatus({
+        from: { agent_id: "worker_a" },
+        status_type: "checkpoint",
+        summary: "Health OK",
+      });
+
+      // Both worker_b and monitor_1 should receive it
+      for (const recipientId of ["worker_b", "monitor_1"]) {
+        const messages = router.getMessages(recipientId);
+        const statusMsg = messages.find((m) =>
+          m.content.includes("status_notification")
+        );
+        expect(statusMsg).toBeDefined();
+        const parsed = JSON.parse(statusMsg!.content);
+        expect(parsed.summary).toBe("Health OK");
+      }
+
+      // worker_a should NOT receive it
+      const selfMessages = router.getMessages("worker_a");
+      expect(
+        selfMessages.filter((m) => m.content.includes("status_notification"))
+      ).toHaveLength(0);
+    });
+
+    it("should not route to topic subscribers when agent has no topic subscriptions", () => {
+      // worker_a has no topic subs, worker_b has a topic sub
+      createAgent("worker_a");
+      createAgent("worker_b");
+
+      router.subscribe("worker_b", { type: "topic", target: "work_coordination" });
+
+      router.emitStatus({
+        from: { agent_id: "worker_a" },
+        status_type: "completed",
+        summary: "Done",
+      });
+
+      // worker_b should NOT receive anything (worker_a isn't on the topic)
+      const messages = router.getMessages("worker_b");
+      expect(
+        messages.filter((m) => m.content.includes("status_notification"))
+      ).toHaveLength(0);
+    });
+
+    it("should deduplicate across multiple shared topics", () => {
+      // Two agents sharing two different topics
+      createAgent("worker_a");
+      createAgent("worker_b");
+
+      router.subscribe("worker_a", { type: "topic", target: "work_coordination" });
+      router.subscribe("worker_a", { type: "topic", target: "task_updates" });
+      router.subscribe("worker_b", { type: "topic", target: "work_coordination" });
+      router.subscribe("worker_b", { type: "topic", target: "task_updates" });
+
+      router.emitStatus({
+        from: { agent_id: "worker_a" },
+        status_type: "completed",
+        summary: "Done",
+      });
+
+      // worker_b should receive exactly ONE notification, not two
+      const messages = router.getMessages("worker_b");
+      const statusMsgs = messages.filter((m) =>
+        m.content.includes("status_notification")
+      );
+      expect(statusMsgs).toHaveLength(1);
+    });
   });
 
   // Note: Lineage routing tests removed - feature only implemented in deprecated send()
