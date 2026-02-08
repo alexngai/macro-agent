@@ -42,6 +42,8 @@ import type {
   TurnChangeCallback,
   ConversationType,
   ConversationStatus,
+  Session,
+  SessionState,
 } from './types/index.js';
 import { CURRENT_EVENT_VERSION } from './types/events.js';
 import { migrateEvent } from './migrations.js';
@@ -102,6 +104,7 @@ function createBetterSqlite3Persister(
 export type AgentChangeCallback = (agentId: AgentId, agent: Agent | null) => void;
 export type TaskChangeCallback = (taskId: TaskId, task: Task | null) => void;
 export type MessageCallback = (agentId: AgentId, messages: QueuedMessage[]) => void;
+export type SessionChangeCallback = (sessionId: string, session: Session | null) => void;
 
 // Unsubscribe function type
 export type Unsubscribe = () => void;
@@ -173,6 +176,10 @@ export interface EventStore {
   getSubscriptions(agentId: AgentId): Subscription[];
   getSubscribers(subscription: Subscription): AgentId[];
 
+  // Session views
+  getSession(sessionId: string): Session | null;
+  listSessions(filter?: { state?: SessionState; agent_id?: AgentId }): Session[];
+
   // Conversation views
   getConversation(conversationId: string): Conversation | null;
   listConversations(filter?: ConversationFilter): Conversation[];
@@ -184,6 +191,7 @@ export interface EventStore {
   onAgentChange(agentId: AgentId, callback: AgentChangeCallback): Unsubscribe;
   onTaskChange(callback: TaskChangeCallback): Unsubscribe;
   onMessageChange(agentId: AgentId, callback: MessageCallback): Unsubscribe;
+  onSessionChange(callback: SessionChangeCallback): Unsubscribe;
   onConversationChange(callback: ConversationChangeCallback): Unsubscribe;
   onTurnChange(callback: TurnChangeCallback): Unsubscribe;
 
@@ -325,6 +333,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   const agentListeners = new Set<AgentChangeCallback>();
   const agentIdListeners = new Map<AgentId, Set<AgentChangeCallback>>();
   const taskListeners = new Set<TaskChangeCallback>();
+  const sessionListeners = new Set<SessionChangeCallback>();
   const messageListeners = new Map<AgentId, Set<MessageCallback>>();
   const conversationListeners = new Set<ConversationChangeCallback>();
   const turnListeners = new Set<TurnChangeCallback>();
@@ -354,7 +363,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     });
 
     // Update materialized views
-    applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifyConversationChange, notifyTurnChange);
+    applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifySessionChange, notifyConversationChange, notifyTurnChange);
 
     return event;
   }
@@ -692,6 +701,52 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   function onTurnChange(callback: TurnChangeCallback): Unsubscribe {
     turnListeners.add(callback);
     return () => turnListeners.delete(callback);
+  }
+
+  // ─── Session View Queries ───
+
+  function getSession(sessionId: string): Session | null {
+    const row = store.getRow('sessions', sessionId);
+    if (!row.id) return null;
+    return rowToSession(row);
+  }
+
+  function listSessions(filter?: { state?: SessionState; agent_id?: AgentId }): Session[] {
+    const sessions: Session[] = [];
+    const rowIds = store.getRowIds('sessions');
+
+    for (const rowId of rowIds) {
+      const row = store.getRow('sessions', rowId);
+      if (!row.id) continue;
+
+      const session = rowToSession(row);
+
+      if (filter) {
+        if (filter.state && session.state !== filter.state) continue;
+        if (filter.agent_id && session.current_agent_id !== filter.agent_id && session.head_manager_id !== filter.agent_id) continue;
+      }
+
+      sessions.push(session);
+    }
+
+    return sessions;
+  }
+
+  /**
+   * Notify session change listeners
+   */
+  function notifySessionChange(sessionId: string, session: Session | null): void {
+    for (const callback of sessionListeners) {
+      callback(sessionId, session);
+    }
+  }
+
+  /**
+   * Subscribe to session changes
+   */
+  function onSessionChange(callback: SessionChangeCallback): Unsubscribe {
+    sessionListeners.add(callback);
+    return () => sessionListeners.delete(callback);
   }
 
   // ─── Conversation View Queries ───
@@ -1048,7 +1103,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       });
 
       // Update materialized views
-      applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifyConversationChange, notifyTurnChange);
+      applyEventToViews(store, event, notifyAgentChange, notifyTaskChange, notifyMessageChange, notifySessionChange, notifyConversationChange, notifyTurnChange);
     }
   }
 
@@ -1094,6 +1149,8 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     listTasks,
     getMessages,
     getFullMessage,
+    getSession,
+    listSessions,
     getConversation,
     listConversations,
     listTurns,
@@ -1109,6 +1166,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     onAgentChange,
     onTaskChange,
     onMessageChange,
+    onSessionChange,
     onConversationChange,
     onTurnChange,
 
@@ -1142,6 +1200,7 @@ function initializeTables(store: Store): void {
   store.getRowIds('tasks');
   store.getRowIds('messages');
   store.getRowIds('subscriptions');
+  store.getRowIds('sessions');
   store.getRowIds('conversations');
   store.getRowIds('turns');
   store.getRowIds('threads');
@@ -1161,6 +1220,9 @@ function rebuildViews(store: Store): void {
   }
   for (const rowId of store.getRowIds('messages')) {
     store.delRow('messages', rowId);
+  }
+  for (const rowId of store.getRowIds('sessions')) {
+    store.delRow('sessions', rowId);
   }
   for (const rowId of store.getRowIds('conversations')) {
     store.delRow('conversations', rowId);
@@ -1202,7 +1264,7 @@ function rebuildViews(store: Store): void {
   // Apply each event (no-op callbacks since we're rebuilding)
   const noop = () => {};
   for (const event of events) {
-    applyEventToViews(store, event, noop, noop, noop, noop, noop);
+    applyEventToViews(store, event, noop, noop, noop, noop, noop, noop);
   }
 }
 
@@ -1215,6 +1277,7 @@ function applyEventToViews(
   notifyAgentChange: (agentId: AgentId, agent: Agent | null) => void,
   notifyTaskChange: (taskId: TaskId, task: Task | null) => void,
   notifyMessageChange: (agentId: AgentId) => void,
+  notifySessionChange: (sessionId: string, session: Session | null) => void,
   notifyConversationChange: (conversationId: string, conversation: Conversation | null) => void,
   notifyTurnChange: (conversationId: string, turn: ConversationTurn) => void,
 ): void {
@@ -1233,6 +1296,9 @@ function applyEventToViews(
       break;
     case 'task':
       applyTaskEvent(store, event, notifyTaskChange);
+      break;
+    case 'session':
+      applySessionEvent(store, event, notifySessionChange);
       break;
     case 'conversation':
       applyConversationEvent(store, event, notifyConversationChange);
@@ -1668,6 +1734,88 @@ function rowToTask(row: Record<string, unknown>): Task {
     agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
     retryPolicy: row.retry_policy ? JSON.parse(row.retry_policy as string) : undefined,
     retryState: row.retry_state ? JSON.parse(row.retry_state as string) : undefined,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session Event Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Apply session event to sessions view
+ */
+function applySessionEvent(
+  store: Store,
+  event: Event,
+  notify: (sessionId: string, session: Session | null) => void,
+): void {
+  const payload = event.payload as {
+    action: string;
+    session_id: string;
+    head_manager_id?: AgentId;
+    agent_id?: AgentId;
+    target_agent_id?: AgentId;
+    previous_agent_id?: AgentId;
+  };
+
+  const sessionId = payload.session_id;
+
+  switch (payload.action) {
+    case 'created': {
+      store.setRow('sessions', sessionId, {
+        id: sessionId,
+        head_manager_id: payload.head_manager_id ?? '',
+        current_agent_id: payload.head_manager_id ?? '',
+        state: 'active',
+        created_at: event.timestamp,
+        updated_at: event.timestamp,
+        closed_at: 0,
+      });
+      break;
+    }
+    case 'mounted': {
+      store.setPartialRow('sessions', sessionId, {
+        current_agent_id: payload.target_agent_id ?? '',
+        state: 'mounted',
+        updated_at: event.timestamp,
+      });
+      break;
+    }
+    case 'unmounted': {
+      const existing = store.getRow('sessions', sessionId);
+      store.setPartialRow('sessions', sessionId, {
+        current_agent_id: existing.head_manager_id as string,
+        state: 'active',
+        updated_at: event.timestamp,
+      });
+      break;
+    }
+    case 'closed': {
+      store.setPartialRow('sessions', sessionId, {
+        state: 'closed',
+        updated_at: event.timestamp,
+        closed_at: event.timestamp,
+      });
+      break;
+    }
+  }
+
+  const session = rowToSession(store.getRow('sessions', sessionId));
+  notify(sessionId, session);
+}
+
+/**
+ * Convert a TinyBase row to a Session object
+ */
+function rowToSession(row: Record<string, unknown>): Session {
+  return {
+    id: row.id as string,
+    head_manager_id: row.head_manager_id as AgentId,
+    current_agent_id: row.current_agent_id as AgentId,
+    state: row.state as SessionState,
+    created_at: row.created_at as Timestamp,
+    updated_at: row.updated_at as Timestamp,
+    closed_at: (row.closed_at as number) || undefined,
   };
 }
 

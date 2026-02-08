@@ -20,7 +20,8 @@ export type EventType =
   | "peer_request"
   | "conversation"
   | "turn"
-  | "thread";
+  | "thread"
+  | "session";
 
 // Status types for status events
 export type StatusType =
