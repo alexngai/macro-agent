@@ -6,14 +6,19 @@ A multi-agent orchestration system for spawning and managing hierarchical Claude
 
 - **Hierarchical Agent Management** - Head manager spawns and coordinates child agents
 - **Role-Based Agents** - Worker, Integrator, Coordinator, and Monitor roles with distinct capabilities
+- **Team Templates** - Declarative YAML-based team configurations for multi-agent topologies
+- **Pluggable Integration Strategies** - Queue, trunk, or optimistic merge strategies
 - **Workspace Isolation** - Each worker gets isolated git worktrees to prevent conflicts
 - **Merge Queue** - Serialized integration of worker changes with conflict resolution
 - **Event-Sourced State** - All state changes persisted via append-only event log
 - **Real-time Communication** - WebSocket subscriptions for live updates
 - **MCP Tool Integration** - Agents communicate via Model Context Protocol tools
-- **Task Lifecycle** - Create, assign, and track tasks across agents
-- **Message Routing** - Direct, broadcast, and role-based message delivery with priority
+- **Task Lifecycle** - Create, assign, and track tasks with push or pull models
+- **Message Routing** - Direct, broadcast, role-based, and topic-based message delivery with priority
+- **Signal Filtering** - Per-role and per-peer signal filtering for status notifications
 - **Context Injection** - Push context into running agents without waiting for message checks
+- **Session Continuations** - Auto-resume long-running agents across process restarts
+- **Observability** - Throughput, utilization, and error metrics via REST API
 - **Sudocode Integration** - Optional issue tracking with dependency management
 
 ## Sudocode Integration
@@ -37,6 +42,44 @@ With sudocode enabled:
 
 See [docs/sudocode-integration.md](docs/sudocode-integration.md) for full documentation.
 
+## Team Templates
+
+Teams define multi-agent topologies as YAML configuration. A team template specifies which roles to spawn, how they communicate, and what integration strategy to use.
+
+```bash
+# Start with a team template
+npx multiagent --team self-driving
+
+# Or set in project config (.macro-agent/config.json)
+echo '{ "team": "self-driving" }' > .macro-agent/config.json
+npx multiagent
+```
+
+Teams are stored in `.macro-agent/teams/<name>/`:
+
+```
+.macro-agent/teams/self-driving/
+├── team.yaml          # Team manifest (topology, communication, strategy)
+├── roles/
+│   ├── planner.yaml   # Custom role (extends coordinator)
+│   ├── grinder.yaml   # Custom role (extends worker)
+│   └── judge.yaml     # Custom role (extends monitor)
+└── prompts/
+    ├── planner.md     # Role-specific system prompt
+    ├── grinder.md
+    └── judge.md
+```
+
+Key team features:
+- **Topology**: Root + companion agents spawned at bootstrap, with spawn rules for dynamic workers
+- **Communication**: Topic-based channels with per-role signal filtering, peer-to-peer routing
+- **Integration strategies**: `queue` (merge queue), `trunk` (direct push with rebase), `optimistic` (push + validation)
+- **Task modes**: `push` (coordinator assigns) or `pull` (agents claim from pool)
+- **Enforcement**: `strict` (reject violations), `permissive` (warn), or `audit` (record)
+- **Session continuations**: Auto-resume daemon agents on unexpected stops
+
+See [docs/teams.md](docs/teams.md) for the full schema reference and [docs/team-templates.md](docs/team-templates.md) for examples.
+
 ## Installation
 
 ```bash
@@ -50,6 +93,9 @@ npm install macro-agent
 ```bash
 # Start full server with ACP + MAP + REST API
 npx multiagent
+
+# Start with a team template
+npx multiagent --team self-driving
 
 # Custom port and host
 npx multiagent --port 8080 --host 0.0.0.0
@@ -224,6 +270,10 @@ Fallback chain: `inject()` → `interruptWith()` → high-priority message
 | `/api/events` | GET | List events |
 | `/api/conversation/message` | POST | Send message |
 | `/api/conversation/history` | GET | Get history |
+| `/api/team` | GET | Active team info |
+| `/api/metrics/throughput` | GET | Task completion rates |
+| `/api/metrics/utilization` | GET | Agent counts by role/state |
+| `/api/metrics/errors` | GET | Error tracking |
 
 ### WebSocket Channels
 
@@ -237,7 +287,7 @@ Fallback chain: `inject()` → `interruptWith()` → high-priority message
 | Tool | Description |
 |------|-------------|
 | `spawn_agent` | Spawn a child agent |
-| `emit_status` | Report status to parent |
+| `emit_status` | Report status (with signal filtering and emission validation) |
 | `send_message` | Send message to another agent |
 | `check_messages` | Check message inbox |
 | `get_hierarchy` | View agent tree |
@@ -246,6 +296,9 @@ Fallback chain: `inject()` → `interruptWith()` → high-priority message
 | `create_task` | Create a new task |
 | `get_task` | Get task details |
 | `list_ready_tasks` | List tasks with no blockers |
+| `claim_task` | Claim next available task (pull mode) |
+| `unclaim_task` | Return claimed task to pool (pull mode) |
+| `list_claimable_tasks` | List claimable tasks (pull mode) |
 | `done` | Signal task completion (role-specific) |
 | `inject_context` | Inject context into another agent |
 | `wait_for_activity` | Wait for system events (Monitor) |
@@ -279,6 +332,7 @@ npx multiagent --acp --cwd /path/to/project
 | `--port <port>` | Server port (default: 3001) |
 | `--host <host>` | Server host (default: localhost) |
 | `--cwd <path>` | Working directory for agents |
+| `--team <name>` | Load team template from `.macro-agent/teams/<name>/` |
 | `--acp` | Stdio ACP-only mode (for embedded use with acp-factory) |
 
 ### Multi-Client Architecture
@@ -344,6 +398,7 @@ multiagent [options]          Start the agent server (full mode by default)
   --port <port>               Port (default: 3001)
   --host <host>               Host (default: localhost)
   --cwd <path>                Working directory
+  --team <name>               Load team template
   --acp                       Stdio ACP-only mode (for acp-factory)
 ```
 
@@ -397,6 +452,8 @@ RUN_E2E_TESTS=true ANTHROPIC_API_KEY=xxx npm run test:e2e
 
 - [Architecture Overview](docs/architecture.md) - Full system architecture
 - [Configuration Reference](docs/configuration.md) - Environment variables and config options
+- [Team Templates](docs/team-templates.md) - Team template format and examples
+- [Team Schema Reference](docs/teams.md) - Full YAML schema reference
 - [Sudocode Integration](docs/sudocode-integration.md) - External issue tracking
 - [Troubleshooting Guide](docs/troubleshooting.md) - Common issues and solutions
 
