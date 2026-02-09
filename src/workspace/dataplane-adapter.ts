@@ -29,7 +29,7 @@ import {
   type Checkpoint,
   workerTasks,
   diffStacks,
-} from 'dataplane';
+} from 'git-cascade';
 import type { DataplaneConfig } from './config.js';
 import { DEFAULT_DATAPLANE_CONFIG } from './config.js';
 

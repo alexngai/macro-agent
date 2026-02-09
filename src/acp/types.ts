@@ -606,6 +606,35 @@ export interface CancelPermissionResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/resume
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/resume extension
+ *
+ * Resumes a stopped/failed agent by spawning a new process and
+ * loading the existing session. Called on the head manager's ACP stream.
+ */
+export interface ResumeAgentRequest {
+  /** Agent ID to resume */
+  agentId: AgentId;
+}
+
+/**
+ * Response for _macro/resume extension
+ */
+export interface ResumeAgentResponse {
+  /** Whether the resume was successful */
+  success: boolean;
+
+  /** The resumed agent's ID */
+  agentId: AgentId;
+
+  /** The agent's session ID */
+  sessionId: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Extension Method Types (Union)
 // ─────────────────────────────────────────────────────────────────
 
@@ -627,7 +656,8 @@ export type ACPExtensionMethod =
   | "_macro/getCapabilities"
   | "_macro/checkCapability"
   | "_macro/respondToPermission"
-  | "_macro/cancelPermission";
+  | "_macro/cancelPermission"
+  | "_macro/resume";
 
 /**
  * Map of extension methods to their request types
@@ -648,6 +678,7 @@ export interface ACPExtensionRequests {
   "_macro/checkCapability": CheckCapabilityRequest;
   "_macro/respondToPermission": RespondToPermissionRequest;
   "_macro/cancelPermission": CancelPermissionRequest;
+  "_macro/resume": ResumeAgentRequest;
 }
 
 /**
@@ -669,6 +700,7 @@ export interface ACPExtensionResponses {
   "_macro/checkCapability": CheckCapabilityResponse;
   "_macro/respondToPermission": RespondToPermissionResponse;
   "_macro/cancelPermission": CancelPermissionResponse;
+  "_macro/resume": ResumeAgentResponse;
 }
 
 // ─────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
  * @implements [[s-7ktd]] WorkspaceManager API section
  */
 
-import type { Stream, WorkerTask, StartTaskResult, AgentWorktree, CleanupWorkerBranchesOptions, CleanupResult } from 'dataplane';
+import type { Stream, WorkerTask, StartTaskResult, AgentWorktree, CleanupWorkerBranchesOptions, CleanupResult } from 'git-cascade';
 import { DataplaneAdapter } from './dataplane-adapter.js';
 import type { DataplaneConfig, WorktreePoolConfig } from './config.js';
 import { DEFAULT_POOL_CONFIG } from './config.js';

@@ -5,7 +5,7 @@
 import type { AgentId, SessionId, TaskId, Timestamp } from "./primitives.js";
 
 // Agent states
-export type AgentState = "spawning" | "running" | "stopped";
+export type AgentState = "spawning" | "running" | "stopped" | "failed";
 
 export type StopReason =
   | "completed"

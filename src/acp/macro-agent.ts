@@ -61,6 +61,8 @@ import type {
   RespondToPermissionResponse,
   CancelPermissionRequest,
   CancelPermissionResponse,
+  ResumeAgentRequest,
+  ResumeAgentResponse,
 } from "./types.js";
 import { ACPError } from "./types.js";
 import type { PeerManager } from "../peer/peer-manager.js";
@@ -92,6 +94,7 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/checkCapability",
   "_macro/respondToPermission",
   "_macro/cancelPermission",
+  "_macro/resume",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -237,8 +240,24 @@ export class MacroAgent implements Agent {
    * Load an existing session from EventStore
    */
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const acpSessionId = params.sessionId;
+    let acpSessionId = params.sessionId;
     const cwd = params.cwd ?? this.defaultCwd;
+
+    // Extension: If _meta.agentId provided, look up session from agent record
+    // This allows resuming a stopped head manager by MAP agent ID
+    // when the TUI doesn't know the ACP session ID
+    const metaAgentId = (params as { _meta?: Record<string, unknown> })._meta
+      ?.agentId as string | undefined;
+    if (metaAgentId) {
+      const agent = this.eventStore.getAgent(metaAgentId as AgentId);
+      if (!agent) {
+        throw new Error(`Agent not found: ${metaAgentId}`);
+      }
+      acpSessionId = agent.session_id;
+      console.log(
+        `[MacroAgent] loadSession: Resolved agentId ${metaAgentId} to session ${acpSessionId}`
+      );
+    }
 
     // Try to find an existing head manager with this session ID
     const headManagers = this.agentManager.listHeadManagers();
@@ -348,8 +367,8 @@ export class MacroAgent implements Agent {
       await this.connection.sessionUpdate({
         sessionId: acpSessionId,
         update: {
-          type: "agent_message_chunk",
-          textChunk: `Error: ${errorMessage}`,
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `Error: ${errorMessage}` },
         },
       });
 
@@ -487,6 +506,11 @@ export class MacroAgent implements Agent {
       case "_macro/cancelPermission":
         return this.handleCancelPermission(
           params as unknown as CancelPermissionRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/resume":
+        return this.handleResumeAgent(
+          params as unknown as ResumeAgentRequest
         ) as unknown as Record<string, unknown>;
 
       default:
@@ -1097,6 +1121,42 @@ export class MacroAgent implements Agent {
     }
   }
 
+  /**
+   * Resume a stopped/failed agent
+   */
+  private async handleResumeAgent(
+    params: ResumeAgentRequest
+  ): Promise<ResumeAgentResponse> {
+    const { agentId } = params;
+
+    if (!agentId) {
+      throw new ACPError("agentId is required", "INVALID_EXTENSION");
+    }
+
+    // Verify agent exists
+    const agent = this.eventStore.getAgent(agentId);
+    if (!agent) {
+      throw new ACPError(`Agent not found: ${agentId}`, "AGENT_NOT_FOUND");
+    }
+
+    // Only resume stopped/failed agents
+    if (agent.state !== "stopped" && agent.state !== "failed") {
+      throw new ACPError(
+        `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`,
+        "INVALID_EXTENSION"
+      );
+    }
+
+    console.log(`[MacroAgent] Resuming agent ${agentId}`);
+    const spawned = await this.agentManager.resume(agentId);
+
+    return {
+      success: true,
+      agentId: spawned.id,
+      sessionId: spawned.session_id,
+    };
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Helper Methods
   // ─────────────────────────────────────────────────────────────────
@@ -1229,10 +1289,14 @@ export class MacroAgent implements Agent {
             toolCall: {
               toolCallId: permReq.toolCall.toolCallId,
               title: permReq.toolCall.title,
-              status: permReq.toolCall.status,
+              status: permReq.toolCall.status as "pending" | "in_progress" | "completed" | "failed" | undefined,
               rawInput: permReq.toolCall.rawInput,
             },
-            options: permReq.options,
+            options: permReq.options as Array<{
+              kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+              name: string;
+              optionId: string;
+            }>,
           });
 
           // Forward the response back to the sub-agent via agentManager
@@ -1288,7 +1352,7 @@ export class MacroAgent implements Agent {
     try {
       await this.connection.sessionUpdate({
         sessionId: acpSessionId,
-        update: sessionUpdate,
+        update: sessionUpdate as Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"],
       });
     } catch (err) {
       console.error(

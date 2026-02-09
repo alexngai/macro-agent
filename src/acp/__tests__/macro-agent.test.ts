@@ -154,6 +154,9 @@ describe("MacroAgent", () => {
       expect(response.agentCapabilities?._meta?.extensions).toContain(
         "_macro/spawnAgent"
       );
+      expect(response.agentCapabilities?._meta?.extensions).toContain(
+        "_macro/resume"
+      );
       expect(response.agentCapabilities?._meta?.agentType).toBe("macro-agent");
     });
 
@@ -867,6 +870,98 @@ describe("MacroAgent", () => {
         success: false,
         error: expect.stringContaining("Failed to cancel permission"),
       });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // _macro/resume Tests
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("_macro/resume", () => {
+    it("should resume a stopped agent", async () => {
+      const stoppedAgent = createMockAgent({
+        id: "agent-stopped",
+        state: "stopped",
+        session_id: "session-stopped",
+      });
+      vi.mocked(mockEventStore.getAgent).mockReturnValue(stoppedAgent);
+      vi.mocked(mockAgentManager.resume).mockResolvedValue({
+        id: "agent-stopped",
+        session_id: "session-stopped",
+        agent: stoppedAgent,
+        session: {},
+      } as any);
+
+      const result = await macroAgent.extMethod("_macro/resume", {
+        agentId: "agent-stopped",
+      });
+
+      expect(mockAgentManager.resume).toHaveBeenCalledWith("agent-stopped");
+      expect(result).toEqual({
+        success: true,
+        agentId: "agent-stopped",
+        sessionId: "session-stopped",
+      });
+    });
+
+    it("should resume a failed agent", async () => {
+      const failedAgent = createMockAgent({
+        id: "agent-failed",
+        state: "failed",
+        session_id: "session-failed",
+      });
+      vi.mocked(mockEventStore.getAgent).mockReturnValue(failedAgent);
+      vi.mocked(mockAgentManager.resume).mockResolvedValue({
+        id: "agent-failed",
+        session_id: "session-failed",
+        agent: failedAgent,
+        session: {},
+      } as any);
+
+      const result = await macroAgent.extMethod("_macro/resume", {
+        agentId: "agent-failed",
+      });
+
+      expect(mockAgentManager.resume).toHaveBeenCalledWith("agent-failed");
+      expect(result).toHaveProperty("success", true);
+    });
+
+    it("should throw for missing agentId", async () => {
+      await expect(
+        macroAgent.extMethod("_macro/resume", {})
+      ).rejects.toThrow("agentId is required");
+    });
+
+    it("should throw for non-existent agent", async () => {
+      vi.mocked(mockEventStore.getAgent).mockReturnValue(undefined as any);
+
+      await expect(
+        macroAgent.extMethod("_macro/resume", { agentId: "missing" })
+      ).rejects.toThrow("Agent not found");
+    });
+
+    it("should throw for running agent", async () => {
+      const runningAgent = createMockAgent({
+        id: "agent-running",
+        state: "running",
+      });
+      vi.mocked(mockEventStore.getAgent).mockReturnValue(runningAgent);
+
+      await expect(
+        macroAgent.extMethod("_macro/resume", { agentId: "agent-running" })
+      ).rejects.toThrow("only stopped or failed");
+    });
+
+    it("should throw for sleeping agent", async () => {
+      const sleepingAgent = createMockAgent({
+        id: "agent-sleeping",
+        state: "sleeping",
+      });
+      vi.mocked(mockEventStore.getAgent).mockReturnValue(sleepingAgent);
+
+      await expect(
+        macroAgent.extMethod("_macro/resume", { agentId: "agent-sleeping" })
+      ).rejects.toThrow("only stopped or failed");
     });
   });
 

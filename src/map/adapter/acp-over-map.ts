@@ -235,9 +235,27 @@ export class ACPOverMAPHandler {
       throw new Error("Must call initialize before loadSession");
     }
 
-    const { sessionId, cwd } = (params as { sessionId: string; cwd?: string }) ?? {};
-    if (!sessionId) {
+    const { sessionId: rawSessionId, cwd, _meta } = (params as {
+      sessionId: string;
+      cwd?: string;
+      _meta?: Record<string, unknown>;
+    }) ?? {};
+    if (!rawSessionId) {
       throw new Error("sessionId required");
+    }
+
+    // Extension: If _meta.agentId provided, look up session from agent record
+    let sessionId = rawSessionId;
+    const metaAgentId = _meta?.agentId as string | undefined;
+    if (metaAgentId) {
+      const agent = this.eventStore.getAgent(metaAgentId as AgentId);
+      if (!agent) {
+        throw new Error(`Agent not found: ${metaAgentId}`);
+      }
+      sessionId = agent.session_id;
+      console.error(
+        `[ACP-over-MAP] loadSession: Resolved agentId ${metaAgentId} to session ${sessionId}`
+      );
     }
 
     const workingDir = cwd ?? this.defaultCwd;
@@ -482,6 +500,31 @@ export class ACPOverMAPHandler {
         const { taskId } = methodParams as { taskId: string };
         const task = await this.taskManager.get(taskId);
         return { task };
+      }
+
+      case "_macro/resume": {
+        const { agentId } = methodParams as { agentId: string };
+        if (!agentId) {
+          throw new Error("agentId is required");
+        }
+
+        const agent = this.eventStore.getAgent(agentId as AgentId);
+        if (!agent) {
+          throw new Error(`Agent not found: ${agentId}`);
+        }
+
+        if (agent.state !== "stopped" && agent.state !== "failed") {
+          throw new Error(
+            `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`
+          );
+        }
+
+        const spawned = await this.agentManager.resume(agentId as AgentId);
+        return {
+          success: true,
+          agentId: spawned.id,
+          sessionId: spawned.session_id,
+        };
       }
 
       default:
