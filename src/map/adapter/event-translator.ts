@@ -57,6 +57,7 @@ const EVENT_TYPE_MAP: Record<EventType, MAPEventType | MAPEventType[] | null> = 
   conversation: null, // Mail: handled by mail module
   turn: null, // Mail: handled by mail module
   thread: null, // Mail: handled by mail module
+  session: null, // Internal session tracking
 };
 
 /**
