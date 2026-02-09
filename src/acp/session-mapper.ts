@@ -6,15 +6,25 @@
  * - Default mapping to head manager on session creation
  * - Remapping via mount to control different agents
  * - Multiple concurrent sessions with independent mappings
+ * - Persistent session lifecycle events via EventStore
+ * - Recovery of session state from EventStore after restart
  */
 
 import type { AgentId } from "../store/types/index.js";
+import type { EventStore } from "../store/event-store.js";
 import type { ACPSessionId, SessionMapping } from "./types.js";
 import { ACPError } from "./types.js";
 
 export class SessionMapper {
   /** Map of ACP session ID to mapping info */
   private mappings: Map<ACPSessionId, SessionMapping> = new Map();
+
+  /** Optional EventStore for persisting session lifecycle events */
+  private eventStore: EventStore | null;
+
+  constructor(eventStore?: EventStore) {
+    this.eventStore = eventStore ?? null;
+  }
 
   /**
    * Register a new ACP session with its head manager
@@ -40,6 +50,12 @@ export class SessionMapper {
     };
 
     this.mappings.set(acpSessionId, mapping);
+
+    // Persist session creation event
+    this.emitSessionEvent("created", acpSessionId, {
+      head_manager_id: headManagerId,
+    });
+
     return mapping;
   }
 
@@ -123,6 +139,19 @@ export class SessionMapper {
     mapping.isMounted = agentId !== mapping.headManagerId;
     mapping.updatedAt = Date.now();
 
+    // Persist mount event
+    if (mapping.isMounted) {
+      this.emitSessionEvent("mounted", acpSessionId, {
+        target_agent_id: agentId,
+        previous_agent_id: previousAgentId,
+      });
+    } else {
+      // Mounting back to head manager is effectively an unmount
+      this.emitSessionEvent("unmounted", acpSessionId, {
+        previous_agent_id: previousAgentId,
+      });
+    }
+
     return previousAgentId;
   }
 
@@ -141,6 +170,11 @@ export class SessionMapper {
     mapping.isMounted = false;
     mapping.updatedAt = Date.now();
 
+    // Persist unmount event
+    this.emitSessionEvent("unmounted", acpSessionId, {
+      previous_agent_id: previousAgentId,
+    });
+
     return previousAgentId;
   }
 
@@ -155,12 +189,17 @@ export class SessionMapper {
   }
 
   /**
-   * Remove a session mapping
+   * Remove a session mapping and emit a close event
    *
    * @param acpSessionId - The ACP session ID
    * @returns True if removed, false if not found
    */
   removeMapping(acpSessionId: ACPSessionId): boolean {
+    const existed = this.mappings.has(acpSessionId);
+    if (existed) {
+      // Persist close event before removing
+      this.emitSessionEvent("closed", acpSessionId, {});
+    }
     return this.mappings.delete(acpSessionId);
   }
 
@@ -227,6 +266,43 @@ export class SessionMapper {
   }
 
   /**
+   * Recover session mappings from the EventStore.
+   *
+   * Loads all non-closed sessions and rebuilds the in-memory mapping state.
+   * Called during initialization to restore sessions after a restart.
+   *
+   * @returns Number of sessions recovered
+   */
+  recoverFromStore(): number {
+    if (!this.eventStore || typeof this.eventStore.listSessions !== "function") {
+      return 0;
+    }
+
+    const activeSessions = this.eventStore.listSessions({ state: "active" });
+    const mountedSessions = this.eventStore.listSessions({ state: "mounted" });
+    const allSessions = [...activeSessions, ...mountedSessions];
+
+    let recovered = 0;
+    for (const session of allSessions) {
+      const now = Date.now();
+      const mapping: SessionMapping = {
+        acpSessionId: session.id,
+        agentId: session.current_agent_id,
+        headManagerId: session.head_manager_id,
+        isMounted: session.state === "mounted",
+        createdAt: session.created_at,
+        updatedAt: now,
+        isProcessing: false,
+        lastProcessingChangeAt: now,
+      };
+      this.mappings.set(session.id, mapping);
+      recovered++;
+    }
+
+    return recovered;
+  }
+
+  /**
    * Get the number of active session mappings
    */
   get size(): number {
@@ -238,5 +314,36 @@ export class SessionMapper {
    */
   clear(): void {
     this.mappings.clear();
+  }
+
+  /**
+   * Emit a session lifecycle event to the EventStore
+   */
+  private emitSessionEvent(
+    action: string,
+    sessionId: ACPSessionId,
+    details: Record<string, unknown>
+  ): void {
+    if (!this.eventStore || typeof this.eventStore.emit !== "function") {
+      return;
+    }
+
+    try {
+      this.eventStore.emit({
+        type: "session",
+        source: {},
+        payload: {
+          action,
+          session_id: sessionId,
+          ...details,
+        },
+      });
+    } catch (error) {
+      // Log but don't fail — session events are supplementary
+      console.warn(
+        `[SessionMapper] Failed to emit session ${action} event:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
 }

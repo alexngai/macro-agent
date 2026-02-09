@@ -81,6 +81,8 @@ export interface ACPServerOptions {
   port?: number;
   /** Host for server (default: localhost) */
   host?: string;
+  /** Instance ID to reuse an existing event store (omit for new instance) */
+  instanceId?: string;
 }
 
 /**
@@ -107,6 +109,9 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
       i++;
     } else if (args[i] === "--host" && args[i + 1]) {
       options.host = args[i + 1];
+      i++;
+    } else if (args[i] === "--instance-id" && args[i + 1]) {
+      options.instanceId = args[i + 1];
       i++;
     }
   }
@@ -154,7 +159,10 @@ async function main() {
   const defaultCwd = options.cwd ?? process.cwd();
 
   // Initialize services
-  const eventStore = await createEventStore({ inMemory: false });
+  const eventStore = await createEventStore({
+    inMemory: false,
+    instanceId: options.instanceId,
+  });
 
   // We need to create agentManager first (with a placeholder router),
   // then wire the sessionChecker/wakeHandler into the router,

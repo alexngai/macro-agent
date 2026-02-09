@@ -155,8 +155,16 @@ export class MacroAgent implements Agent {
     this.peerManager = config.peerManager;
     this.capabilityManager = config.capabilityManager;
     this.roleRegistry = config.roleRegistry ?? new DefaultRoleRegistry();
-    this.sessionMapper = new SessionMapper();
+    this.sessionMapper = new SessionMapper(config.eventStore);
     this.defaultCwd = config.defaultCwd ?? process.cwd();
+
+    // Recover persisted sessions from the EventStore
+    const recovered = this.sessionMapper.recoverFromStore();
+    if (recovered > 0) {
+      console.log(
+        `[MacroAgent] Recovered ${recovered} session(s) from EventStore`
+      );
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────
