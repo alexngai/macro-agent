@@ -102,7 +102,7 @@ function createMockAgentManager(roleRegistry: DefaultRoleRegistry): AgentManager
       capturedInterceptor = interceptor;
     }),
     getRoleRegistry: vi.fn(() => roleRegistry),
-    onLifecycleEvent: vi.fn(() => () => {}),
+    onLifecycleEvent: vi.fn(() => vi.fn()),
     continueAgent: vi.fn().mockResolvedValue({ id: "continued_0" }),
     close: vi.fn().mockResolvedValue(undefined),
     getOrCreateHeadManager: vi.fn(),
@@ -338,15 +338,28 @@ describe("TeamRuntime", () => {
       expect(companionCall.parent).toBeNull();
     });
 
-    it("sets up peer subscriptions between root and companions", async () => {
+    it("wires config-driven peer subscriptions from routing.peers", async () => {
       const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
-      await runtime.bootstrap();
+      const result = await runtime.bootstrap();
 
-      // Should have 2 subscribe calls: root→companion + companion→root
+      // self-driving has 2 peer entries: judge→planner + planner→judge, both via: "direct"
+      // Each creates one directional subtree subscription
       expect(messageRouter.subscribe).toHaveBeenCalledTimes(2);
+
+      // judge (agent_1) subscribes to planner's (agent_0) subtree
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.companionIds[0], // judge = agent_1
+        { type: "subtree", target: result.rootId } // planner = agent_0
+      );
+
+      // planner (agent_0) subscribes to judge's (agent_1) subtree
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.rootId, // planner = agent_0
+        { type: "subtree", target: result.companionIds[0] } // judge = agent_1
+      );
     });
 
     it("injects interaction patterns for pull mode", async () => {
@@ -473,6 +486,327 @@ describe("TeamRuntime", () => {
       await runtime.teardown();
 
       expect(agentManager.setSpawnInterceptor).toHaveBeenLastCalledWith(null);
+    });
+  });
+
+  describe("peer routing", () => {
+    it("stores signal filters from peer connections", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filters = runtime.getPeerSignalFilters();
+
+      // judge→planner has signals: [FIXUP_CREATED, GREEN_SNAPSHOT]
+      const judgeToPlanner = filters.get(`${result.companionIds[0]}→${result.rootId}`);
+      expect(judgeToPlanner).toEqual(["FIXUP_CREATED", "GREEN_SNAPSHOT"]);
+
+      // planner→judge has signals: [CONVERGENCE_CHECK]
+      const plannerToJudge = filters.get(`${result.rootId}→${result.companionIds[0]}`);
+      expect(plannerToJudge).toEqual(["CONVERGENCE_CHECK"]);
+    });
+
+    it("falls back to legacy subtree subscriptions when no peers config", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Remove routing.peers to test fallback
+      manifest.communication.routing = { status: "upstream" };
+
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Legacy: 2 bidirectional subtree subs (root→companion + companion→root)
+      expect(messageRouter.subscribe).toHaveBeenCalledTimes(2);
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.rootId,
+        { type: "subtree", target: result.companionIds[0] }
+      );
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.companionIds[0],
+        { type: "subtree", target: result.rootId }
+      );
+    });
+
+    it("defers wiring for roles not spawned at bootstrap", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Add a peer connection involving grinder (not spawned at bootstrap)
+      manifest.communication.routing!.peers!.push({
+        from: "grinder",
+        to: "planner",
+        via: "direct",
+        signals: ["WORKER_DONE"],
+      });
+
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // 2 wired at bootstrap (judge↔planner) + 1 deferred (grinder→planner)
+      expect(messageRouter.subscribe).toHaveBeenCalledTimes(2);
+
+      // onLifecycleEvent should have been called twice: once for deferred wiring, once for continuations
+      expect(agentManager.onLifecycleEvent).toHaveBeenCalledTimes(2);
+
+      // Simulate grinder spawn via lifecycle event
+      const lifecycleCallbacks = vi.mocked(agentManager.onLifecycleEvent).mock.calls;
+      // The deferred wiring callback is the first one registered (wirePeerRoutes before monitorContinuations)
+      const deferredCallback = lifecycleCallbacks[0][0];
+
+      deferredCallback({
+        type: "spawned",
+        agent: { id: "grinder_agent", role: "grinder", state: "running" },
+      } as any);
+
+      // Now the deferred route should be wired
+      expect(messageRouter.subscribe).toHaveBeenCalledTimes(3);
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        "grinder_agent",
+        { type: "subtree", target: result.rootId }
+      );
+
+      // Signal filter should be stored
+      const filters = runtime.getPeerSignalFilters();
+      expect(filters.get(`grinder_agent→${result.rootId}`)).toEqual(["WORKER_DONE"]);
+    });
+
+    it("serializes peerRoutes in team_config event", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      expect(eventStore.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "status",
+          payload: expect.objectContaining({
+            team_config: expect.objectContaining({
+              peerRoutes: expect.arrayContaining([
+                expect.objectContaining({
+                  from: "judge",
+                  to: "planner",
+                  via: "direct",
+                  signals: ["FIXUP_CREATED", "GREEN_SNAPSHOT"],
+                }),
+              ]),
+            }),
+          }),
+        })
+      );
+    });
+
+    it("teardown cleans up deferred wiring listener", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Add a deferred route to ensure the wiring listener is set up
+      manifest.communication.routing!.peers!.push({
+        from: "grinder",
+        to: "judge",
+        via: "direct",
+      });
+
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      // onLifecycleEvent called twice: deferred wiring + continuations
+      expect(agentManager.onLifecycleEvent).toHaveBeenCalledTimes(2);
+
+      // Both return unsubscribe fns (index 0 = deferred wiring, index 1 = continuations)
+      const peerWiringUnsub = vi.mocked(agentManager.onLifecycleEvent).mock.results[0].value;
+      const continuationsUnsub = vi.mocked(agentManager.onLifecycleEvent).mock.results[1].value;
+
+      await runtime.teardown();
+
+      // Both unsubscribe fns should be called
+      expect(peerWiringUnsub).toHaveBeenCalled();
+      expect(continuationsUnsub).toHaveBeenCalled();
+    });
+
+    it("via topic creates shared topic subscription", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Replace peers with a topic-based connection
+      manifest.communication.routing!.peers = [
+        { from: "planner", to: "judge", via: "topic" },
+      ];
+
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Topic creates 2 subscriptions: both agents to the same topic
+      expect(messageRouter.subscribe).toHaveBeenCalledTimes(2);
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.rootId, // planner
+        { type: "topic", target: "peer:planner:judge" }
+      );
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.companionIds[0], // judge
+        { type: "topic", target: "peer:planner:judge" }
+      );
+    });
+
+    it("via scope creates role subscription", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Replace peers with a scope-based connection
+      manifest.communication.routing!.peers = [
+        { from: "planner", to: "judge", via: "scope" },
+      ];
+
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Scope creates 1 subscription: from subscribes to to's role channel
+      expect(messageRouter.subscribe).toHaveBeenCalledTimes(1);
+      expect(messageRouter.subscribe).toHaveBeenCalledWith(
+        result.rootId, // planner
+        { type: "role", target: "judge" }
+      );
+    });
+  });
+
+  describe("monitorContinuations()", () => {
+    it("auto-continues root agent on unexpected stop", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Capture the lifecycle callback registered during bootstrap
+      const onLifecycleEventMock = vi.mocked(agentManager.onLifecycleEvent);
+      expect(onLifecycleEventMock).toHaveBeenCalled();
+      const lifecycleCallback = onLifecycleEventMock.mock.calls[0][0];
+
+      // Simulate unexpected stop of root agent (no reason = unexpected)
+      lifecycleCallback({
+        type: "stopped",
+        agent: { id: result.rootId, role: "planner", state: "stopped" },
+      } as any);
+
+      // Wait for the setTimeout (1s) + async continuation
+      await vi.waitFor(
+        () => {
+          expect(agentManager.continueAgent).toHaveBeenCalledWith(result.rootId);
+        },
+        { timeout: 3000 }
+      );
+
+      // Root agent ID should be updated to the continued agent
+      expect(runtime.getRootAgentId()).toBe("continued_0");
+    });
+
+    it("auto-continues companion agent on unexpected stop", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+      const companionId = result.companionIds[0];
+
+      const lifecycleCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls[0][0];
+
+      // Simulate unexpected stop of companion
+      lifecycleCallback({
+        type: "stopped",
+        agent: { id: companionId, role: "judge", state: "stopped" },
+      } as any);
+
+      await vi.waitFor(
+        () => {
+          expect(agentManager.continueAgent).toHaveBeenCalledWith(companionId);
+        },
+        { timeout: 3000 }
+      );
+
+      // Companion ID should be updated
+      expect(runtime.getCompanionAgentIds()).toContain("continued_0");
+    });
+
+    it("does NOT auto-continue on completed stop", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const lifecycleCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls[0][0];
+
+      // Simulate completed stop (should NOT trigger continuation)
+      lifecycleCallback({
+        type: "stopped",
+        agent: { id: result.rootId, role: "planner", state: "stopped" },
+        reason: "completed",
+      } as any);
+
+      // Wait a bit to ensure no continuation is triggered
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      expect(agentManager.continueAgent).not.toHaveBeenCalled();
+    });
+
+    it("does NOT auto-continue on cancelled stop", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const lifecycleCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls[0][0];
+
+      lifecycleCallback({
+        type: "stopped",
+        agent: { id: result.rootId, role: "planner", state: "stopped" },
+        reason: "cancelled",
+      } as any);
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      expect(agentManager.continueAgent).not.toHaveBeenCalled();
+    });
+
+    it("does NOT trigger for non-monitored agents", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      const lifecycleCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls[0][0];
+
+      // Simulate stop of an unrelated agent
+      lifecycleCallback({
+        type: "stopped",
+        agent: { id: "unrelated_agent", role: "worker", state: "stopped" },
+      } as any);
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      expect(agentManager.continueAgent).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribes lifecycle listener on teardown", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      // onLifecycleEvent returns an unsubscribe function
+      const unsubscribeFn = vi.mocked(agentManager.onLifecycleEvent).mock.results[0].value;
+
+      await runtime.teardown();
+
+      // The unsubscribe function should have been called
+      expect(unsubscribeFn).toHaveBeenCalled();
     });
   });
 

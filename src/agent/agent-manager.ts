@@ -75,8 +75,10 @@ function getSpawnCapability(childRole: string): Capability {
       // or system-level agents can spawn coordinators
       return AGENT_CAPABILITIES.SPAWN_CUSTOM;
     default:
-      // For custom roles, check against the custom spawn capability
-      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+      // For team-defined roles (e.g., "grinder"), return the specific capability
+      // (e.g., "agent.spawn.grinder"). The spawn check also accepts
+      // "agent.spawn.custom" as a generic fallback.
+      return `agent.spawn.${childRole}` as Capability;
   }
 }
 
@@ -433,7 +435,13 @@ export function createAgentManager(
       const requiredCapability = getSpawnCapability(childRole);
       const parentRole = parentAgent.role ?? "worker";
 
-      if (!roleRegistry.hasCapability(parentRole, requiredCapability)) {
+      // Accept either the specific capability (e.g., agent.spawn.grinder)
+      // or the generic agent.spawn.custom as a fallback for non-built-in roles
+      const hasSpecific = roleRegistry.hasCapability(parentRole, requiredCapability);
+      const hasGeneric = requiredCapability !== AGENT_CAPABILITIES.SPAWN_CUSTOM &&
+        roleRegistry.hasCapability(parentRole, AGENT_CAPABILITIES.SPAWN_CUSTOM);
+
+      if (!hasSpecific && !hasGeneric) {
         throw new AgentManagerError(
           `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
             `Required capability: ${requiredCapability}`,

@@ -17,7 +17,9 @@ import type { AgentId } from "../store/types/index.js";
 import type {
   TeamManifest,
   McpServerEntry,
+  PeerConnection,
 } from "./types.js";
+import type { IntegrationStrategy } from "../workspace/strategies/types.js";
 
 // =============================================================================
 // Types
@@ -43,6 +45,19 @@ export class TeamRuntime {
   private companionAgentIds: string[] = [];
   private roleRegistry: RoleRegistry;
   private lifecycleUnsubscribe?: () => void;
+  private integrationStrategy?: IntegrationStrategy;
+
+  /** Role name → spawned agent ID mapping (populated during bootstrap) */
+  private roleAgentMap = new Map<string, AgentId>();
+
+  /** Peer connections that couldn't be wired at bootstrap (target role not yet spawned) */
+  private pendingPeerRoutes: PeerConnection[] = [];
+
+  /** Per-agent signal filters from peer connections. Key: "fromAgentId→toAgentId" */
+  private peerSignalFilters = new Map<string, string[]>();
+
+  /** Lifecycle unsubscribe for deferred peer wiring */
+  private peerWiringUnsubscribe?: () => void;
 
   constructor(
     private readonly manifest: TeamManifest,
@@ -76,6 +91,19 @@ export class TeamRuntime {
     const strategyConfig = this.manifest.macro_agent.integration?.config ?? {};
     const enforcement = this.manifest.communication.enforcement ?? "permissive";
 
+    // Serialize resolved roles for MCP subprocess capability checks
+    const serializedRoles: Record<string, { name: string; capabilities: string[]; tools?: object; lifecycle?: object; description?: string }> = {};
+    for (const [name, resolved] of this.manifest._resolvedRoles) {
+      const rd = resolved.roleDefinition;
+      serializedRoles[name] = {
+        name: rd.name,
+        capabilities: [...rd.capabilities],
+        ...(rd.tools && { tools: rd.tools }),
+        ...(rd.lifecycle && { lifecycle: rd.lifecycle }),
+        ...(rd.description && { description: rd.description }),
+      };
+    }
+
     eventStore.emit({
       type: "status",
       source: { agent_id: "system" },
@@ -88,11 +116,24 @@ export class TeamRuntime {
           strategyConfig,
           taskMode,
           enforcement,
+          roles: serializedRoles,
+          peerRoutes: this.manifest.communication.routing?.peers ?? [],
         },
       },
     });
 
     await eventStore.persist();
+
+    // 2b. Instantiate integration strategy and call lifecycle hook
+    try {
+      const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
+      this.integrationStrategy = defaultStrategyRegistry.get(strategyName, strategyConfig as Record<string, unknown>);
+      if (this.integrationStrategy.initialize) {
+        await this.integrationStrategy.initialize();
+      }
+    } catch {
+      // Strategy instantiation is best-effort — queue strategy needs merge queue set later
+    }
 
     // 3. Register spawn interceptor
     agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
@@ -143,11 +184,12 @@ export class TeamRuntime {
     }
     this.companionAgentIds = companionIds;
 
-    // 3. Set up peer subscriptions between root and companions
-    //    (they're not in each other's subtrees, so explicit subscriptions needed)
-    for (const companionId of companionIds) {
-      this.setupPeerSubscriptions(root.id as AgentId, companionId as AgentId);
+    // 3. Build role→agent mapping and wire peer subscriptions
+    this.roleAgentMap.set(topology.root.role, root.id as AgentId);
+    for (let i = 0; i < (topology.companions ?? []).length; i++) {
+      this.roleAgentMap.set(topology.companions![i].role, companionIds[i] as AgentId);
     }
+    this.wirePeerRoutes();
 
     // 4. Set up continuation monitoring for daemon agents (P4.2)
     this.monitorContinuations();
@@ -170,6 +212,18 @@ export class TeamRuntime {
     if (this.lifecycleUnsubscribe) {
       this.lifecycleUnsubscribe();
       this.lifecycleUnsubscribe = undefined;
+    }
+    if (this.peerWiringUnsubscribe) {
+      this.peerWiringUnsubscribe();
+      this.peerWiringUnsubscribe = undefined;
+    }
+    // Call strategy lifecycle close hook
+    if (this.integrationStrategy?.close) {
+      try {
+        await this.integrationStrategy.close();
+      } catch {
+        // Best-effort cleanup
+      }
     }
   }
 
@@ -200,6 +254,16 @@ export class TeamRuntime {
   /** Get companion agent IDs (after bootstrap) */
   getCompanionAgentIds(): string[] {
     return [...this.companionAgentIds];
+  }
+
+  /** Get the instantiated integration strategy (after initialize) */
+  getIntegrationStrategy(): IntegrationStrategy | undefined {
+    return this.integrationStrategy;
+  }
+
+  /** Get signal filters for peer connections (for use by signal filtering - i-3o8g) */
+  getPeerSignalFilters(): ReadonlyMap<string, string[]> {
+    return this.peerSignalFilters;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -411,18 +475,128 @@ Focus on correctness — your changes go live immediately.`);
     return patterns;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Peer Routing
+  // ─────────────────────────────────────────────────────────────
+
   /**
-   * Set up peer subscriptions between two agents.
-   * Used for non-hierarchical connections (e.g., root ↔ companion).
+   * Wire peer subscriptions from communication config.
+   * Falls back to legacy bidirectional subtree subs when no peers config exists.
    */
-  private setupPeerSubscriptions(
-    agentA: AgentId,
-    agentB: AgentId
+  private wirePeerRoutes(): void {
+    const peers = this.manifest.communication.routing?.peers;
+
+    if (!peers || peers.length === 0) {
+      // Fallback: hardcoded mutual subtree subscriptions (backwards compat)
+      this.setupLegacyPeerSubscriptions();
+      return;
+    }
+
+    this.pendingPeerRoutes = [];
+
+    for (const peer of peers) {
+      const fromAgent = this.roleAgentMap.get(peer.from);
+      const toAgent = this.roleAgentMap.get(peer.to);
+
+      if (!fromAgent || !toAgent) {
+        // One or both roles not yet spawned — defer
+        this.pendingPeerRoutes.push(peer);
+        continue;
+      }
+
+      this.wireSinglePeerRoute(peer, fromAgent, toAgent);
+    }
+
+    // If there are pending routes, set up lifecycle listener for deferred wiring
+    if (this.pendingPeerRoutes.length > 0) {
+      this.setupDeferredPeerWiring();
+    }
+  }
+
+  /**
+   * Wire a single peer connection based on its `via` type.
+   */
+  private wireSinglePeerRoute(
+    peer: PeerConnection,
+    fromAgent: AgentId,
+    toAgent: AgentId
   ): void {
     const { messageRouter } = this.services;
 
-    // Each agent subscribes to the other's subtree for status visibility
-    messageRouter.subscribe(agentA, { type: "subtree", target: agentB });
-    messageRouter.subscribe(agentB, { type: "subtree", target: agentA });
+    switch (peer.via) {
+      case "direct":
+        // Directional: from receives status events from to's subtree
+        messageRouter.subscribe(fromAgent, { type: "subtree", target: toAgent });
+        break;
+
+      case "topic": {
+        // Both agents share a named topic
+        const topicName = `peer:${peer.from}:${peer.to}`;
+        messageRouter.subscribe(fromAgent, { type: "topic", target: topicName });
+        messageRouter.subscribe(toAgent, { type: "topic", target: topicName });
+        break;
+      }
+
+      case "scope":
+        // from subscribes to to's role channel
+        messageRouter.subscribe(fromAgent, { type: "role", target: peer.to });
+        break;
+    }
+
+    // Store signal filter if specified
+    if (peer.signals && peer.signals.length > 0) {
+      const key = `${fromAgent}→${toAgent}`;
+      this.peerSignalFilters.set(key, peer.signals);
+    }
+  }
+
+  /**
+   * Legacy bidirectional subtree subscriptions between root and companions.
+   * Used when no `routing.peers` config is defined (backwards compat).
+   */
+  private setupLegacyPeerSubscriptions(): void {
+    const { messageRouter } = this.services;
+
+    if (!this.rootAgentId) return;
+    for (const companionId of this.companionAgentIds) {
+      messageRouter.subscribe(this.rootAgentId as AgentId, { type: "subtree", target: companionId as AgentId });
+      messageRouter.subscribe(companionId as AgentId, { type: "subtree", target: this.rootAgentId as AgentId });
+    }
+  }
+
+  /**
+   * Listen for agent spawns and wire pending peer routes when roles become available.
+   */
+  private setupDeferredPeerWiring(): void {
+    const { agentManager } = this.services;
+
+    this.peerWiringUnsubscribe = agentManager.onLifecycleEvent((event) => {
+      if (event.type !== "spawned") return;
+      const role = event.agent.role;
+      if (!role) return;
+
+      // Update role→agent mapping
+      this.roleAgentMap.set(role, event.agent.id as AgentId);
+
+      // Try to wire any pending routes involving this role
+      const stillPending: PeerConnection[] = [];
+      for (const peer of this.pendingPeerRoutes) {
+        const fromAgent = this.roleAgentMap.get(peer.from);
+        const toAgent = this.roleAgentMap.get(peer.to);
+
+        if (fromAgent && toAgent) {
+          this.wireSinglePeerRoute(peer, fromAgent, toAgent);
+        } else {
+          stillPending.push(peer);
+        }
+      }
+      this.pendingPeerRoutes = stillPending;
+
+      // All wired — unsubscribe
+      if (stillPending.length === 0 && this.peerWiringUnsubscribe) {
+        this.peerWiringUnsubscribe();
+        this.peerWiringUnsubscribe = undefined;
+      }
+    });
   }
 }

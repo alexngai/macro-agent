@@ -59,6 +59,9 @@ export interface LandResult {
   /** Files with conflicts if status is "conflict" */
   conflictFiles?: string[];
 
+  /** Action taken on conflict exhaustion */
+  action?: "abandoned" | "queued_for_resolution";
+
   /** Error message if status is "failed" */
   error?: string;
 

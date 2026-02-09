@@ -52,6 +52,7 @@ export class TrunkIntegrationStrategy implements IntegrationStrategy {
             return {
               status: "conflict",
               conflictFiles,
+              action: this.conflictAction === "abandon" ? "abandoned" : this.conflictAction,
               retryCount,
               error: `Rebase conflict after ${retryCount + 1} attempts`,
             };
@@ -69,6 +70,7 @@ export class TrunkIntegrationStrategy implements IntegrationStrategy {
           if (retryCount >= this.maxRetries) {
             return {
               status: "conflict",
+              action: this.conflictAction === "abandon" ? "abandoned" : this.conflictAction,
               retryCount,
               error: `Push rejected after ${retryCount + 1} attempts`,
             };

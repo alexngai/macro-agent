@@ -188,6 +188,38 @@ async function main() {
       debugLog(`[MCP] Found team config: team=${tc.teamName}, strategy=${tc.strategy}, taskMode=${tc.taskMode}`);
     }
 
+    // Register team roles in local RoleRegistry for capability checks
+    const roleRegistry = agentManager.getRoleRegistry();
+    let integrationStrategy: import("../workspace/strategies/types.js").IntegrationStrategy | undefined;
+
+    if (teamConfigEvent?.payload?.team_config) {
+      const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
+
+      // Register serialized team roles (stored by TeamRuntime.initialize)
+      const roles = tc.roles as Record<string, { name: string; capabilities: string[] }> | undefined;
+      if (roles) {
+        for (const roleDef of Object.values(roles)) {
+          roleRegistry.registerRole(roleDef as import("../roles/types.js").RoleDefinition);
+        }
+        debugLog(`[MCP] Registered ${Object.keys(roles).length} team roles in RoleRegistry`);
+      }
+
+      // Instantiate integration strategy from team config
+      const strategyName = tc.strategy as string | undefined;
+      if (strategyName) {
+        try {
+          const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
+          integrationStrategy = defaultStrategyRegistry.get(
+            strategyName,
+            tc.strategyConfig as Record<string, unknown> | undefined
+          );
+          debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
+        } catch (err) {
+          debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
+        }
+      }
+    }
+
     // Create MCP server with agent context
     const mcpServer = createMCPServer(
       {
@@ -204,6 +236,8 @@ async function main() {
         messageRouter,
         activityWatcher,
         taskMode: teamTaskMode as "push" | "pull" | undefined,
+        roleRegistry,
+        integrationStrategy,
       }
     );
 
