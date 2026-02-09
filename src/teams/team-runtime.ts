@@ -56,6 +56,9 @@ export class TeamRuntime {
   /** Per-agent signal filters from peer connections. Key: "fromAgentId→toAgentId" */
   private peerSignalFilters = new Map<string, string[]>();
 
+  /** Reverse mapping: agent ID → role name (for signal filter lookups) */
+  private agentRoleMap = new Map<AgentId, string>();
+
   /** Lifecycle unsubscribe for deferred peer wiring */
   private peerWiringUnsubscribe?: () => void;
 
@@ -118,6 +121,7 @@ export class TeamRuntime {
           enforcement,
           roles: serializedRoles,
           peerRoutes: this.manifest.communication.routing?.peers ?? [],
+          emissions: this.manifest.communication.emissions ?? {},
         },
       },
     });
@@ -184,14 +188,22 @@ export class TeamRuntime {
     }
     this.companionAgentIds = companionIds;
 
-    // 3. Build role→agent mapping and wire peer subscriptions
+    // 3. Build role↔agent mappings and wire peer subscriptions
     this.roleAgentMap.set(topology.root.role, root.id as AgentId);
+    this.agentRoleMap.set(root.id as AgentId, topology.root.role);
     for (let i = 0; i < (topology.companions ?? []).length; i++) {
       this.roleAgentMap.set(topology.companions![i].role, companionIds[i] as AgentId);
+      this.agentRoleMap.set(companionIds[i] as AgentId, topology.companions![i].role);
     }
     this.wirePeerRoutes();
 
-    // 4. Set up continuation monitoring for daemon agents (P4.2)
+    // 4. Install signal filter on message router
+    this.installSignalFilter();
+
+    // 5. Install emission validator on message router
+    this.installEmissionValidator();
+
+    // 6. Set up continuation monitoring for daemon agents (P4.2)
     this.monitorContinuations();
 
     return {
@@ -476,6 +488,118 @@ Focus on correctness — your changes go live immediately.`);
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Signal Filtering
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Install a signal filter on the message router.
+   *
+   * Combines two filter sources:
+   * 1. Channel subscription filters (per-role, per-topic): from communication.subscriptions
+   * 2. Peer connection filters (per-agent-pair): from communication.routing.peers
+   *
+   * Status events with no details.signal always pass through (backwards compat).
+   */
+  private installSignalFilter(): void {
+    const { messageRouter } = this.services;
+
+    // Pre-compute per-role allowed signals from channel subscriptions.
+    // Key: role name, Value: Set of allowed signal names.
+    // If a role has any subscription without a signals filter, it receives all signals.
+    const roleAllowedSignals = new Map<string, Set<string> | "all">();
+
+    for (const [roleName, subs] of Object.entries(this.manifest.communication.subscriptions ?? {})) {
+      let allowed: Set<string> | "all" = new Set<string>();
+
+      for (const sub of subs) {
+        if (!sub.signals || sub.signals.length === 0) {
+          // No filter on this subscription — role receives all signals
+          allowed = "all";
+          break;
+        }
+        for (const sig of sub.signals) {
+          (allowed as Set<string>).add(sig);
+        }
+      }
+
+      roleAllowedSignals.set(roleName, allowed);
+    }
+
+    if (messageRouter.setSignalFilter) {
+      messageRouter.setSignalFilter((from, to, signal) => {
+        // Untagged status events always pass through
+        if (!signal) return true;
+
+        // Check peer connection filter (directional: from→to)
+        const peerFilter = this.peerSignalFilters.get(`${from}→${to}`);
+        if (peerFilter) {
+          return peerFilter.includes(signal);
+        }
+
+        // Check channel subscription filter for recipient's role
+        const recipientRole = this.agentRoleMap.get(to);
+        if (recipientRole) {
+          const allowed = roleAllowedSignals.get(recipientRole);
+          if (allowed && allowed !== "all") {
+            return allowed.has(signal);
+          }
+        }
+
+        // No filter configured — allow delivery
+        return true;
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Emission Validation
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Install emission validator on the message router.
+   * Checks whether an agent's emitted signal is in its role's allowed emissions list.
+   * Behavior depends on enforcement mode: strict (reject), permissive (warn), audit (record).
+   */
+  private installEmissionValidator(): void {
+    const { messageRouter } = this.services;
+    const emissions = this.manifest.communication.emissions;
+    const enforcement = this.manifest.communication.enforcement ?? "permissive";
+
+    // No emissions config — nothing to enforce
+    if (!emissions || Object.keys(emissions).length === 0) return;
+
+    if (messageRouter.setEmissionValidator) {
+      messageRouter.setEmissionValidator((agentId, signal) => {
+        // Untagged status events are always allowed
+        if (!signal) return { action: "allow" };
+
+        const role = this.agentRoleMap.get(agentId);
+        if (!role) return { action: "allow" };
+
+        const allowedSignals = emissions[role];
+        if (!allowedSignals) return { action: "allow" };
+
+        if (allowedSignals.includes(signal)) {
+          return { action: "allow" };
+        }
+
+        // Signal not in allowed list — enforce
+        const message = `Agent '${agentId}' (role: ${role}) emitted disallowed signal '${signal}'. Allowed: [${allowedSignals.join(", ")}]`;
+
+        switch (enforcement) {
+          case "strict":
+            return { action: "reject", message };
+          case "audit":
+            return { action: "audit", message };
+          case "permissive":
+          default:
+            return { action: "warn", message };
+        }
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Peer Routing
   // ─────────────────────────────────────────────────────────────
 
@@ -575,8 +699,9 @@ Focus on correctness — your changes go live immediately.`);
       const role = event.agent.role;
       if (!role) return;
 
-      // Update role→agent mapping
+      // Update role↔agent mappings
       this.roleAgentMap.set(role, event.agent.id as AgentId);
+      this.agentRoleMap.set(event.agent.id as AgentId, role);
 
       // Try to wire any pending routes involving this role
       const stillPending: PeerConnection[] = [];

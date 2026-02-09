@@ -61,6 +61,8 @@ function createMockMessageRouter(): MessageRouter {
     unsubscribe: vi.fn(),
     getSubscriptions: vi.fn().mockReturnValue([]),
     setupDefaultSubscriptions: vi.fn(),
+    setSignalFilter: vi.fn(),
+    setEmissionValidator: vi.fn(),
   } as unknown as MessageRouter;
 }
 
@@ -672,6 +674,316 @@ describe("TeamRuntime", () => {
       expect(messageRouter.subscribe).toHaveBeenCalledWith(
         result.rootId, // planner
         { type: "role", target: "judge" }
+      );
+    });
+  });
+
+  describe("signal filtering", () => {
+    it("installs signal filter on message router after bootstrap", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      expect(messageRouter.setSignalFilter).toHaveBeenCalledTimes(1);
+      expect(messageRouter.setSignalFilter).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it("peer connection filter allows matching signals", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Extract the installed filter
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      const judgeId = result.companionIds[0]; // judge
+      const plannerId = result.rootId; // planner
+
+      // judge→planner peer has signals: [FIXUP_CREATED, GREEN_SNAPSHOT]
+      expect(filterFn(judgeId, plannerId, "FIXUP_CREATED")).toBe(true);
+      expect(filterFn(judgeId, plannerId, "GREEN_SNAPSHOT")).toBe(true);
+    });
+
+    it("peer connection filter blocks non-matching signals", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      const judgeId = result.companionIds[0];
+      const plannerId = result.rootId;
+
+      // judge→planner peer does NOT include WORKER_DONE
+      expect(filterFn(judgeId, plannerId, "WORKER_DONE")).toBe(false);
+    });
+
+    it("untagged status events always pass through", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      const judgeId = result.companionIds[0];
+      const plannerId = result.rootId;
+
+      // No signal (undefined) should always pass
+      expect(filterFn(judgeId, plannerId, undefined)).toBe(true);
+    });
+
+    it("channel subscription filter allows role's configured signals", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      // Use a "grinder" agent as recipient - grinder only allows WORK_ASSIGNED
+      // Simulate spawning a grinder by triggering deferred wiring
+      // But grinder has no peer connection, so we test channel sub filter directly
+      // by spawning through the lifecycle event to populate agentRoleMap
+
+      // Add a grinder peer route so deferred wiring populates agentRoleMap
+      manifest.communication.routing!.peers!.push({
+        from: "grinder",
+        to: "planner",
+        via: "direct",
+      });
+
+      // Re-bootstrap with updated manifest
+      const runtime2 = new TeamRuntime(manifest, services);
+      await runtime2.initialize();
+      const result2 = await runtime2.bootstrap();
+
+      // Simulate grinder spawn via lifecycle event
+      const deferredCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls.at(-2)![0];
+      deferredCallback({
+        type: "spawned",
+        agent: { id: "grinder_1", role: "grinder", state: "running" },
+      } as any);
+
+      // Get the latest filter (from runtime2's installSignalFilter)
+      const filterFn2 = vi.mocked(messageRouter.setSignalFilter).mock.calls.at(-1)![0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      // grinder allows WORK_ASSIGNED from channel subs
+      // But grinder→planner is a peer route (no signal filter), so test from a non-peer source
+      // From planner to grinder_1 (no peer filter exists for this direction)
+      expect(filterFn2(result2.rootId, "grinder_1", "WORK_ASSIGNED")).toBe(true);
+      expect(filterFn2(result2.rootId, "grinder_1", "WORKER_DONE")).toBe(false);
+    });
+
+    it("roles with any unfiltered subscription receive all signals", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      // planner has task_updates subscription with no signals filter → receives all
+      // But planner's peer connections have explicit filters, so test from a non-peer agent
+      // From an unknown agent to planner — falls through to channel sub filter
+      expect(filterFn("unknown_agent", result.rootId, "ANY_SIGNAL")).toBe(true);
+      expect(filterFn("unknown_agent", result.rootId, "RANDOM")).toBe(true);
+    });
+
+    it("peer filter takes precedence over channel subscription filter", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
+        from: string, to: string, signal: string | undefined
+      ) => boolean;
+
+      const judgeId = result.companionIds[0];
+      const plannerId = result.rootId;
+
+      // judge→planner peer only allows FIXUP_CREATED, GREEN_SNAPSHOT
+      // Even though planner's channel subs allow "all" (via unfiltered task_updates),
+      // the peer filter takes precedence
+      expect(filterFn(judgeId, plannerId, "TASK_CREATED")).toBe(false);
+    });
+  });
+
+  describe("emission validation", () => {
+    it("installs emission validator on message router after bootstrap", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      expect(messageRouter.setEmissionValidator).toHaveBeenCalledTimes(1);
+      expect(messageRouter.setEmissionValidator).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it("allows emissions in role's allowed list", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      const plannerId = result.rootId;
+
+      // planner's emissions: [TASK_CREATED, WORK_ASSIGNED]
+      expect(validatorFn(plannerId, "TASK_CREATED").action).toBe("allow");
+      expect(validatorFn(plannerId, "WORK_ASSIGNED").action).toBe("allow");
+    });
+
+    it("rejects disallowed emissions in strict mode", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.enforcement = "strict";
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      const plannerId = result.rootId;
+
+      // WORKER_DONE is not in planner's allowed emissions
+      const res = validatorFn(plannerId, "WORKER_DONE");
+      expect(res.action).toBe("reject");
+      expect(res.message).toContain("WORKER_DONE");
+      expect(res.message).toContain("planner");
+    });
+
+    it("warns on disallowed emissions in permissive mode", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.enforcement = "permissive";
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      const plannerId = result.rootId;
+
+      const res = validatorFn(plannerId, "HEALTH_CHECK");
+      expect(res.action).toBe("warn");
+      expect(res.message).toContain("HEALTH_CHECK");
+    });
+
+    it("audits disallowed emissions in audit mode", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.enforcement = "audit";
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      const plannerId = result.rootId;
+
+      const res = validatorFn(plannerId, "FORBIDDEN");
+      expect(res.action).toBe("audit");
+      expect(res.message).toContain("FORBIDDEN");
+    });
+
+    it("allows untagged emissions for any role", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.enforcement = "strict";
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      // Undefined signal always passes even in strict mode
+      expect(validatorFn(result.rootId, undefined).action).toBe("allow");
+      expect(validatorFn(result.companionIds[0], undefined).action).toBe("allow");
+    });
+
+    it("allows emissions from agents with no role mapping", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.enforcement = "strict";
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
+        agentId: string, signal: string | undefined
+      ) => { action: string; message?: string };
+
+      // Unknown agent — no role mapping, so allowed
+      expect(validatorFn("unknown_agent", "ANYTHING").action).toBe("allow");
+    });
+
+    it("does not install validator when no emissions config", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.emissions = undefined;
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      expect(messageRouter.setEmissionValidator).not.toHaveBeenCalled();
+    });
+
+    it("serializes emissions in team_config event", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      expect(eventStore.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "status",
+          payload: expect.objectContaining({
+            team_config: expect.objectContaining({
+              emissions: expect.objectContaining({
+                planner: ["TASK_CREATED", "WORK_ASSIGNED"],
+                judge: ["HEALTH_CHECK", "GREEN_SNAPSHOT", "FIXUP_CREATED"],
+                grinder: ["WORKER_DONE"],
+              }),
+            }),
+          }),
+        })
       );
     });
   });
