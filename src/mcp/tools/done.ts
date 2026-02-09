@@ -65,10 +65,16 @@ export interface DoneToolDeps {
     /** Get merge queue for coordinating worker merges */
     getMergeQueue?(): AllHandlerDeps["mergeQueue"];
   };
+  /** Optional RoleRegistry for capability-based done() checks */
+  roleRegistry?: import("../../roles/types.js").RoleRegistry;
   /** Optional MailService for recording completion turns */
   mailService?: import("../../mail/mail-service.js").MailService;
   /** Optional ConversationMap for agent-to-conversation lookup */
   conversationMap?: import("../../mail/conversation-map.js").ConversationMap;
+  /** Optional integration strategy (from team config) */
+  integrationStrategy?: import("../../workspace/strategies/types.js").IntegrationStrategy;
+  /** Optional task mode from team config */
+  taskMode?: "push" | "pull";
 }
 
 // =============================================================================
@@ -76,11 +82,15 @@ export interface DoneToolDeps {
 // =============================================================================
 
 /**
- * Check if an agent has the lifecycle.done capability
+ * Check if an agent has the lifecycle.done capability.
+ *
+ * Uses RoleRegistry for capability resolution, supporting both built-in
+ * roles and team-defined roles that extend them.
  */
 export function hasLifecycleDoneCapability(
   eventStore: EventStore,
-  agentId: string
+  agentId: string,
+  roleRegistry?: import("../../roles/types.js").RoleRegistry
 ): { hasCapability: boolean; role: string } {
   // Get the agent to find their role
   const agent = eventStore.getAgent(agentId);
@@ -88,13 +98,15 @@ export function hasLifecycleDoneCapability(
     return { hasCapability: false, role: "unknown" };
   }
 
-  // Get the agent's role (set at spawn time) or default to "worker"
-  // In the future, this should query the RoleRegistry for full capability lookup
   const role = agent.role ?? "worker";
 
-  // Check if the role has lifecycle.done capability
-  // For now, we check based on known roles that have this capability
-  // In the future, this should query the RoleRegistry
+  // Use RoleRegistry for capability lookup when available
+  if (roleRegistry) {
+    const hasCapability = roleRegistry.hasCapability(role, "lifecycle.done");
+    return { hasCapability, role };
+  }
+
+  // Fallback: check base role via prefix match against known built-in roles
   const rolesWithDoneCapability = new Set([
     "worker",
     "worker.resolver",
@@ -102,7 +114,6 @@ export function hasLifecycleDoneCapability(
     "monitor",
   ]);
 
-  // Check exact match or prefix match
   const hasCapability =
     rolesWithDoneCapability.has(role) ||
     rolesWithDoneCapability.has(role.split(".")[0]);
@@ -162,7 +173,7 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
     details?: Record<string, unknown>;
     task_id?: string;
   }): Promise<DoneResult> => {
-    const { eventStore, agentManager, messageRouter, taskManager, workspaceManager, mailService, conversationMap } = deps;
+    const { eventStore, agentManager, messageRouter, taskManager, workspaceManager, roleRegistry, mailService, conversationMap } = deps;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Step 1: Check capability
@@ -170,7 +181,8 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
 
     const { hasCapability, role } = hasLifecycleDoneCapability(
       eventStore,
-      context.agent_id
+      context.agent_id,
+      roleRegistry
     );
 
     if (!hasCapability) {
@@ -286,6 +298,8 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
       getWorkspacePath: workspaceManager
         ? (agentId: string) => workspaceManager.getWorkspace(agentId)?.path
         : undefined,
+      integrationStrategy: deps.integrationStrategy,
+      taskMode: deps.taskMode,
     };
 
     const handlerResult = await dispatchDone(

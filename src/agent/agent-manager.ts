@@ -36,6 +36,7 @@ import type {
   SystemPromptContext,
   AgentLifecycleCallback,
   AgentConfig,
+  ContinueAgentOptions,
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
 import type { RoleRegistry, Capability } from "../roles/types.js";
@@ -74,8 +75,10 @@ function getSpawnCapability(childRole: string): Capability {
       // or system-level agents can spawn coordinators
       return AGENT_CAPABILITIES.SPAWN_CUSTOM;
     default:
-      // For custom roles, check against the custom spawn capability
-      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+      // For team-defined roles (e.g., "grinder"), return the specific capability
+      // (e.g., "agent.spawn.grinder"). The spawn check also accepts
+      // "agent.spawn.custom" as a generic fallback.
+      return `agent.spawn.${childRole}` as Capability;
   }
 }
 
@@ -102,6 +105,20 @@ export interface AgentManager {
    * Resume a stopped agent by loading its existing session.
    */
   resume(agentId: AgentId): Promise<SpawnedAgent>;
+
+  /**
+   * Continue a terminated agent by spawning a new agent with the same
+   * role and task, injecting the prior conversation context as a
+   * resume prefix in the system prompt.
+   *
+   * @param agentId - ID of the agent to continue
+   * @param options - Continuation options
+   * @returns The newly spawned continuation agent
+   */
+  continueAgent(
+    agentId: AgentId,
+    options?: ContinueAgentOptions
+  ): Promise<SpawnedAgent>;
 
   // ── Queries ────────────────────────────────────────────────────
 
@@ -237,6 +254,21 @@ export interface AgentManager {
    */
   onLifecycleEvent(callback: AgentLifecycleCallback): () => void;
 
+  // ── Team Integration ─────────────────────────────────────────
+
+  /**
+   * Set a spawn interceptor that transforms SpawnAgentOptions before spawning.
+   * Used by TeamRuntime to inject team topics, prompts, MCP servers, and env vars.
+   */
+  setSpawnInterceptor(
+    interceptor: SpawnInterceptor | null
+  ): void;
+
+  /**
+   * Get the RoleRegistry used by this AgentManager.
+   */
+  getRoleRegistry(): RoleRegistry;
+
   // ── Mail Services (Late Binding) ─────────────────────────────
 
   /**
@@ -306,6 +338,18 @@ export interface AgentManagerConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Spawn Interceptor
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Function that transforms SpawnAgentOptions before an agent is spawned.
+ * Used by TeamRuntime to inject team-specific configuration.
+ */
+export type SpawnInterceptor = (
+  options: SpawnAgentOptions
+) => SpawnAgentOptions | Promise<SpawnAgentOptions>;
+
+// ─────────────────────────────────────────────────────────────────
 // AgentManager Implementation
 // ─────────────────────────────────────────────────────────────────
 
@@ -329,6 +373,9 @@ export function createAgentManager(
   let mailService = initialMailService;
   let conversationMap = initialConversationMap;
 
+  // Mutable spawn interceptor (set by TeamRuntime)
+  let spawnInterceptor: SpawnInterceptor | null = null;
+
   // Active sessions tracked in memory
   const activeSessions = new Map<AgentId, ActiveSession>();
 
@@ -342,7 +389,12 @@ export function createAgentManager(
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────
 
-  async function spawn(options: SpawnAgentOptions): Promise<SpawnedAgent> {
+  async function spawn(rawOptions: SpawnAgentOptions): Promise<SpawnedAgent> {
+    // Apply spawn interceptor if set (used by TeamRuntime for team context injection)
+    const options = spawnInterceptor
+      ? await spawnInterceptor(rawOptions)
+      : rawOptions;
+
     const {
       task,
       task_id,
@@ -353,6 +405,8 @@ export function createAgentManager(
       topics = [],
       config: agentConfig,
       agentType = defaultAgentType,
+      customPrompt,
+      interactionPatterns,
       // Workspace-related fields (Phase 2)
       role,
       streamId,
@@ -381,7 +435,13 @@ export function createAgentManager(
       const requiredCapability = getSpawnCapability(childRole);
       const parentRole = parentAgent.role ?? "worker";
 
-      if (!roleRegistry.hasCapability(parentRole, requiredCapability)) {
+      // Accept either the specific capability (e.g., agent.spawn.grinder)
+      // or the generic agent.spawn.custom as a fallback for non-built-in roles
+      const hasSpecific = roleRegistry.hasCapability(parentRole, requiredCapability);
+      const hasGeneric = requiredCapability !== AGENT_CAPABILITIES.SPAWN_CUSTOM &&
+        roleRegistry.hasCapability(parentRole, AGENT_CAPABILITIES.SPAWN_CUSTOM);
+
+      if (!hasSpecific && !hasGeneric) {
         throw new AgentManagerError(
           `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
             `Required capability: ${requiredCapability}`,
@@ -417,10 +477,19 @@ export function createAgentManager(
 
     let systemPrompt = generateSystemPrompt(promptContext);
 
-    // Append role-specific system prompt if defined
+    // Append role prompt: team customPrompt takes precedence over resolvedRole.systemPrompt
     const resolvedRole = roleRegistry.resolveRole(role ?? "worker");
-    if (resolvedRole.systemPrompt) {
+    if (customPrompt) {
+      systemPrompt += `\n\n# Role Instructions\n\n${customPrompt}`;
+    } else if (resolvedRole.systemPrompt) {
       systemPrompt += `\n\n# Role-Specific Instructions\n\n${resolvedRole.systemPrompt}`;
+    }
+
+    // Append team interaction pattern sections (pull mode, trunk integration, etc.)
+    if (interactionPatterns && interactionPatterns.length > 0) {
+      for (const pattern of interactionPatterns) {
+        systemPrompt += `\n\n${pattern}`;
+      }
     }
 
     eventStore.emit({
@@ -1308,10 +1377,91 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     lifecycleListeners.clear();
   }
 
+  function setSpawnInterceptor(interceptor: SpawnInterceptor | null): void {
+    spawnInterceptor = interceptor;
+  }
+
+  function getRoleRegistry(): RoleRegistry {
+    return roleRegistry;
+  }
+
+  /**
+   * Continue a terminated agent by spawning a new agent with the same
+   * role and task, injecting prior conversation context as a resume prefix.
+   */
+  async function continueAgent(
+    agentId: AgentId,
+    options?: ContinueAgentOptions
+  ): Promise<SpawnedAgent> {
+    const agent = eventStore.getAgent(agentId);
+    if (!agent) {
+      throw new AgentManagerError(
+        `Agent not found: ${agentId}`,
+        "AGENT_NOT_FOUND",
+        agentId
+      );
+    }
+
+    // Build resume context from EventStore events
+    const maxMessages = options?.maxMessages ?? 50;
+    const events = eventStore.query({
+      type: "status",
+      source_agent_id: agentId,
+      limit: maxMessages,
+    });
+
+    // Format conversation turns as resume context
+    const contextLines: string[] = [];
+    if (options?.additionalContext) {
+      contextLines.push(options.additionalContext);
+    }
+
+    if (events.length > 0) {
+      contextLines.push("## Prior Session Context");
+      contextLines.push(`Continuing from agent ${agentId} (${events.length} events).`);
+      for (const event of events.slice(-20)) {
+        const summary = event.payload?.summary;
+        if (summary && typeof summary === "string") {
+          contextLines.push(`- ${summary}`);
+        }
+      }
+    }
+
+    const resumeContext = contextLines.join("\n");
+
+    // Spawn a continuation agent with same role, task, and context
+    const taskDescription =
+      options?.task ??
+      agent.task ??
+      `Continue work from ${agentId}`;
+
+    const newAgent = await spawn({
+      task: taskDescription,
+      role: agent.role,
+      parent: agent.parent ?? undefined,
+      cwd: agent.cwd ?? defaultCwd,
+      customPrompt: resumeContext || undefined,
+    });
+
+    // Emit continuation event
+    eventStore.emit({
+      type: "status",
+      source: { agent_id: newAgent.id },
+      payload: {
+        status_type: "started",
+        summary: `Continuation of agent ${agentId}`,
+        continuation_of: agentId,
+      },
+    });
+
+    return newAgent;
+  }
+
   return {
     spawn,
     terminate,
     resume,
+    continueAgent,
     get,
     list,
     getChildren,
@@ -1328,6 +1478,8 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     respondToPermission,
     cancelPermission,
     onLifecycleEvent,
+    setSpawnInterceptor,
+    getRoleRegistry,
     setMailServices,
     close,
   };

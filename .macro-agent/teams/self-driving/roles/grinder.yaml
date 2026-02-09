@@ -1,0 +1,17 @@
+name: grinder
+extends: worker
+display_name: "Grinder"
+description: "Claims and executes tasks autonomously"
+
+capabilities_add:
+  - task.claim
+  - git.push
+
+prompt: prompts/grinder.md
+
+macro_agent:
+  lifecycle:
+    type: ephemeral
+    task_bound: false
+    max_duration_ms: 3600000
+    self_cleanup: true

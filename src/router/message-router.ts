@@ -204,7 +204,60 @@ export interface MessageRouter {
    * Supports late binding since mail services may be created after router.
    */
   setTurnRecorder(recorder: TurnRecorderCallback): void;
+
+  /**
+   * Set signal filter for status notification delivery.
+   * Called before delivering each status notification — return false to suppress.
+   * Supports late binding since TeamRuntime is created after router.
+   */
+  setSignalFilter(filter: SignalFilter): void;
+
+  /**
+   * Set emission validator for outbound status events.
+   * Called before emitting a status event — can reject, warn, or audit.
+   * Supports late binding since TeamRuntime is created after router.
+   */
+  setEmissionValidator(validator: EmissionValidator): void;
 }
+
+/**
+ * Signal filter callback for status notification delivery.
+ * Return true to deliver, false to suppress.
+ *
+ * @param from - Agent emitting the status
+ * @param to - Agent that would receive the notification
+ * @param signal - Signal name from details.signal (undefined if not tagged)
+ */
+export type SignalFilter = (
+  from: AgentId,
+  to: AgentId,
+  signal: string | undefined
+) => boolean;
+
+/**
+ * Emission validator result.
+ * - "allow": emit normally
+ * - "reject": block the emission (strict mode)
+ * - "warn": log warning but allow (permissive mode)
+ * - "audit": record audit event but allow (audit mode)
+ */
+export type EmissionValidatorResult = {
+  action: "allow" | "reject" | "warn" | "audit";
+  message?: string;
+};
+
+/**
+ * Emission validator callback for outbound status events.
+ * Called with the emitting agent's ID and the signal name.
+ * Returns an action to take (allow, reject, warn, audit).
+ *
+ * @param agentId - Agent emitting the status
+ * @param signal - Signal name from details.signal (undefined if not tagged)
+ */
+export type EmissionValidator = (
+  agentId: AgentId,
+  signal: string | undefined
+) => EmissionValidatorResult;
 
 /**
  * Callback invoked when a message determines a wake action
@@ -263,6 +316,12 @@ export function createMessageRouter(
 
   // Turn recorder for conversation tracking (late-bound)
   let turnRecorder: TurnRecorderCallback | undefined;
+
+  // Signal filter for status notification delivery (late-bound)
+  let signalFilter: SignalFilter | undefined;
+
+  // Emission validator for outbound status events (late-bound)
+  let emissionValidator: EmissionValidator | undefined;
 
   // Track acknowledged messages: Map<agentId, Set<messageId>>
   const acknowledgedMessages = new Map<AgentId, Set<EventId>>();
@@ -929,6 +988,36 @@ export function createMessageRouter(
   function emitStatus(request: EmitStatusRequest): void {
     const { from, status_type, summary, details } = request;
 
+    // Check emission restrictions if validator installed
+    if (emissionValidator) {
+      const signal = (details as Record<string, unknown> | undefined)?.signal as string | undefined;
+      const result = emissionValidator(from.agent_id, signal);
+
+      if (result.action === "reject") {
+        // Strict mode: block the emission entirely
+        return;
+      }
+
+      if (result.action === "audit") {
+        // Audit mode: record audit event, then continue with emission
+        eventStore.emit({
+          type: "status",
+          source: { agent_id: "system" },
+          payload: {
+            status_type: "discovery",
+            summary: result.message ?? `Emission audit: agent ${from.agent_id} emitted signal '${signal}'`,
+            audit: {
+              type: "emission_violation",
+              agent_id: from.agent_id,
+              signal,
+              status_type,
+            },
+          },
+        });
+      }
+      // "warn" and "allow" proceed normally (warning is logged by the validator installer)
+    }
+
     // Emit status event to event store
     const event = eventStore.emit({
       type: "status",
@@ -943,15 +1032,20 @@ export function createMessageRouter(
       },
     });
 
-    // Route to subtree subscribers
-    routeStatusToSubtreeSubscribers(from.agent_id, {
+    const statusNotification: StatusNotification = {
       agent_id: from.agent_id,
       task_id: from.task_id,
       status_type,
       summary,
       details,
       timestamp: event.timestamp,
-    });
+    };
+
+    // Route to subtree subscribers (hierarchical: parents/ancestors)
+    const subtreeRecipients = routeStatusToSubtreeSubscribers(from.agent_id, statusNotification);
+
+    // Route to topic co-subscribers (non-hierarchical: peers sharing topics)
+    routeStatusToTopicSubscribers(from.agent_id, statusNotification, subtreeRecipients);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1088,13 +1182,15 @@ export function createMessageRouter(
   /**
    * Route status event to subtree subscribers.
    * Parents who have subscribed to an agent's subtree receive status notifications.
+   * Returns the set of agents that were notified (for dedup with topic routing).
    */
   function routeStatusToSubtreeSubscribers(
     agentId: AgentId,
     status: StatusNotification
-  ): void {
+  ): Set<AgentId> {
+    const notified = new Set<AgentId>();
     const agent = eventStore.getAgent(agentId);
-    if (!agent) return;
+    if (!agent) return notified;
 
     // Find all agents with subtree subscription that includes this agent
     // This includes:
@@ -1128,17 +1224,25 @@ export function createMessageRouter(
       }
     }
 
+    // Extract signal name from details (if tagged)
+    const statusSignal = (status.details as Record<string, unknown> | undefined)?.signal as string | undefined;
+
     // Send status notification to each subscriber
     for (const subscriberId of agentsToNotify) {
       // Skip self-notification
       if (subscriberId === agentId) continue;
+
+      // Apply signal filter if installed
+      if (signalFilter && !signalFilter(agentId, subscriberId, statusSignal)) {
+        continue;
+      }
 
       const statusContent = JSON.stringify({
         type: "status_notification",
         ...status,
       });
 
-      eventStore.emit({
+      const event = eventStore.emit({
         type: "message",
         source: {
           agent_id: agentId,
@@ -1151,11 +1255,122 @@ export function createMessageRouter(
           via: "subtree",
         },
       });
+
+      // Wake sleeping agents on status notifications
+      if (sessionChecker && wakeHandler) {
+        try {
+          const decision = getWakeDecisionWithHint(
+            subscriberId,
+            { priority: "normal" as MessagePriority },
+            sessionChecker
+          );
+          if (decision.shouldWake || decision.shouldInterrupt) {
+            wakeHandler(subscriberId, decision, event.id);
+          }
+        } catch {
+          // Never fail status delivery due to wake errors
+        }
+      }
+
+      notified.add(subscriberId);
+    }
+
+    return notified;
+  }
+
+  /**
+   * Route status event to topic co-subscribers.
+   * Agents sharing topic subscriptions with the emitting agent receive status notifications.
+   * This enables non-hierarchical visibility: peers on the same topic see each other's status.
+   * Skips agents already notified via subtree routing to avoid duplicates.
+   */
+  function routeStatusToTopicSubscribers(
+    agentId: AgentId,
+    status: StatusNotification,
+    alreadyNotified: Set<AgentId>
+  ): void {
+    // Find all topics the emitting agent is subscribed to
+    const subscriptions = eventStore.getSubscriptions(agentId);
+    const topicSubscriptions = subscriptions.filter(
+      (s) => s.type === "topic"
+    );
+
+    if (topicSubscriptions.length === 0) return;
+
+    // Collect unique recipients across all shared topics
+    const topicRecipients = new Set<AgentId>();
+    for (const sub of topicSubscriptions) {
+      const subscribers = eventStore.getSubscribers({
+        type: "topic",
+        target: sub.target,
+      });
+      for (const subscriberId of subscribers) {
+        // Skip self and already-notified (from subtree routing)
+        if (subscriberId !== agentId && !alreadyNotified.has(subscriberId)) {
+          topicRecipients.add(subscriberId);
+        }
+      }
+    }
+
+    if (topicRecipients.size === 0) return;
+
+    // Extract signal name from details (if tagged)
+    const statusSignal = (status.details as Record<string, unknown> | undefined)?.signal as string | undefined;
+
+    const statusContent = JSON.stringify({
+      type: "status_notification",
+      ...status,
+    });
+
+    // Deliver to each topic co-subscriber
+    for (const recipientId of topicRecipients) {
+      // Apply signal filter if installed
+      if (signalFilter && !signalFilter(agentId, recipientId, statusSignal)) {
+        continue;
+      }
+
+      const event = eventStore.emit({
+        type: "message",
+        source: {
+          agent_id: agentId,
+        },
+        target: {
+          agent_id: recipientId,
+        },
+        payload: {
+          content: statusContent,
+          via: "topic",
+        },
+      });
+
+      // Wake sleeping agents on status notifications
+      if (sessionChecker && wakeHandler) {
+        try {
+          const decision = getWakeDecisionWithHint(
+            recipientId,
+            { priority: "normal" as MessagePriority },
+            sessionChecker
+          );
+          if (decision.shouldWake || decision.shouldInterrupt) {
+            wakeHandler(recipientId, decision, event.id);
+          }
+        } catch {
+          // Never fail status delivery due to wake errors
+        }
+      }
     }
   }
 
   function setTurnRecorder(recorder: TurnRecorderCallback): void {
     turnRecorder = recorder;
+  }
+
+  function setSignalFilter(filter: SignalFilter): void {
+    signalFilter = filter;
+  }
+
+  function setEmissionValidator(validator: EmissionValidator): void {
+    emissionValidator = validator;
   }
 
   return {
@@ -1171,5 +1386,7 @@ export function createMessageRouter(
     getSubscribers,
     setupDefaultSubscriptions,
     setTurnRecorder,
+    setSignalFilter,
+    setEmissionValidator,
   };
 }

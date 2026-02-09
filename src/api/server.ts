@@ -549,6 +549,116 @@ export function createAPIServer(
     res.json(status);
   });
 
+  // GET /api/team - Get active team info
+  app.get("/api/team", (_req: Request, res: Response) => {
+    // Check for team config in EventStore
+    const statusEvents = eventStore.query({ type: "status", limit: 50 });
+    const teamConfigEvent = statusEvents.find(
+      (e) => e.payload?.team_config != null
+    );
+
+    if (!teamConfigEvent?.payload?.team_config) {
+      res.json({ active: false });
+      return;
+    }
+
+    const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
+    res.json({
+      active: true,
+      name: tc.teamName,
+      strategy: tc.strategy,
+      taskMode: tc.taskMode,
+      enforcement: tc.enforcement,
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Metrics Endpoints (Phase 5)
+  // ─────────────────────────────────────────────────────────────────
+
+  // GET /api/metrics/throughput - Task throughput metrics
+  app.get("/api/metrics/throughput", (req: Request, res: Response) => {
+    const windowMs = req.query.window_ms
+      ? Number(req.query.window_ms)
+      : 5 * 60 * 1000;
+    const after = Date.now() - windowMs;
+
+    const taskEvents = eventStore.query({ type: "task", after });
+    let completed = 0, failed = 0, created = 0;
+    for (const e of taskEvents) {
+      const action = e.payload?.action as string | undefined;
+      if (action === "created") created++;
+      else if (action === "completed") completed++;
+      else if (action === "failed") failed++;
+    }
+    const windowMin = windowMs / 60000;
+
+    res.json({
+      tasksCompleted: completed,
+      tasksFailed: failed,
+      tasksCreated: created,
+      completedPerMinute: windowMin > 0 ? Math.round((completed / windowMin) * 100) / 100 : 0,
+      windowMs,
+    });
+  });
+
+  // GET /api/metrics/utilization - Agent utilization metrics
+  app.get("/api/metrics/utilization", (_req: Request, res: Response) => {
+    const allAgents = eventStore.listAgents();
+    const active = allAgents.filter(
+      (a) => a.state === "running" || a.state === "spawning"
+    );
+    const byRole: Record<string, number> = {};
+    const byState: Record<string, number> = {};
+    for (const a of active) {
+      const role = a.role ?? "unknown";
+      byRole[role] = (byRole[role] ?? 0) + 1;
+    }
+    for (const a of allAgents) {
+      byState[a.state] = (byState[a.state] ?? 0) + 1;
+    }
+
+    res.json({
+      activeAgents: active.length,
+      totalAgents: allAgents.length,
+      agentsByRole: byRole,
+      agentsByState: byState,
+    });
+  });
+
+  // GET /api/metrics/errors - Error metrics
+  app.get("/api/metrics/errors", (req: Request, res: Response) => {
+    const windowMs = req.query.window_ms
+      ? Number(req.query.window_ms)
+      : 30 * 60 * 1000;
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+
+    const statusEvents = eventStore.query({
+      type: "status",
+      after: Date.now() - windowMs,
+    });
+
+    const errors: Array<{ timestamp: number; agentId: string; type: string; summary: string }> = [];
+    const byType: Record<string, number> = {};
+
+    for (const e of statusEvents) {
+      if (e.payload?.status_type !== "failed") continue;
+      const agentId = (e.source as { agent_id?: string })?.agent_id ?? "unknown";
+      const summary = (e.payload?.summary as string) ?? "Unknown error";
+      const errorType = ((e.payload?.details as Record<string, unknown>)?.signal as string) ?? "agent_failed";
+      errors.push({ timestamp: e.timestamp, agentId, type: errorType, summary });
+      byType[errorType] = (byType[errorType] ?? 0) + 1;
+    }
+
+    errors.sort((a, b) => b.timestamp - a.timestamp);
+
+    res.json({
+      totalErrors: errors.length,
+      errorsByType: byType,
+      recentErrors: errors.slice(0, limit),
+    });
+  });
+
   // POST /api/conversation/message - Send message to head manager
   app.post("/api/conversation/message", async (req: Request, res: Response) => {
     // Reject new messages during shutdown

@@ -118,4 +118,7 @@ export interface Task {
 
   /** Current retry state */
   retryState?: RetryState;
+
+  /** Tags for task classification and filtering (used by pull model) */
+  tags?: string[];
 }

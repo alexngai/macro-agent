@@ -1,0 +1,12 @@
+name: developer
+extends: worker
+display_name: "Developer"
+description: "Executes assigned tasks in isolated workspaces"
+
+prompt: prompts/developer.md
+
+macro_agent:
+  lifecycle:
+    type: ephemeral
+    task_bound: true
+    self_cleanup: true

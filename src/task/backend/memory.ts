@@ -27,6 +27,7 @@ import type {
   TaskError,
   SubtaskStatus,
   AssignOptions,
+  ClaimFilter,
   TaskChangeCallback,
   TaskChangeEvent,
   Unsubscribe,
@@ -96,6 +97,7 @@ export class InMemoryTaskBackend implements TaskBackend {
         details: {
           description: options.description,
           parent_task: options.parent_task,
+          tags: options.tags,
         },
       },
     });
@@ -421,6 +423,13 @@ export class InMemoryTaskBackend implements TaskBackend {
       if (filter.rootTasksOnly) {
         tasks = tasks.filter((t) => !t.parent_task);
       }
+
+      if (filter.tags && filter.tags.length > 0) {
+        const filterTags = new Set(filter.tags);
+        tasks = tasks.filter(
+          (t) => t.tags?.some((tag) => filterTags.has(tag))
+        );
+      }
     }
 
     // Convert to ExtendedTask and filter blocked if needed
@@ -616,6 +625,113 @@ export class InMemoryTaskBackend implements TaskBackend {
     }
 
     return task.agent_history ?? [];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Pull Model (Claim/Unclaim)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  async claim(
+    agentId: AgentId,
+    filter?: ClaimFilter
+  ): Promise<ExtendedTask | null> {
+    // Find claimable tasks: pending, not blocked, not assigned
+    const candidates = await this.listClaimable(filter);
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    // Take the first candidate (oldest pending task by creation time)
+    const task = candidates[0];
+
+    // Atomically assign (within the same process, EventStore is synchronous)
+    // Re-check status to handle contention
+    const current = this.eventStore.getTask(task.id);
+    if (!current || current.status !== "pending" || current.assigned_agent) {
+      // Task was claimed by another agent between our check and assignment
+      return null;
+    }
+
+    // Assign to the claiming agent
+    this.eventStore.emit({
+      type: "task",
+      source: { agent_id: agentId },
+      payload: {
+        task_id: task.id,
+        action: "assigned",
+        details: {
+          agent_id: agentId,
+        },
+      },
+    });
+
+    const assigned = this.eventStore.getTask(task.id)!;
+    return this.toExtendedTask(assigned);
+  }
+
+  async unclaim(taskId: TaskId): Promise<void> {
+    const task = this.eventStore.getTask(taskId);
+    if (!task) {
+      throw new TaskBackendError(
+        `Task not found: ${taskId}`,
+        "TASK_NOT_FOUND",
+        taskId
+      );
+    }
+
+    if (!task.assigned_agent) {
+      throw new TaskBackendError(
+        `Task is not assigned: ${taskId}`,
+        "TASK_NOT_ASSIGNED",
+        taskId
+      );
+    }
+
+    // Return to pending status
+    this.eventStore.emit({
+      type: "task",
+      source: { agent_id: task.assigned_agent },
+      payload: {
+        task_id: taskId,
+        action: "unassigned",
+        details: {
+          agent_id: task.assigned_agent,
+        },
+      },
+    });
+  }
+
+  async listClaimable(filter?: ClaimFilter): Promise<ExtendedTask[]> {
+    let tasks = this.eventStore.listTasks();
+
+    // Only pending tasks (not assigned, not in_progress, etc.)
+    tasks = tasks.filter(
+      (t) => t.status === "pending" && !t.assigned_agent
+    );
+
+    // Apply claim filter
+    if (filter) {
+      if (filter.tags && filter.tags.length > 0) {
+        const filterTags = new Set(filter.tags);
+        tasks = tasks.filter(
+          (t) => t.tags?.some((tag) => filterTags.has(tag))
+        );
+      }
+
+      if (filter.rootTasksOnly) {
+        tasks = tasks.filter((t) => !t.parent_task);
+      }
+
+      if (filter.created_by) {
+        tasks = tasks.filter((t) => t.created_by === filter.created_by);
+      }
+    }
+
+    // Filter out blocked tasks
+    return tasks
+      .map((t) => this.toExtendedTask(t))
+      .filter((t) => !t.isBlocked);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

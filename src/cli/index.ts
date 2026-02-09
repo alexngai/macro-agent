@@ -16,6 +16,8 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { createAPIServer } from "../api/server.js";
+import { loadProjectConfig } from "../config/project-config.js";
+import { loadTeam, TeamRuntime } from "../teams/index.js";
 import type { Agent, Task } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ program
   .option("-p, --port <port>", "Port to listen on", "3000")
   .option("-h, --host <host>", "Host to bind to", "localhost")
   .option("--cwd <path>", "Working directory for agents")
+  .option("--team <name>", "Load team template")
   .action(async (options) => {
     console.log(chalk.blue("Starting multi-agent server..."));
 
@@ -129,6 +132,32 @@ program
       const messageRouter = createMessageRouter(eventStore);
       const agentManager = createAgentManager(eventStore, messageRouter);
       const taskManager = createTaskManager(eventStore);
+
+      // Determine team name: CLI flag > project config > none
+      const projectConfig = loadProjectConfig(options.cwd);
+      const teamName = options.team ?? projectConfig.team;
+
+      // Load and initialize team if specified
+      let teamRuntime: TeamRuntime | null = null;
+      if (teamName) {
+        console.log(chalk.blue(`Loading team template '${teamName}'...`));
+        const manifest = await loadTeam(
+          teamName,
+          agentManager.getRoleRegistry(),
+          options.cwd
+        );
+        teamRuntime = new TeamRuntime(manifest, {
+          agentManager,
+          messageRouter,
+          eventStore,
+        });
+        await teamRuntime.initialize();
+        console.log(
+          chalk.green(
+            `Team '${teamName}' loaded: ${manifest.roles.join(", ")}`
+          )
+        );
+      }
 
       // Create API server
       const server = createAPIServer(
@@ -142,11 +171,26 @@ program
       console.log(
         chalk.green(`Server running at http://${options.host}:${options.port}`)
       );
+
+      // Bootstrap team agents after server is running
+      if (teamRuntime) {
+        const { rootId, companionIds } = await teamRuntime.bootstrap();
+        console.log(
+          chalk.green(
+            `Team '${teamName}' bootstrapped: root=${rootId}` +
+              (companionIds.length > 0
+                ? `, companions=${companionIds.join(", ")}`
+                : "")
+          )
+        );
+      }
+
       console.log(chalk.gray("Press Ctrl+C to stop"));
 
       // Handle shutdown
       process.on("SIGINT", async () => {
         console.log(chalk.yellow("\nShutting down..."));
+        if (teamRuntime) await teamRuntime.teardown();
         await server.stop();
         await agentManager.close();
         await eventStore.close();
