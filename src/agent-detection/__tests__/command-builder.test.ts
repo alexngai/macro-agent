@@ -296,6 +296,14 @@ describe("buildSpawnCommand()", () => {
 // =============================================================================
 
 describe("formatSpawnCommand()", () => {
+  it("formats a command with no arguments", () => {
+    const formatted = formatSpawnCommand({
+      command: "my-agent",
+      args: [],
+    });
+    expect(formatted).toBe("my-agent");
+  });
+
   it("formats a simple command", () => {
     const formatted = formatSpawnCommand({
       command: "claude",

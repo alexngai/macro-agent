@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 
 import { AgentDetector, createAgentDetector, parseVersion } from "../detector.js";
+import { AgentDetectionError } from "../types.js";
 
 // Mock child_process.execFile
 vi.mock("node:child_process", () => ({
@@ -445,9 +446,18 @@ describe("AgentDetector", () => {
       expect(def.binary).toBe("claude");
     });
 
-    it("throws for unknown agent", () => {
+    it("throws AgentDetectionError with UNKNOWN_AGENT code for unknown agent", () => {
       const detector = createAgentDetector();
-      expect(() => detector.getDefinition("unknown")).toThrow("Unknown agent backend: unknown");
+      try {
+        detector.getDefinition("foo-agent");
+        expect.fail("Expected AgentDetectionError to be thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(AgentDetectionError);
+        const error = err as AgentDetectionError;
+        expect(error.code).toBe("UNKNOWN_AGENT");
+        expect(error.agentId).toBe("foo-agent");
+        expect(error.message).toBe("Unknown agent backend: foo-agent");
+      }
     });
   });
 
@@ -494,6 +504,254 @@ describe("AgentDetector", () => {
 
       const detector = createAgentDetector();
       expect(await detector.isInstalled("codex")).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // getAgent()
+  // ===========================================================================
+
+  describe("getAgent()", () => {
+    it("returns a specific detected agent by ID", async () => {
+      setupExecFileMock({
+        "which:claude": { stdout: "/usr/local/bin/claude\n" },
+        "version:claude": { stdout: "1.0.0\n" },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+      const agent = await detector.getAgent("claude-code");
+      expect(agent).toBeDefined();
+      expect(agent!.id).toBe("claude-code");
+      expect(agent!.installed).toBe(true);
+      expect(agent!.version).toBe("1.0.0");
+    });
+
+    it("returns undefined for unknown agent ID", async () => {
+      setupExecFileMock({
+        "which:claude": { error: new Error("not found") },
+        "command-v:claude": { error: new Error("not found") },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+      const agent = await detector.getAgent("nonexistent");
+      expect(agent).toBeUndefined();
+    });
+
+    it("returns not-installed agent entry by ID", async () => {
+      setupExecFileMock({
+        "which:claude": { error: new Error("not found") },
+        "command-v:claude": { error: new Error("not found") },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+      const agent = await detector.getAgent("codex");
+      expect(agent).toBeDefined();
+      expect(agent!.id).toBe("codex");
+      expect(agent!.installed).toBe(false);
+      expect(agent!.version).toBeUndefined();
+      expect(agent!.path).toBeUndefined();
+    });
+  });
+
+  // ===========================================================================
+  // All agents not found (no crash)
+  // ===========================================================================
+
+  describe("detection with no agents installed", () => {
+    it("handles all agents not found without crashing", async () => {
+      setupExecFileMock({
+        "which:claude": { error: new Error("not found") },
+        "command-v:claude": { error: new Error("not found") },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+      const result = await detector.detect();
+
+      expect(result.scanned).toBe(6);
+      expect(result.agents).toHaveLength(6);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+
+      // All agents should be marked as not installed
+      for (const agent of result.agents) {
+        expect(agent.installed).toBe(false);
+        expect(agent.version).toBeUndefined();
+        expect(agent.path).toBeUndefined();
+        expect(agent.definition).toBeDefined();
+        expect(agent.detectedAt).toBeGreaterThan(0);
+      }
+    });
+
+    it("getAvailableAgents returns empty list when nothing installed", async () => {
+      setupExecFileMock({
+        "which:claude": { error: new Error("not found") },
+        "command-v:claude": { error: new Error("not found") },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+      const result = await detector.getAvailableAgents();
+      expect(result.agents).toHaveLength(0);
+    });
+  });
+
+  // ===========================================================================
+  // Concurrent detection deduplication
+  // ===========================================================================
+
+  describe("concurrent detection deduplication", () => {
+    it("deduplicates concurrent detect() calls into a single scan", async () => {
+      setupExecFileMock({
+        "which:claude": { stdout: "/usr/local/bin/claude\n" },
+        "version:claude": { stdout: "1.0.0\n" },
+        "which:codex": { error: new Error("not found") },
+        "command-v:codex": { error: new Error("not found") },
+        "which:gemini": { error: new Error("not found") },
+        "command-v:gemini": { error: new Error("not found") },
+        "which:opencode": { error: new Error("not found") },
+        "command-v:opencode": { error: new Error("not found") },
+        "which:aider": { error: new Error("not found") },
+        "command-v:aider": { error: new Error("not found") },
+        "which:goose": { error: new Error("not found") },
+        "command-v:goose": { error: new Error("not found") },
+      });
+
+      const detector = createAgentDetector();
+
+      // Fire two detect() calls concurrently (no await)
+      const promise1 = detector.detect({ refresh: true });
+      const promise2 = detector.detect({ refresh: true });
+
+      const [result1, result2] = await Promise.all([promise1, promise2]);
+
+      // Both should return the same result object
+      expect(result1).toEqual(result2);
+
+      // execFile should only be called once per agent (not doubled),
+      // meaning only one scan ran. Each agent needs 1-2 calls (which + maybe version).
+      // With 6 agents, a single scan calls which for each (6 calls) plus
+      // version for installed ones. Two scans would roughly double the call count.
+      // We check that the total is consistent with a single scan.
+      const totalCalls = mockExecFile.mock.calls.length;
+      // A single scan: 6 which calls + some fallback/version calls.
+      // Should be well under 20 for a single scan (two scans would be ~24+).
+      expect(totalCalls).toBeLessThanOrEqual(14);
+    });
+
+    it("isDetecting() returns true during active detection", async () => {
+      let resolveWhich: ((value: unknown) => void) | undefined;
+      const whichPromise = new Promise((resolve) => {
+        resolveWhich = resolve;
+      });
+
+      // Make the which call hang so we can check isDetecting()
+      mockExecFile.mockImplementation(((
+        _command: string,
+        _args: string[],
+        _options: unknown,
+        callback: (err: Error | null, result: { stdout: string; stderr: string }) => void
+      ) => {
+        whichPromise.then(() => {
+          callback(new Error("not found"), { stdout: "", stderr: "" });
+        });
+      }) as unknown as typeof execFile);
+
+      const detector = createAgentDetector();
+      const detectPromise = detector.detect();
+
+      // While the mock is still pending, isDetecting should be true
+      expect(detector.isDetecting()).toBe(true);
+
+      // Resolve the hanging mock
+      resolveWhich!(undefined);
+      await detectPromise;
+
+      expect(detector.isDetecting()).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // AgentDetectionError
+  // ===========================================================================
+
+  describe("AgentDetectionError", () => {
+    it("has correct name property", () => {
+      const error = new AgentDetectionError("test", "UNKNOWN_AGENT", "foo");
+      expect(error.name).toBe("AgentDetectionError");
+    });
+
+    it("has correct code property", () => {
+      const error = new AgentDetectionError("test", "AGENT_NOT_INSTALLED", "bar");
+      expect(error.code).toBe("AGENT_NOT_INSTALLED");
+    });
+
+    it("has correct agentId property", () => {
+      const error = new AgentDetectionError("test", "UNKNOWN_AGENT", "my-agent");
+      expect(error.agentId).toBe("my-agent");
+    });
+
+    it("has correct message", () => {
+      const error = new AgentDetectionError("Something went wrong", "DETECTION_FAILED");
+      expect(error.message).toBe("Something went wrong");
+    });
+
+    it("is an instance of Error", () => {
+      const error = new AgentDetectionError("test", "UNKNOWN_AGENT");
+      expect(error).toBeInstanceOf(Error);
+    });
+
+    it("works without agentId", () => {
+      const error = new AgentDetectionError("test", "DETECTION_TIMEOUT");
+      expect(error.agentId).toBeUndefined();
+      expect(error.code).toBe("DETECTION_TIMEOUT");
     });
   });
 
