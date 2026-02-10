@@ -8,7 +8,7 @@
  * @implements [[s-7ktd]] Workspace types section
  */
 
-import type { Stream, WorkerTask, StartTaskResult } from 'dataplane';
+import type { Stream, WorkerTask, StartTaskResult } from 'git-cascade';
 import type { MergeQueueInterface } from './merge-queue/types.js';
 
 /**

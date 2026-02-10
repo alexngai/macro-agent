@@ -290,6 +290,43 @@ describe("ACP Mode Integration", () => {
       expect(loadResponse).toEqual({});
     });
 
+    it("should load session by agentId via _meta", async () => {
+      // Create a session first
+      const newResponse = await macroAgent.newSession({
+        cwd: "/test/project",
+      });
+
+      const originalSessionId = newResponse.sessionId;
+      const originalAgentId = macroAgent.getMappedAgentId(originalSessionId);
+
+      // Create a new MacroAgent instance (simulating reconnect)
+      const newMacroAgent = new MacroAgent(mockConnection, {
+        agentManager: mockAgentManager,
+        eventStore: mockEventStore,
+        taskManager: mockTaskManager,
+        defaultCwd: "/test/integration",
+      });
+
+      // Load using _meta.agentId — the server resolves agentId to session_id
+      const loadResponse = await newMacroAgent.loadSession({
+        sessionId: "_resume_",
+        cwd: "/test/project",
+        _meta: { agentId: originalAgentId },
+      } as any);
+
+      expect(loadResponse).toEqual({});
+    });
+
+    it("should throw when _meta.agentId references non-existent agent", async () => {
+      await expect(
+        macroAgent.loadSession({
+          sessionId: "_resume_",
+          cwd: "/test/project",
+          _meta: { agentId: "non-existent-agent" },
+        } as any)
+      ).rejects.toThrow("Agent not found: non-existent-agent");
+    });
+
     it("should handle authenticate (no-op)", async () => {
       const response = await macroAgent.authenticate({
         methodId: "none",
@@ -334,7 +371,8 @@ describe("ACP Mode Integration", () => {
       expect(extensions).toContain("_macro/checkCapability");
       expect(extensions).toContain("_macro/respondToPermission");
       expect(extensions).toContain("_macro/cancelPermission");
-      expect(extensions?.length).toBe(15);
+      expect(extensions).toContain("_macro/resume");
+      expect(extensions?.length).toBe(16);
 
       expect(initResponse.agentCapabilities?._meta?.agentType).toBe(
         "macro-agent"
@@ -859,5 +897,127 @@ describe("ACP Protocol Compliance", () => {
     // Extensions should be advertised with underscore prefix
     const extensions = initResponse.agentCapabilities?._meta?.extensions;
     expect(extensions?.every((e: string) => e.startsWith("_"))).toBe(true);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Agent Resume Flow Integration Tests
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("Extension: _macro/resume", () => {
+    it("should resume a stopped sub-agent via head manager", async () => {
+      // 1. Create session (head manager)
+      await macroAgent.newSession({ cwd: "/test/project" });
+
+      // 2. Spawn a sub-agent
+      const spawnResponse = await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Worker agent to be resumed",
+      });
+      const childAgentId = spawnResponse.agentId as string;
+
+      // 3. Simulate agent being stopped (update store state)
+      const childAgent = agentStore.get(childAgentId)!;
+      childAgent.state = "stopped";
+      agentStore.set(childAgentId, childAgent);
+
+      // 4. Resume via _macro/resume extension
+      const resumeResponse = await macroAgent.extMethod("_macro/resume", {
+        agentId: childAgentId,
+      });
+
+      expect(resumeResponse.success).toBe(true);
+      expect(resumeResponse.agentId).toBe(childAgentId);
+      expect(resumeResponse.sessionId).toBeDefined();
+
+      // 5. Verify agentManager.resume was called with correct ID
+      expect(mockAgentManager.resume).toHaveBeenCalledWith(childAgentId);
+    });
+
+    it("should resume a failed sub-agent", async () => {
+      await macroAgent.newSession({ cwd: "/test/project" });
+
+      const spawnResponse = await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Agent that failed",
+      });
+      const childAgentId = spawnResponse.agentId as string;
+
+      // Simulate failed state
+      const childAgent = agentStore.get(childAgentId)!;
+      childAgent.state = "failed";
+      agentStore.set(childAgentId, childAgent);
+
+      const resumeResponse = await macroAgent.extMethod("_macro/resume", {
+        agentId: childAgentId,
+      });
+
+      expect(resumeResponse.success).toBe(true);
+      expect(mockAgentManager.resume).toHaveBeenCalledWith(childAgentId);
+    });
+
+    it("should reject resuming a running agent", async () => {
+      await macroAgent.newSession({ cwd: "/test/project" });
+
+      // Spawn returns a running agent
+      const spawnResponse = await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Running agent",
+      });
+      const childAgentId = spawnResponse.agentId as string;
+
+      // Agent is running — resume should fail
+      await expect(
+        macroAgent.extMethod("_macro/resume", {
+          agentId: childAgentId,
+        })
+      ).rejects.toThrow("only stopped or failed");
+    });
+
+    it("should reject resuming a non-existent agent", async () => {
+      await expect(
+        macroAgent.extMethod("_macro/resume", {
+          agentId: "non-existent-agent",
+        })
+      ).rejects.toThrow("Agent not found");
+    });
+
+    it("should reject resume without agentId", async () => {
+      await expect(
+        macroAgent.extMethod("_macro/resume", {})
+      ).rejects.toThrow("agentId is required");
+    });
+
+    it("full lifecycle: spawn → stop → resume", async () => {
+      // Initialize and create session
+      await macroAgent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+      await macroAgent.newSession({ cwd: "/test/project" });
+
+      // Spawn sub-agent
+      const spawnResponse = await macroAgent.extMethod("macro/spawnAgent", {
+        task_description: "Full lifecycle test agent",
+        options: { cwd: "/test/spawn" },
+      });
+      const agentId = spawnResponse.agentId as string;
+      const sessionId = spawnResponse.sessionId as string;
+
+      // Verify agent is running
+      const runningAgent = agentStore.get(agentId)!;
+      expect(runningAgent.state).toBe("running");
+      expect(runningAgent.session_id).toBe(sessionId);
+
+      // Simulate stop
+      runningAgent.state = "stopped";
+      agentStore.set(agentId, runningAgent);
+
+      // Resume
+      const resumeResponse = await macroAgent.extMethod("_macro/resume", {
+        agentId,
+      });
+
+      expect(resumeResponse.success).toBe(true);
+      expect(resumeResponse.agentId).toBe(agentId);
+      // Session ID is preserved from the mock's resume implementation
+      expect(resumeResponse.sessionId).toBe(sessionId);
+    });
   });
 });

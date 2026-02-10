@@ -31,13 +31,22 @@ export {
   type InternalWorkspace,
 } from "./workspace.js";
 
+// Resume extension
+export {
+  registerResumeExtension,
+  unregisterResumeExtension,
+  type ResumeExtensionServices,
+} from "./resume.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
 import type { WorkspaceExtensionServices } from "./workspace.js";
+import type { ResumeExtensionServices } from "./resume.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
+import { registerResumeExtension } from "./resume.js";
 
 // =============================================================================
 // Combined Registration
@@ -50,6 +59,7 @@ export interface MacroExtensionServices {
   task?: TaskExtensionServices;
   wake?: WakeExtensionServices;
   workspace?: WorkspaceExtensionServices;
+  resume?: ResumeExtensionServices;
 }
 
 /**
@@ -98,6 +108,10 @@ export function registerMacroExtensions(
   if (services.workspace) {
     registerWorkspaceExtension(adapter, services.workspace);
   }
+
+  if (services.resume) {
+    registerResumeExtension(adapter, services.resume);
+  }
 }
 
 /**
@@ -116,6 +130,7 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
     adapter.unregisterExtension("_macro/task/send");
     adapter.unregisterExtension("_macro/wake");
     adapter.unregisterExtension("_macro/workspace/info");
+    adapter.unregisterExtension("_macro/resume");
   } catch {
     // Ignore errors from unregistering non-existent extensions
   }
@@ -140,6 +155,8 @@ export const MACRO_EXTENSION_METHODS = [
   "_macro/wake",
   // Workspace extension
   "_macro/workspace/info",
+  // Resume extension
+  "_macro/resume",
 ] as const;
 
 /**
@@ -154,4 +171,5 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   "_macro/task/send": "canMessage",
   "_macro/wake": "canMessage", // Wake requires messaging capability
   "_macro/workspace/info": "canQuery",
+  "_macro/resume": "canManageLifecycle",
 };

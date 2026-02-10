@@ -30,7 +30,7 @@ import { attemptMerge, abortMerge, getCurrentBranch } from "./cleanup.js";
  */
 export interface CascadeAgent {
   id: AgentId;
-  state: "running" | "spawning" | "stopped";
+  state: "running" | "spawning" | "stopped" | "failed";
   parent?: AgentId | null;
 }
 

@@ -10,12 +10,15 @@ import {
   unregisterWakeExtension,
   registerWorkspaceExtension,
   unregisterWorkspaceExtension,
+  registerResumeExtension,
+  unregisterResumeExtension,
   registerMacroExtensions,
   MACRO_EXTENSION_METHODS,
   EXTENSION_CAPABILITIES,
   type TaskExtensionServices,
   type WakeExtensionServices,
   type WorkspaceExtensionServices,
+  type ResumeExtensionServices,
 } from "../extensions/index.js";
 import type { MAPAdapter, ExtensionHandler, ExtensionContext } from "../interface.js";
 import type { ParticipantCapabilities } from "../types.js";
@@ -551,6 +554,108 @@ describe("Workspace Extension", () => {
 });
 
 // =============================================================================
+// Resume Extension Tests
+// =============================================================================
+
+describe("Resume Extension", () => {
+  let adapter: MAPAdapter & { handlers: Map<string, ExtensionHandler> };
+  let services: ResumeExtensionServices;
+
+  beforeEach(() => {
+    adapter = createMockAdapter();
+
+    services = {
+      getAgent: vi.fn().mockReturnValue({
+        id: "agent-1" as AgentId,
+        state: "stopped",
+        session_id: "session-1",
+      }),
+      resume: vi.fn().mockResolvedValue({
+        id: "agent-1" as AgentId,
+        session_id: "session-1",
+      }),
+    };
+  });
+
+  describe("registration", () => {
+    it("registers resume method", () => {
+      registerResumeExtension(adapter, services);
+      expect(adapter.handlers.has("_macro/resume")).toBe(true);
+    });
+
+    it("unregisters resume method", () => {
+      registerResumeExtension(adapter, services);
+      unregisterResumeExtension(adapter);
+      expect(adapter.handlers.has("_macro/resume")).toBe(false);
+    });
+  });
+
+  describe("_macro/resume", () => {
+    it("resumes a stopped agent", async () => {
+      registerResumeExtension(adapter, services);
+      const handler = adapter.handlers.get("_macro/resume")!;
+
+      const result = await handler(createMockContext(), { agentId: "agent-1" });
+
+      expect(services.resume).toHaveBeenCalledWith("agent-1");
+      expect(result).toEqual({
+        success: true,
+        agentId: "agent-1",
+        sessionId: "session-1",
+      });
+    });
+
+    it("resumes a failed agent", async () => {
+      (services.getAgent as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: "agent-1",
+        state: "failed",
+        session_id: "session-1",
+      });
+
+      registerResumeExtension(adapter, services);
+      const handler = adapter.handlers.get("_macro/resume")!;
+
+      const result = await handler(createMockContext(), { agentId: "agent-1" });
+
+      expect(services.resume).toHaveBeenCalledWith("agent-1");
+      expect(result).toHaveProperty("success", true);
+    });
+
+    it("throws for missing agentId", async () => {
+      registerResumeExtension(adapter, services);
+      const handler = adapter.handlers.get("_macro/resume")!;
+
+      await expect(handler(createMockContext(), {})).rejects.toThrow("agentId is required");
+    });
+
+    it("throws for non-existent agent", async () => {
+      (services.getAgent as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+
+      registerResumeExtension(adapter, services);
+      const handler = adapter.handlers.get("_macro/resume")!;
+
+      await expect(
+        handler(createMockContext(), { agentId: "missing" })
+      ).rejects.toThrow("not found");
+    });
+
+    it("throws for running agent", async () => {
+      (services.getAgent as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: "agent-1",
+        state: "running",
+      });
+
+      registerResumeExtension(adapter, services);
+      const handler = adapter.handlers.get("_macro/resume")!;
+
+      await expect(
+        handler(createMockContext(), { agentId: "agent-1" })
+      ).rejects.toThrow("only stopped or failed");
+    });
+  });
+});
+
+// =============================================================================
 // Combined Registration Tests
 // =============================================================================
 
@@ -588,11 +693,16 @@ describe("registerMacroExtensions", () => {
         getWorkspace: vi.fn(),
         agentExists: vi.fn(),
       },
+      resume: {
+        getAgent: vi.fn(),
+        resume: vi.fn(),
+      },
     });
 
     expect(adapter.handlers.has("_macro/task/list")).toBe(true);
     expect(adapter.handlers.has("_macro/wake")).toBe(true);
     expect(adapter.handlers.has("_macro/workspace/info")).toBe(true);
+    expect(adapter.handlers.has("_macro/resume")).toBe(true);
   });
 });
 
@@ -606,6 +716,7 @@ describe("MACRO_EXTENSION_METHODS", () => {
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/task/send");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/wake");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/workspace/info");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/resume");
   });
 });
 
@@ -616,5 +727,6 @@ describe("EXTENSION_CAPABILITIES", () => {
     expect(EXTENSION_CAPABILITIES["_macro/task/send"]).toBe("canMessage");
     expect(EXTENSION_CAPABILITIES["_macro/wake"]).toBe("canMessage");
     expect(EXTENSION_CAPABILITIES["_macro/workspace/info"]).toBe("canQuery");
+    expect(EXTENSION_CAPABILITIES["_macro/resume"]).toBe("canManageLifecycle");
   });
 });
