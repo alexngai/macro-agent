@@ -12,6 +12,8 @@ import {
   unregisterWorkspaceExtension,
   registerResumeExtension,
   unregisterResumeExtension,
+  registerAgentDetectionExtensions,
+  unregisterAgentDetectionExtensions,
   registerMacroExtensions,
   MACRO_EXTENSION_METHODS,
   EXTENSION_CAPABILITIES,
@@ -19,6 +21,7 @@ import {
   type WakeExtensionServices,
   type WorkspaceExtensionServices,
   type ResumeExtensionServices,
+  type AgentDetectionExtensionServices,
 } from "../extensions/index.js";
 import type { MAPAdapter, ExtensionHandler, ExtensionContext } from "../interface.js";
 import type { ParticipantCapabilities } from "../types.js";
@@ -656,6 +659,239 @@ describe("Resume Extension", () => {
 });
 
 // =============================================================================
+// Agent Detection Extension Tests
+// =============================================================================
+
+describe("Agent Detection Extensions", () => {
+  let adapter: MAPAdapter & { handlers: Map<string, ExtensionHandler> };
+  let services: AgentDetectionExtensionServices;
+
+  const mockDetectionResult = {
+    agents: [
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        installed: true,
+        version: "1.2.3",
+        path: "/usr/local/bin/claude",
+        definition: {
+          id: "claude-code",
+          name: "Claude Code",
+          description: "Anthropic Claude Code CLI",
+          binary: "claude",
+          versionArgs: ["--version"],
+          headless: { promptFlag: "-p", defaultFlags: ["--output-format", "stream-json"] },
+          vendor: "Anthropic",
+        },
+        detectedAt: 1000,
+      },
+      {
+        id: "codex",
+        name: "Codex CLI",
+        installed: false,
+        definition: {
+          id: "codex",
+          name: "Codex CLI",
+          description: "OpenAI Codex CLI",
+          binary: "codex",
+          versionArgs: ["--version"],
+          headless: { subcommand: "exec", promptFlag: "", defaultFlags: ["--full-auto"] },
+          vendor: "OpenAI",
+        },
+        detectedAt: 1000,
+      },
+    ],
+    scanned: 2,
+    durationMs: 150,
+  };
+
+  beforeEach(() => {
+    adapter = createMockAdapter();
+
+    services = {
+      getAvailableAgents: vi.fn().mockResolvedValue(mockDetectionResult),
+      isDetecting: vi.fn().mockReturnValue(false),
+      getCachedResult: vi.fn().mockReturnValue(null),
+    };
+  });
+
+  describe("registration", () => {
+    it("registers both agent detection methods", () => {
+      registerAgentDetectionExtensions(adapter, services);
+
+      expect(adapter.handlers.has("_macro/agents/available")).toBe(true);
+      expect(adapter.handlers.has("_macro/agents/refresh")).toBe(true);
+    });
+
+    it("unregisters both agent detection methods", () => {
+      registerAgentDetectionExtensions(adapter, services);
+      unregisterAgentDetectionExtensions(adapter);
+
+      expect(adapter.handlers.has("_macro/agents/available")).toBe(false);
+      expect(adapter.handlers.has("_macro/agents/refresh")).toBe(false);
+    });
+  });
+
+  describe("_macro/agents/available", () => {
+    it("returns detected agents when no cache exists", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {});
+
+      expect(services.getAvailableAgents).toHaveBeenCalledWith({
+        includeNotInstalled: false,
+      });
+      expect(result).toHaveProperty("agents");
+      expect(result).toHaveProperty("scanned", 2);
+      expect(result).toHaveProperty("durationMs", 150);
+      expect(result).toHaveProperty("cached", false);
+    });
+
+    it("filters out not-installed agents by default", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {});
+
+      expect(services.getAvailableAgents).toHaveBeenCalledWith({
+        includeNotInstalled: false,
+      });
+    });
+
+    it("includes not-installed agents when requested", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {
+        includeNotInstalled: true,
+      });
+
+      // No cache, so falls through to getAvailableAgents
+      expect(services.getAvailableAgents).toHaveBeenCalledWith({
+        includeNotInstalled: true,
+      });
+    });
+
+    it("uses cached results when available", async () => {
+      (services.getCachedResult as ReturnType<typeof vi.fn>).mockReturnValue(
+        mockDetectionResult
+      );
+
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {});
+
+      // Should use cache, not call getAvailableAgents
+      expect(services.getAvailableAgents).not.toHaveBeenCalled();
+      expect(result).toHaveProperty("cached", true);
+      // Default excludes not-installed, so only 1 agent
+      expect((result as any).agents).toHaveLength(1);
+      expect((result as any).agents[0].id).toBe("claude-code");
+    });
+
+    it("returns all agents from cache when includeNotInstalled is true", async () => {
+      (services.getCachedResult as ReturnType<typeof vi.fn>).mockReturnValue(
+        mockDetectionResult
+      );
+
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {
+        includeNotInstalled: true,
+      });
+
+      expect((result as any).agents).toHaveLength(2);
+      expect(result).toHaveProperty("cached", true);
+    });
+
+    it("strips binary paths from results", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {});
+
+      const agents = (result as any).agents;
+      for (const agent of agents) {
+        expect(agent).not.toHaveProperty("path");
+        expect(agent).not.toHaveProperty("definition");
+        expect(agent).not.toHaveProperty("detectedAt");
+      }
+    });
+
+    it("includes vendor and description in results", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), {});
+
+      const agents = (result as any).agents;
+      expect(agents[0]).toHaveProperty("vendor", "Anthropic");
+      expect(agents[0]).toHaveProperty("description", "Anthropic Claude Code CLI");
+    });
+
+    it("handles empty params", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/available")!;
+
+      const result = await handler(createMockContext(), null);
+
+      expect(result).toHaveProperty("agents");
+    });
+  });
+
+  describe("_macro/agents/refresh", () => {
+    it("forces a fresh detection scan", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/refresh")!;
+
+      const result = await handler(createMockContext(), {});
+
+      expect(services.getAvailableAgents).toHaveBeenCalledWith({
+        refresh: true,
+        includeNotInstalled: true,
+      });
+      expect(result).toHaveProperty("agents");
+      expect(result).toHaveProperty("scanned", 2);
+      expect(result).toHaveProperty("durationMs", 150);
+    });
+
+    it("always returns all agents including not-installed", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/refresh")!;
+
+      const result = await handler(createMockContext(), {});
+
+      expect((result as any).agents).toHaveLength(2);
+    });
+
+    it("does not include a cached flag", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/refresh")!;
+
+      const result = await handler(createMockContext(), {});
+
+      expect(result).not.toHaveProperty("cached");
+    });
+
+    it("strips binary paths from results", async () => {
+      registerAgentDetectionExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/agents/refresh")!;
+
+      const result = await handler(createMockContext(), {});
+
+      const agents = (result as any).agents;
+      for (const agent of agents) {
+        expect(agent).not.toHaveProperty("path");
+        expect(agent).not.toHaveProperty("definition");
+      }
+    });
+  });
+});
+
+// =============================================================================
 // Combined Registration Tests
 // =============================================================================
 
@@ -697,12 +933,19 @@ describe("registerMacroExtensions", () => {
         getAgent: vi.fn(),
         resume: vi.fn(),
       },
+      agentDetection: {
+        getAvailableAgents: vi.fn(),
+        isDetecting: vi.fn(),
+        getCachedResult: vi.fn(),
+      },
     });
 
     expect(adapter.handlers.has("_macro/task/list")).toBe(true);
     expect(adapter.handlers.has("_macro/wake")).toBe(true);
     expect(adapter.handlers.has("_macro/workspace/info")).toBe(true);
     expect(adapter.handlers.has("_macro/resume")).toBe(true);
+    expect(adapter.handlers.has("_macro/agents/available")).toBe(true);
+    expect(adapter.handlers.has("_macro/agents/refresh")).toBe(true);
   });
 });
 
@@ -717,6 +960,8 @@ describe("MACRO_EXTENSION_METHODS", () => {
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/wake");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/workspace/info");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/resume");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/agents/available");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/agents/refresh");
   });
 });
 
@@ -728,5 +973,7 @@ describe("EXTENSION_CAPABILITIES", () => {
     expect(EXTENSION_CAPABILITIES["_macro/wake"]).toBe("canMessage");
     expect(EXTENSION_CAPABILITIES["_macro/workspace/info"]).toBe("canQuery");
     expect(EXTENSION_CAPABILITIES["_macro/resume"]).toBe("canManageLifecycle");
+    expect(EXTENSION_CAPABILITIES["_macro/agents/available"]).toBe("canQuery");
+    expect(EXTENSION_CAPABILITIES["_macro/agents/refresh"]).toBe("canQuery");
   });
 });

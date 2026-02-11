@@ -38,15 +38,24 @@ export {
   type ResumeExtensionServices,
 } from "./resume.js";
 
+// Agent detection extensions
+export {
+  registerAgentDetectionExtensions,
+  unregisterAgentDetectionExtensions,
+  type AgentDetectionExtensionServices,
+} from "./agent-detection.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
 import type { WorkspaceExtensionServices } from "./workspace.js";
 import type { ResumeExtensionServices } from "./resume.js";
+import type { AgentDetectionExtensionServices } from "./agent-detection.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
 import { registerResumeExtension } from "./resume.js";
+import { registerAgentDetectionExtensions } from "./agent-detection.js";
 
 // =============================================================================
 // Combined Registration
@@ -60,6 +69,7 @@ export interface MacroExtensionServices {
   wake?: WakeExtensionServices;
   workspace?: WorkspaceExtensionServices;
   resume?: ResumeExtensionServices;
+  agentDetection?: AgentDetectionExtensionServices;
 }
 
 /**
@@ -112,6 +122,10 @@ export function registerMacroExtensions(
   if (services.resume) {
     registerResumeExtension(adapter, services.resume);
   }
+
+  if (services.agentDetection) {
+    registerAgentDetectionExtensions(adapter, services.agentDetection);
+  }
 }
 
 /**
@@ -131,6 +145,8 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
     adapter.unregisterExtension("_macro/wake");
     adapter.unregisterExtension("_macro/workspace/info");
     adapter.unregisterExtension("_macro/resume");
+    adapter.unregisterExtension("_macro/agents/available");
+    adapter.unregisterExtension("_macro/agents/refresh");
   } catch {
     // Ignore errors from unregistering non-existent extensions
   }
@@ -157,6 +173,9 @@ export const MACRO_EXTENSION_METHODS = [
   "_macro/workspace/info",
   // Resume extension
   "_macro/resume",
+  // Agent detection extensions
+  "_macro/agents/available",
+  "_macro/agents/refresh",
 ] as const;
 
 /**
@@ -172,4 +191,6 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   "_macro/wake": "canMessage", // Wake requires messaging capability
   "_macro/workspace/info": "canQuery",
   "_macro/resume": "canManageLifecycle",
+  "_macro/agents/available": "canQuery",
+  "_macro/agents/refresh": "canQuery",
 };
