@@ -117,11 +117,11 @@ export class ACPOverMAPHandler {
           break;
 
         case "session/new":
-          result = await this.handleNewSession(streamState, acp.params);
+          result = await this.handleNewSession(streamState, acp.params, emitNotification);
           break;
 
         case "session/load":
-          result = await this.handleLoadSession(streamState, acp.params);
+          result = await this.handleLoadSession(streamState, acp.params, emitNotification);
           break;
 
         case "authenticate":
@@ -201,6 +201,7 @@ export class ACPOverMAPHandler {
   private async handleNewSession(
     streamState: StreamState,
     params: unknown,
+    emitNotification?: ACPNotificationEmitter,
   ): Promise<unknown> {
     if (!streamState.initialized) {
       throw new Error("Must call initialize before newSession");
@@ -224,12 +225,16 @@ export class ACPOverMAPHandler {
 
     console.error(`[ACP-over-MAP] Created session ${sessionId} -> agent ${spawned.id}`);
 
+    // Emit session_info_update so client has title/timestamps
+    this.emitSessionInfo(streamState, sessionId, emitNotification);
+
     return { sessionId };
   }
 
   private async handleLoadSession(
     streamState: StreamState,
     params: unknown,
+    emitNotification?: ACPNotificationEmitter,
   ): Promise<unknown> {
     if (!streamState.initialized) {
       throw new Error("Must call initialize before loadSession");
@@ -271,6 +276,7 @@ export class ACPOverMAPHandler {
         streamState.sessionId = sessionId;
         streamState.agentId = existing.id;
         this.sessionMapper.createMapping(sessionId as ACPSessionId, existing.id);
+        this.emitSessionInfo(streamState, sessionId, emitNotification);
         return {};
       }
 
@@ -280,6 +286,7 @@ export class ACPOverMAPHandler {
       streamState.sessionId = sessionId;
       streamState.agentId = spawned.id;
       this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
+      this.emitSessionInfo(streamState, sessionId, emitNotification);
       return {};
     }
 
@@ -293,6 +300,7 @@ export class ACPOverMAPHandler {
     streamState.sessionId = sessionId;
     streamState.agentId = spawned.id;
     this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
+    this.emitSessionInfo(streamState, sessionId, emitNotification);
 
     return {};
   }
@@ -387,6 +395,9 @@ export class ACPOverMAPHandler {
       }
 
       console.error(`[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates`);
+
+      // Emit updated session info after prompt completes
+      this.emitSessionInfo(streamState, sessionId, emitNotification);
 
       return { stopReason: "end_turn" };
     } catch (error) {
@@ -530,6 +541,50 @@ export class ACPOverMAPHandler {
       default:
         throw new Error(`Unknown extension method: ${method}`);
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Session Info
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Emit a session_info_update notification with title and timestamps.
+   * Uses agent task as title and session mapping timestamps.
+   */
+  private emitSessionInfo(
+    streamState: StreamState,
+    sessionId: string,
+    emitNotification?: ACPNotificationEmitter,
+  ): void {
+    if (!emitNotification) return;
+
+    const mapping = this.sessionMapper.getMapping(sessionId as ACPSessionId);
+    const agentId = streamState.agentId;
+    const agent = agentId ? this.eventStore.getAgent(agentId as AgentId) : null;
+
+    const title = agent?.task ?? null;
+    const updatedAt = new Date(mapping?.updatedAt ?? Date.now()).toISOString();
+
+    const notification: ACPEnvelope = {
+      acp: {
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "session_info_update",
+            title,
+            updatedAt,
+          },
+        },
+      },
+      acpContext: {
+        streamId: streamState.streamId,
+        sessionId,
+        direction: "agent-to-client",
+      },
+    };
+    emitNotification(notification);
   }
 
   // ─────────────────────────────────────────────────────────────────

@@ -155,8 +155,10 @@ export class MacroAgent implements Agent {
     new Map();
 
   /** Accumulates assistant response parts during prompt streaming for history persistence */
-  private promptBuffers: Map<ACPSessionId, { textChunks: string[]; toolCalls: Record<string, unknown>[] }> =
-    new Map();
+  private promptBuffers: Map<
+    ACPSessionId,
+    { textChunks: string[]; toolCalls: Record<string, unknown>[] }
+  > = new Map();
 
   constructor(connection: AgentSideConnection, config: MacroAgentConfig) {
     this.connection = connection;
@@ -173,7 +175,7 @@ export class MacroAgent implements Agent {
     const recovered = this.sessionMapper.recoverFromStore();
     if (recovered > 0) {
       console.log(
-        `[MacroAgent] Recovered ${recovered} session(s) from EventStore`
+        `[MacroAgent] Recovered ${recovered} session(s) from EventStore`,
       );
     }
   }
@@ -242,6 +244,9 @@ export class MacroAgent implements Agent {
     // Create a conversation in EventStore for history tracking
     this.ensureConversation(acpSessionId, spawned.id);
 
+    // Emit session_info_update so client has title/timestamps
+    await this.emitSessionInfo(acpSessionId);
+
     return {
       sessionId: acpSessionId,
     };
@@ -266,7 +271,7 @@ export class MacroAgent implements Agent {
       }
       acpSessionId = agent.session_id;
       console.log(
-        `[MacroAgent] loadSession: Resolved agentId ${metaAgentId} to session ${acpSessionId}`
+        `[MacroAgent] loadSession: Resolved agentId ${metaAgentId} to session ${acpSessionId}`,
       );
     }
 
@@ -278,7 +283,7 @@ export class MacroAgent implements Agent {
       // Check if the agent already has an active session
       if (this.agentManager.hasActiveSession(existing.id)) {
         console.log(
-          `[MacroAgent] loadSession: Agent ${existing.id} already has active session, reusing`
+          `[MacroAgent] loadSession: Agent ${existing.id} already has active session, reusing`,
         );
         // Reuse the existing active session - just update mappings
         this.sessionMapper.createMapping(acpSessionId, existing.id);
@@ -286,12 +291,13 @@ export class MacroAgent implements Agent {
           this.cancellationControllers.set(acpSessionId, new AbortController());
         }
         this.ensureConversation(acpSessionId, existing.id);
+        await this.emitSessionInfo(acpSessionId);
         return {};
       }
 
       // Agent exists but no active session - resume it
       console.log(
-        `[MacroAgent] loadSession: Resuming stopped agent ${existing.id}`
+        `[MacroAgent] loadSession: Resuming stopped agent ${existing.id}`,
       );
       const spawned = await this.agentManager.resume(existing.id);
 
@@ -299,13 +305,14 @@ export class MacroAgent implements Agent {
       this.sessionMapper.createMapping(acpSessionId, spawned.id);
       this.cancellationControllers.set(acpSessionId, new AbortController());
       this.ensureConversation(acpSessionId, spawned.id);
+      await this.emitSessionInfo(acpSessionId);
 
       return {};
     }
 
     // No existing agent found - try to get or create with the specific session ID
     console.log(
-      `[MacroAgent] loadSession: No existing agent for session ${acpSessionId}, creating new`
+      `[MacroAgent] loadSession: No existing agent for session ${acpSessionId}, creating new`,
     );
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd,
@@ -316,6 +323,7 @@ export class MacroAgent implements Agent {
     this.sessionMapper.createMapping(acpSessionId, spawned.id);
     this.cancellationControllers.set(acpSessionId, new AbortController());
     this.ensureConversation(acpSessionId, spawned.id);
+    await this.emitSessionInfo(acpSessionId);
 
     return {};
   }
@@ -324,7 +332,7 @@ export class MacroAgent implements Agent {
    * Authenticate - macro-agent doesn't require authentication
    */
   async authenticate(
-    _params: AuthenticateRequest
+    _params: AuthenticateRequest,
   ): Promise<AuthenticateResponse> {
     // No authentication required
     return {};
@@ -359,7 +367,7 @@ export class MacroAgent implements Agent {
       // Stream responses from the agent
       for await (const update of this.agentManager.prompt(
         agentId,
-        messageContent
+        messageContent,
       )) {
         // Check for cancellation
         if (abortController.signal.aborted) {
@@ -374,6 +382,9 @@ export class MacroAgent implements Agent {
 
       // Persist conversation turns for history
       this.recordPromptTurns(acpSessionId, agentId, messageContent);
+
+      // Emit updated session info after prompt completes
+      await this.emitSessionInfo(acpSessionId);
 
       return {
         stopReason: "end_turn",
@@ -428,7 +439,7 @@ export class MacroAgent implements Agent {
       // Agent may already be stopped - log but don't throw
       console.warn(
         `[MacroAgent] Error terminating agent ${agentId}:`,
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
       );
     }
 
@@ -446,102 +457,104 @@ export class MacroAgent implements Agent {
    */
   async extMethod(
     method: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     // Method may come with or without underscore prefix depending on caller
     // SDK calls with full name (e.g., "_macro/spawnAgent"), direct calls may omit it
-    const fullMethod = (method.startsWith("_") ? method : `_${method}`) as ACPExtensionMethod;
+    const fullMethod = (
+      method.startsWith("_") ? method : `_${method}`
+    ) as ACPExtensionMethod;
 
     switch (fullMethod) {
       case "_macro/spawnAgent":
         return this.handleSpawnAgent(
-          params as unknown as SpawnAgentRequest
+          params as unknown as SpawnAgentRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/getHierarchy":
         return this.handleGetHierarchy(
-          params as unknown as GetHierarchyRequest
+          params as unknown as GetHierarchyRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/getTask":
         return this.handleGetTask(
-          params as unknown as GetTaskRequest
+          params as unknown as GetTaskRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/mountAgent":
         return this.handleMountAgent(
-          params as unknown as MountAgentRequest
+          params as unknown as MountAgentRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/forkAgent":
         return this.handleForkAgent(
-          params as unknown as ForkAgentRequest
+          params as unknown as ForkAgentRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/sendPeerMessage":
         return this.handleSendPeerMessage(
-          params as unknown as SendPeerMessageACPRequest
+          params as unknown as SendPeerMessageACPRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/sendPeerRequest":
         return this.handleSendPeerRequest(
-          params as unknown as SendPeerRequestACPRequest
+          params as unknown as SendPeerRequestACPRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/deliverPeerMessage":
         return this.handleDeliverPeerMessage(
-          params as unknown as DeliverPeerMessageRequest
+          params as unknown as DeliverPeerMessageRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/deliverPeerRequest":
         return this.handleDeliverPeerRequest(
-          params as unknown as DeliverPeerRequestRequest
+          params as unknown as DeliverPeerRequestRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/grantCapability":
         return this.handleGrantCapability(
-          params as unknown as GrantCapabilityRequest
+          params as unknown as GrantCapabilityRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/revokeCapability":
         return this.handleRevokeCapability(
-          params as unknown as RevokeCapabilityRequest
+          params as unknown as RevokeCapabilityRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/getCapabilities":
         return this.handleGetCapabilities(
-          params as unknown as GetCapabilitiesRequest
+          params as unknown as GetCapabilitiesRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/checkCapability":
         return this.handleCheckCapability(
-          params as unknown as CheckCapabilityRequest
+          params as unknown as CheckCapabilityRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/respondToPermission":
         return this.handleRespondToPermission(
-          params as unknown as RespondToPermissionRequest
+          params as unknown as RespondToPermissionRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/cancelPermission":
         return this.handleCancelPermission(
-          params as unknown as CancelPermissionRequest
+          params as unknown as CancelPermissionRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/resume":
         return this.handleResumeAgent(
-          params as unknown as ResumeAgentRequest
+          params as unknown as ResumeAgentRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/getHistory":
         return this.handleGetHistory(
-          params as unknown as GetHistoryRequest
+          params as unknown as GetHistoryRequest,
         ) as unknown as Record<string, unknown>;
 
       default:
         throw new ACPError(
           `Unknown extension method: ${method}`,
-          "INVALID_EXTENSION"
+          "INVALID_EXTENSION",
         );
     }
   }
@@ -554,7 +567,7 @@ export class MacroAgent implements Agent {
    * Spawn a new child agent
    */
   private async handleSpawnAgent(
-    params: SpawnAgentRequest
+    params: SpawnAgentRequest,
   ): Promise<SpawnAgentResponse> {
     // Determine parent - use provided parentId or fall back to a session's mapped agent
     let parentId = params.parentId;
@@ -588,7 +601,7 @@ export class MacroAgent implements Agent {
               parentRole,
               childRole,
               requiredCapability,
-            }
+            },
           );
         }
       }
@@ -597,7 +610,7 @@ export class MacroAgent implements Agent {
     // Merge default config with per-spawn override
     const mergedConfig = this.mergeSubAgentConfig(
       this.initConfig.defaultSubAgentConfig,
-      params.config
+      params.config,
     );
 
     // Spawn the agent with merged config
@@ -649,7 +662,7 @@ export class MacroAgent implements Agent {
    * Get the agent hierarchy tree
    */
   private async handleGetHierarchy(
-    params: GetHierarchyRequest
+    params: GetHierarchyRequest,
   ): Promise<GetHierarchyResponse> {
     let rootAgentId = params.rootAgentId;
 
@@ -690,7 +703,7 @@ export class MacroAgent implements Agent {
    * Get task details by ID
    */
   private async handleGetTask(
-    params: GetTaskRequest
+    params: GetTaskRequest,
   ): Promise<GetTaskResponse> {
     const task = this.taskManager.get(params.taskId);
 
@@ -712,7 +725,7 @@ export class MacroAgent implements Agent {
    * Subsequent prompts will go to the mounted agent.
    */
   private async handleMountAgent(
-    params: MountAgentRequest
+    params: MountAgentRequest,
   ): Promise<MountAgentResponse> {
     const { sessionId, agentId } = params;
 
@@ -730,7 +743,7 @@ export class MacroAgent implements Agent {
       throw new ACPError(
         `Session not found: ${sessionId}`,
         "SESSION_NOT_FOUND",
-        { sessionId }
+        { sessionId },
       );
     }
 
@@ -754,7 +767,7 @@ export class MacroAgent implements Agent {
    * Uses native fork if available, otherwise falls back to loadSession.
    */
   private async handleForkAgent(
-    params: ForkAgentRequest
+    params: ForkAgentRequest,
   ): Promise<ForkAgentResponse> {
     const { agentId, name } = params;
 
@@ -772,7 +785,7 @@ export class MacroAgent implements Agent {
       throw new ACPError(
         `Agent has no active session to fork: ${agentId}`,
         "FORK_NOT_SUPPORTED",
-        { agentId }
+        { agentId },
       );
     }
 
@@ -814,12 +827,12 @@ export class MacroAgent implements Agent {
    * Called by external clients to have an agent send a message to a peer.
    */
   private async handleSendPeerMessage(
-    params: SendPeerMessageACPRequest
+    params: SendPeerMessageACPRequest,
   ): Promise<SendPeerMessageACPResponse> {
     if (!this.peerManager) {
       throw new ACPError(
         "PeerManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -828,7 +841,7 @@ export class MacroAgent implements Agent {
     if (headManagers.length === 0) {
       throw new ACPError(
         "No agents available to send peer message",
-        "AGENT_NOT_FOUND"
+        "AGENT_NOT_FOUND",
       );
     }
     const sendingAgentId = headManagers[0].id;
@@ -850,7 +863,7 @@ export class MacroAgent implements Agent {
       throw new ACPError(
         `Failed to send peer message: ${error instanceof Error ? error.message : String(error)}`,
         "PEER_SEND_FAILED",
-        { to: params.to, error }
+        { to: params.to, error },
       );
     }
   }
@@ -862,12 +875,12 @@ export class MacroAgent implements Agent {
    * and wait for a response.
    */
   private async handleSendPeerRequest(
-    params: SendPeerRequestACPRequest
+    params: SendPeerRequestACPRequest,
   ): Promise<SendPeerRequestACPResponse> {
     if (!this.peerManager) {
       throw new ACPError(
         "PeerManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -876,7 +889,7 @@ export class MacroAgent implements Agent {
     if (headManagers.length === 0) {
       throw new ACPError(
         "No agents available to send peer request",
-        "AGENT_NOT_FOUND"
+        "AGENT_NOT_FOUND",
       );
     }
     const sendingAgentId = headManagers[0].id;
@@ -889,7 +902,7 @@ export class MacroAgent implements Agent {
           method: params.method,
           params: params.params,
           timeout: params.timeout,
-        }
+        },
       );
 
       return response;
@@ -897,7 +910,7 @@ export class MacroAgent implements Agent {
       throw new ACPError(
         `Failed to send peer request: ${error instanceof Error ? error.message : String(error)}`,
         "PEER_SEND_FAILED",
-        { to: params.to, error }
+        { to: params.to, error },
       );
     }
   }
@@ -909,12 +922,12 @@ export class MacroAgent implements Agent {
    * to this macro-agent. The message is queued for the target agent.
    */
   private async handleDeliverPeerMessage(
-    params: DeliverPeerMessageRequest
+    params: DeliverPeerMessageRequest,
   ): Promise<DeliverPeerMessageResponse> {
     if (!this.peerManager) {
       throw new ACPError(
         "PeerManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -928,7 +941,7 @@ export class MacroAgent implements Agent {
           ? { correlationId: params.correlationId }
           : undefined,
       },
-      params.targetAgentId
+      params.targetAgentId,
     );
 
     return {
@@ -945,12 +958,12 @@ export class MacroAgent implements Agent {
    * internal agent to respond.
    */
   private async handleDeliverPeerRequest(
-    params: DeliverPeerRequestRequest
+    params: DeliverPeerRequestRequest,
   ): Promise<DeliverPeerRequestResponse> {
     if (!this.peerManager) {
       throw new ACPError(
         "PeerManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -963,7 +976,7 @@ export class MacroAgent implements Agent {
         params: params.params,
         timeout: params.timeout,
       },
-      params.targetAgentId
+      params.targetAgentId,
     );
 
     return response;
@@ -977,12 +990,12 @@ export class MacroAgent implements Agent {
    * Grant capabilities to a peer
    */
   private async handleGrantCapability(
-    params: GrantCapabilityRequest
+    params: GrantCapabilityRequest,
   ): Promise<GrantCapabilityResponse> {
     if (!this.capabilityManager) {
       throw new ACPError(
         "CapabilityManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -992,7 +1005,7 @@ export class MacroAgent implements Agent {
       {
         expiresIn: params.expiresIn,
         issuedBy: params.issuedBy,
-      }
+      },
     );
 
     return { capabilities };
@@ -1002,12 +1015,12 @@ export class MacroAgent implements Agent {
    * Revoke capabilities from a peer
    */
   private async handleRevokeCapability(
-    params: RevokeCapabilityRequest
+    params: RevokeCapabilityRequest,
   ): Promise<RevokeCapabilityResponse> {
     if (!this.capabilityManager) {
       throw new ACPError(
         "CapabilityManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -1016,7 +1029,7 @@ export class MacroAgent implements Agent {
     return {
       success: true,
       remainingCapabilities: this.capabilityManager.getCapabilities(
-        params.peerId
+        params.peerId,
       ),
     };
   }
@@ -1025,12 +1038,12 @@ export class MacroAgent implements Agent {
    * Get capabilities for a peer or list all authorized peers
    */
   private async handleGetCapabilities(
-    params: GetCapabilitiesRequest
+    params: GetCapabilitiesRequest,
   ): Promise<GetCapabilitiesResponse> {
     if (!this.capabilityManager) {
       throw new ACPError(
         "CapabilityManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
@@ -1049,19 +1062,19 @@ export class MacroAgent implements Agent {
    * Check if a peer has a required capability
    */
   private async handleCheckCapability(
-    params: CheckCapabilityRequest
+    params: CheckCapabilityRequest,
   ): Promise<CheckCapabilityResponse> {
     if (!this.capabilityManager) {
       throw new ACPError(
         "CapabilityManager not configured for this macro-agent",
-        "NO_PEER_MANAGER"
+        "NO_PEER_MANAGER",
       );
     }
 
     return {
       hasCapability: this.capabilityManager.hasCapability(
         params.peerId,
-        params.required
+        params.required,
       ),
     };
   }
@@ -1077,7 +1090,7 @@ export class MacroAgent implements Agent {
    * then calls the agent manager to resolve the pending permission.
    */
   private async handleRespondToPermission(
-    params: RespondToPermissionRequest
+    params: RespondToPermissionRequest,
   ): Promise<RespondToPermissionResponse> {
     const { sessionId, requestId, optionId } = params;
 
@@ -1094,12 +1107,12 @@ export class MacroAgent implements Agent {
     const success = this.agentManager.respondToPermission(
       agentId,
       requestId,
-      optionId
+      optionId,
     );
 
     if (success) {
       console.log(
-        `[MacroAgent] Responded to permission ${requestId} for session ${sessionId} with ${optionId}`
+        `[MacroAgent] Responded to permission ${requestId} for session ${sessionId} with ${optionId}`,
       );
       return { success: true };
     } else {
@@ -1117,7 +1130,7 @@ export class MacroAgent implements Agent {
    * then calls the agent manager to cancel the pending permission.
    */
   private async handleCancelPermission(
-    params: CancelPermissionRequest
+    params: CancelPermissionRequest,
   ): Promise<CancelPermissionResponse> {
     const { sessionId, requestId } = params;
 
@@ -1135,7 +1148,7 @@ export class MacroAgent implements Agent {
 
     if (success) {
       console.log(
-        `[MacroAgent] Cancelled permission ${requestId} for session ${sessionId}`
+        `[MacroAgent] Cancelled permission ${requestId} for session ${sessionId}`,
       );
       return { success: true };
     } else {
@@ -1150,7 +1163,7 @@ export class MacroAgent implements Agent {
    * Resume a stopped/failed agent
    */
   private async handleResumeAgent(
-    params: ResumeAgentRequest
+    params: ResumeAgentRequest,
   ): Promise<ResumeAgentResponse> {
     const { agentId } = params;
 
@@ -1168,7 +1181,7 @@ export class MacroAgent implements Agent {
     if (agent.state !== "stopped" && agent.state !== "failed") {
       throw new ACPError(
         `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`,
-        "INVALID_EXTENSION"
+        "INVALID_EXTENSION",
       );
     }
 
@@ -1220,12 +1233,13 @@ export class MacroAgent implements Agent {
    * - available_commands_update: Available slash commands
    * - current_mode_update: Mode changes (code/plan/etc)
    * - config_option_update: Configuration changes
+   * - session_info_update: Session title and timestamps
    *
    * Permission requests are handled separately via the requestPermission RPC.
    */
   private async forwardSessionUpdate(
     acpSessionId: ACPSessionId,
-    update: unknown
+    update: unknown,
   ): Promise<void> {
     const sessionUpdate = update as Record<string, unknown>;
 
@@ -1233,7 +1247,7 @@ export class MacroAgent implements Agent {
     if (!("sessionUpdate" in sessionUpdate)) {
       console.warn(
         `[MacroAgent] Received update without sessionUpdate field:`,
-        JSON.stringify(update).substring(0, 200)
+        JSON.stringify(update).substring(0, 200),
       );
       return;
     }
@@ -1251,7 +1265,7 @@ export class MacroAgent implements Agent {
         const text = content?.text ?? "";
         if (text) {
           console.log(
-            `[MacroAgent] Forwarding ${updateType} (${text.length} chars): "${text.substring(0, 80)}${text.length > 80 ? "..." : ""}"`
+            `[MacroAgent] Forwarding ${updateType} (${text.length} chars): "${text.substring(0, 80)}${text.length > 80 ? "..." : ""}"`,
           );
         }
         break;
@@ -1262,7 +1276,7 @@ export class MacroAgent implements Agent {
         const title = sessionUpdate.title as string;
         const status = sessionUpdate.status as string;
         console.log(
-          `[MacroAgent] Forwarding tool_call: id=${toolCallId}, title="${title}", status=${status}`
+          `[MacroAgent] Forwarding tool_call: id=${toolCallId}, title="${title}", status=${status}`,
         );
         break;
       }
@@ -1271,7 +1285,7 @@ export class MacroAgent implements Agent {
         const toolCallId = sessionUpdate.toolCallId as string;
         const status = sessionUpdate.status as string;
         console.log(
-          `[MacroAgent] Forwarding tool_call_update: id=${toolCallId}, status=${status}`
+          `[MacroAgent] Forwarding tool_call_update: id=${toolCallId}, status=${status}`,
         );
         break;
       }
@@ -1301,7 +1315,7 @@ export class MacroAgent implements Agent {
         const agentId = this.sessionMapper.getAgentId(permReq.sessionId);
         if (!agentId) {
           console.warn(
-            `[MacroAgent] No agent found for session ${permReq.sessionId}, cannot forward permission request`
+            `[MacroAgent] No agent found for session ${permReq.sessionId}, cannot forward permission request`,
           );
           return;
         }
@@ -1314,11 +1328,20 @@ export class MacroAgent implements Agent {
             toolCall: {
               toolCallId: permReq.toolCall.toolCallId,
               title: permReq.toolCall.title,
-              status: permReq.toolCall.status as "pending" | "in_progress" | "completed" | "failed" | undefined,
+              status: permReq.toolCall.status as
+                | "pending"
+                | "in_progress"
+                | "completed"
+                | "failed"
+                | undefined,
               rawInput: permReq.toolCall.rawInput,
             },
             options: permReq.options as Array<{
-              kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+              kind:
+                | "allow_once"
+                | "allow_always"
+                | "reject_once"
+                | "reject_always";
               name: string;
               optionId: string;
             }>,
@@ -1333,21 +1356,21 @@ export class MacroAgent implements Agent {
               const success = this.agentManager.respondToPermission(
                 agentId,
                 permReq.requestId,
-                response.outcome.optionId
+                response.outcome.optionId,
               );
               if (!success) {
                 console.warn(
-                  `[MacroAgent] Failed to forward permission response to agent ${agentId}`
+                  `[MacroAgent] Failed to forward permission response to agent ${agentId}`,
                 );
               }
             } else if (response.outcome.outcome === "cancelled") {
               const success = this.agentManager.cancelPermission(
                 agentId,
-                permReq.requestId
+                permReq.requestId,
               );
               if (!success) {
                 console.warn(
-                  `[MacroAgent] Failed to cancel permission for agent ${agentId}`
+                  `[MacroAgent] Failed to cancel permission for agent ${agentId}`,
                 );
               }
             }
@@ -1355,7 +1378,7 @@ export class MacroAgent implements Agent {
         } catch (err) {
           console.error(
             `[MacroAgent] Failed to forward permission_request:`,
-            err instanceof Error ? err.message : err
+            err instanceof Error ? err.message : err,
           );
           // Cancel the permission request on error
           try {
@@ -1377,13 +1400,21 @@ export class MacroAgent implements Agent {
     const buffer = this.promptBuffers.get(acpSessionId);
     if (buffer) {
       if (updateType === "agent_message_chunk") {
-        const content = sessionUpdate.content as { type?: string; text?: string } | undefined;
+        const content = sessionUpdate.content as
+          | { type?: string; text?: string }
+          | undefined;
         if (content?.text) {
           buffer.textChunks.push(content.text);
         }
-      } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+      } else if (
+        updateType === "tool_call" ||
+        updateType === "tool_call_update"
+      ) {
         const status = sessionUpdate.status as string | undefined;
-        if (status === "completed" || (updateType === "tool_call" && status !== "running")) {
+        if (
+          status === "completed" ||
+          (updateType === "tool_call" && status !== "running")
+        ) {
           buffer.toolCalls.push({
             toolCallId: sessionUpdate.toolCallId,
             title: sessionUpdate.title,
@@ -1399,12 +1430,43 @@ export class MacroAgent implements Agent {
     try {
       await this.connection.sessionUpdate({
         sessionId: acpSessionId,
-        update: sessionUpdate as Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"],
+        update: sessionUpdate as Parameters<
+          AgentSideConnection["sessionUpdate"]
+        >[0]["update"],
       });
     } catch (err) {
       console.error(
         `[MacroAgent] Failed to forward ${updateType}:`,
-        err instanceof Error ? err.message : err
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  /**
+   * Emit a session_info_update with title and timestamps.
+   * Uses agent task as title and session mapping timestamps.
+   */
+  private async emitSessionInfo(acpSessionId: ACPSessionId): Promise<void> {
+    const mapping = this.sessionMapper.getMapping(acpSessionId);
+    const agentId = mapping?.agentId;
+    const agent = agentId ? this.eventStore.getAgent(agentId) : null;
+
+    const title = agent?.task ?? null;
+    const updatedAt = new Date(mapping?.updatedAt ?? Date.now()).toISOString();
+
+    try {
+      await this.connection.sessionUpdate({
+        sessionId: acpSessionId,
+        update: {
+          sessionUpdate: "session_info_update",
+          title,
+          updatedAt,
+        } as Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"],
+      });
+    } catch (err) {
+      console.warn(
+        `[MacroAgent] Failed to send session_info_update:`,
+        err instanceof Error ? err.message : err,
       );
     }
   }
@@ -1438,7 +1500,7 @@ export class MacroAgent implements Agent {
    */
   private mergeSubAgentConfig(
     defaults?: SubAgentConfig,
-    override?: SubAgentConfig
+    override?: SubAgentConfig,
   ): SubAgentConfig | undefined {
     if (!defaults && !override) {
       return undefined;
@@ -1503,7 +1565,10 @@ export class MacroAgent implements Agent {
    * Ensure a conversation exists in the EventStore for a session.
    * Uses the ACP session ID as the conversation ID for direct lookup.
    */
-  private ensureConversation(acpSessionId: ACPSessionId, agentId: AgentId): void {
+  private ensureConversation(
+    acpSessionId: ACPSessionId,
+    agentId: AgentId,
+  ): void {
     // Guard: EventStore may not support conversations (e.g., in tests with mocks)
     if (typeof this.eventStore.getConversation !== "function") return;
 
@@ -1525,7 +1590,7 @@ export class MacroAgent implements Agent {
     } catch (error) {
       console.warn(
         `[MacroAgent] Failed to create conversation for session ${acpSessionId}:`,
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
       );
     }
   }
@@ -1536,7 +1601,7 @@ export class MacroAgent implements Agent {
   private recordPromptTurns(
     acpSessionId: ACPSessionId,
     agentId: AgentId,
-    userMessage: string
+    userMessage: string,
   ): void {
     const buffer = this.promptBuffers.get(acpSessionId);
     if (!buffer) return;
@@ -1593,7 +1658,7 @@ export class MacroAgent implements Agent {
     } catch (error) {
       console.warn(
         `[MacroAgent] Failed to record turns for session ${acpSessionId}:`,
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
       );
     } finally {
       // Clean up the buffer
@@ -1616,7 +1681,10 @@ export class MacroAgent implements Agent {
 
     // Convert to HistoryTurn format
     const historyTurns: HistoryTurn[] = turns.map((turn) => ({
-      role: turn.contentType === "user_prompt" ? "user" as const : "assistant" as const,
+      role:
+        turn.contentType === "user_prompt"
+          ? ("user" as const)
+          : ("assistant" as const),
       timestamp: turn.timestamp,
       content: turn.content,
     }));
