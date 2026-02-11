@@ -231,6 +231,9 @@ export class MacroAgent implements Agent {
     // Create abort controller for cancellation
     this.cancellationControllers.set(acpSessionId, new AbortController());
 
+    // Emit session_info_update so client has title/timestamps
+    await this.emitSessionInfo(acpSessionId);
+
     return {
       sessionId: acpSessionId,
     };
@@ -274,6 +277,7 @@ export class MacroAgent implements Agent {
         if (!this.cancellationControllers.has(acpSessionId)) {
           this.cancellationControllers.set(acpSessionId, new AbortController());
         }
+        await this.emitSessionInfo(acpSessionId);
         return {};
       }
 
@@ -286,6 +290,7 @@ export class MacroAgent implements Agent {
       // Create session mapping
       this.sessionMapper.createMapping(acpSessionId, spawned.id);
       this.cancellationControllers.set(acpSessionId, new AbortController());
+      await this.emitSessionInfo(acpSessionId);
 
       return {};
     }
@@ -302,6 +307,7 @@ export class MacroAgent implements Agent {
     // Create session mapping
     this.sessionMapper.createMapping(acpSessionId, spawned.id);
     this.cancellationControllers.set(acpSessionId, new AbortController());
+    await this.emitSessionInfo(acpSessionId);
 
     return {};
   }
@@ -354,6 +360,9 @@ export class MacroAgent implements Agent {
         // Forward session updates to the client
         await this.forwardSessionUpdate(acpSessionId, update);
       }
+
+      // Emit updated session info after prompt completes
+      await this.emitSessionInfo(acpSessionId);
 
       return {
         stopReason: "end_turn",
@@ -1195,6 +1204,7 @@ export class MacroAgent implements Agent {
    * - available_commands_update: Available slash commands
    * - current_mode_update: Mode changes (code/plan/etc)
    * - config_option_update: Configuration changes
+   * - session_info_update: Session title and timestamps
    *
    * Permission requests are handled separately via the requestPermission RPC.
    */
@@ -1357,6 +1367,35 @@ export class MacroAgent implements Agent {
     } catch (err) {
       console.error(
         `[MacroAgent] Failed to forward ${updateType}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  /**
+   * Emit a session_info_update with title and timestamps.
+   * Uses agent task as title and session mapping timestamps.
+   */
+  private async emitSessionInfo(acpSessionId: ACPSessionId): Promise<void> {
+    const mapping = this.sessionMapper.getMapping(acpSessionId);
+    const agentId = mapping?.agentId;
+    const agent = agentId ? this.eventStore.getAgent(agentId) : null;
+
+    const title = agent?.task ?? null;
+    const updatedAt = new Date(mapping?.updatedAt ?? Date.now()).toISOString();
+
+    try {
+      await this.connection.sessionUpdate({
+        sessionId: acpSessionId,
+        update: {
+          sessionUpdate: "session_info_update",
+          title,
+          updatedAt,
+        } as Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"],
+      });
+    } catch (err) {
+      console.warn(
+        `[MacroAgent] Failed to send session_info_update:`,
         err instanceof Error ? err.message : err
       );
     }
