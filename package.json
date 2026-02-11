@@ -18,9 +18,9 @@
     "test:e2e-full-agents": "RUN_FULL_AGENT_TESTS=true vitest run --config vitest.e2e.config.ts",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
-    "release:patch": "npm version patch && git push && git push --tags",
-    "release:minor": "npm version minor && git push && git push --tags",
-    "release:major": "npm version major && git push && git push --tags",
+    "version:patch": "npm version patch && git push && git push --tags",
+    "version:minor": "npm version minor && git push && git push --tags",
+    "version:major": "npm version major && git push && git push --tags",
     "publish:npm": "npm run build && npm publish"
   },
   "keywords": [
