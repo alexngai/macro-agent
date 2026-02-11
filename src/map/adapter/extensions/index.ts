@@ -31,6 +31,13 @@ export {
   type InternalWorkspace,
 } from "./workspace.js";
 
+// Workspace file search extension
+export {
+  registerWorkspaceFileExtensions,
+  unregisterWorkspaceFileExtensions,
+  type WorkspaceFileServices,
+} from "./workspace-files.js";
+
 // Resume extension
 export {
   registerResumeExtension,
@@ -49,11 +56,13 @@ import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
 import type { WorkspaceExtensionServices } from "./workspace.js";
+import type { WorkspaceFileServices } from "./workspace-files.js";
 import type { ResumeExtensionServices } from "./resume.js";
 import type { AgentDetectionExtensionServices } from "./agent-detection.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
+import { registerWorkspaceFileExtensions } from "./workspace-files.js";
 import { registerResumeExtension } from "./resume.js";
 import { registerAgentDetectionExtensions } from "./agent-detection.js";
 
@@ -68,6 +77,7 @@ export interface MacroExtensionServices {
   task?: TaskExtensionServices;
   wake?: WakeExtensionServices;
   workspace?: WorkspaceExtensionServices;
+  workspaceFiles?: WorkspaceFileServices;
   resume?: ResumeExtensionServices;
   agentDetection?: AgentDetectionExtensionServices;
 }
@@ -119,6 +129,10 @@ export function registerMacroExtensions(
     registerWorkspaceExtension(adapter, services.workspace);
   }
 
+  if (services.workspaceFiles) {
+    registerWorkspaceFileExtensions(adapter, services.workspaceFiles);
+  }
+
   if (services.resume) {
     registerResumeExtension(adapter, services.resume);
   }
@@ -144,6 +158,9 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
     adapter.unregisterExtension("_macro/task/send");
     adapter.unregisterExtension("_macro/wake");
     adapter.unregisterExtension("_macro/workspace/info");
+    adapter.unregisterExtension("_macro/workspace/files/search");
+    adapter.unregisterExtension("_macro/workspace/files/list");
+    adapter.unregisterExtension("_macro/workspace/files/read");
     adapter.unregisterExtension("_macro/resume");
     adapter.unregisterExtension("_macro/agents/available");
     adapter.unregisterExtension("_macro/agents/refresh");
@@ -171,6 +188,10 @@ export const MACRO_EXTENSION_METHODS = [
   "_macro/wake",
   // Workspace extension
   "_macro/workspace/info",
+  // Workspace file search extensions
+  "_macro/workspace/files/search",
+  "_macro/workspace/files/list",
+  "_macro/workspace/files/read",
   // Resume extension
   "_macro/resume",
   // Agent detection extensions
@@ -190,6 +211,9 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   "_macro/task/send": "canMessage",
   "_macro/wake": "canMessage", // Wake requires messaging capability
   "_macro/workspace/info": "canQuery",
+  "_macro/workspace/files/search": "canQuery",
+  "_macro/workspace/files/list": "canQuery",
+  "_macro/workspace/files/read": "canQuery",
   "_macro/resume": "canManageLifecycle",
   "_macro/agents/available": "canQuery",
   "_macro/agents/refresh": "canQuery",
