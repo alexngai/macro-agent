@@ -455,7 +455,7 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       });
 
       expect(result.id).toMatch(/^agent_/);
-      // Session ID is now pre-generated before createSession (for race condition fix)
+      // session_id is macro-agent's own ID (pre-generated before createSession)
       expect(result.session_id).toMatch(/^session_/);
       expect(result.session).toBeDefined();
 
@@ -464,6 +464,8 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(agent).toBeDefined();
       expect(agent?.state).toBe("running");
       expect(agent?.task).toBe("Test task");
+      // provider_session_id should be set from createSession's returned session.id
+      expect(agent?.provider_session_id).toBe("mock_session_1");
     });
 
     it("should set up default subscriptions", async () => {

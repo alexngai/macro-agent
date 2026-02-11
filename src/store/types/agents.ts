@@ -29,6 +29,8 @@ export interface AgentConfig {
 export interface Agent {
   id: AgentId;
   session_id: SessionId;
+  /** Session ID from the underlying agent provider (e.g., Claude Code UUID for --resume) */
+  provider_session_id?: string;
   parent: AgentId | null;
   lineage: AgentId[];
   state: AgentState;

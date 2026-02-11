@@ -564,12 +564,15 @@ export function createAgentManager(
       });
 
       // Emit started status (session is ready)
+      // Include the provider's session ID (e.g., Claude Code UUID) so
+      // it can be used for handle.loadSession() during resume
       eventStore.emit({
         type: "status",
         source: { agent_id: agentId },
         payload: {
           status_type: "started",
           summary: "Agent session started",
+          provider_session_id: session.id,
         },
       });
 
@@ -703,7 +706,7 @@ export function createAgentManager(
 
       return {
         id: agentId,
-        session_id: sessionId, // Use our pre-generated ID (matches what's in EventStore)
+        session_id: sessionId, // Macro-agent's own session ID for ACP protocol mapping
         agent,
         session,
         workspace,
@@ -903,8 +906,10 @@ export function createAgentManager(
       permissionMode: defaultPermissionMode,
     });
 
-    // Load the existing session by ID
-    const session = await handle.loadSession(agent.session_id, defaultCwd);
+    // Load the existing session using the provider's session ID (e.g., Claude Code UUID)
+    // Falls back to macro-agent session_id for backwards compatibility
+    const loadSessionId = agent.provider_session_id ?? agent.session_id;
+    const session = await handle.loadSession(loadSessionId, defaultCwd);
 
     // Track active session
     const activeSession: ActiveSession = {
@@ -928,7 +933,7 @@ export function createAgentManager(
 
     return {
       id: agentId,
-      session_id: session.id,
+      session_id: agent.session_id, // Macro-agent's own session ID
       agent: eventStore.getAgent(agentId)!,
       session,
     };

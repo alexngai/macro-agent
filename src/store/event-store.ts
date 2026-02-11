@@ -1354,6 +1354,7 @@ function applySpawnEvent(
   store.setRow('agents', agentId, {
     id: agentId,
     session_id: payload.session_id,
+    provider_session_id: '',
     parent: parent ?? '',
     lineage: JSON.stringify(lineage),
     state: 'spawning',
@@ -1408,15 +1409,20 @@ function applyStatusEvent(
   const agentId = event.source.agent_id;
   if (!agentId) return;
 
-  const payload = event.payload as { status_type: string };
+  const payload = event.payload as { status_type: string; provider_session_id?: string };
 
   // Handle specific status types
   if (payload.status_type === 'started') {
-    store.setPartialRow('agents', agentId, {
+    const updates: Record<string, string | number> = {
       state: 'running',
       started_at: event.timestamp,
       last_activity_at: event.timestamp,
-    });
+    };
+    // Store the provider's session ID (e.g., Claude Code UUID for --resume)
+    if (payload.provider_session_id) {
+      updates.provider_session_id = payload.provider_session_id;
+    }
+    store.setPartialRow('agents', agentId, updates);
   } else {
     // Always update last_activity_at on any status event
     store.setPartialRow('agents', agentId, {
@@ -1696,6 +1702,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
   return {
     id: row.id as AgentId,
     session_id: row.session_id as string,
+    provider_session_id: (row.provider_session_id as string) || undefined,
     parent: (row.parent as string) || null,
     lineage: row.lineage ? JSON.parse(row.lineage as string) : [],
     state: row.state as AgentState,
