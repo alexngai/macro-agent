@@ -909,7 +909,8 @@ export function createAgentManager(
     // Load the existing session using the provider's session ID (e.g., Claude Code UUID)
     // Falls back to macro-agent session_id for backwards compatibility
     const loadSessionId = agent.provider_session_id ?? agent.session_id;
-    const session = await handle.loadSession(loadSessionId, defaultCwd);
+    const agentCwd = agent.cwd ?? defaultCwd;
+    const session = await handle.loadSession(loadSessionId, agentCwd);
 
     // Track active session
     const activeSession: ActiveSession = {

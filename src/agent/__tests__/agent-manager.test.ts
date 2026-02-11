@@ -686,6 +686,70 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
         "already has active session",
       );
     });
+
+    it("should use agent's original cwd when loading session", async () => {
+      const spawned = await agentManager.spawn({
+        task: "Test with custom cwd",
+        cwd: "/custom/project/path",
+      });
+      await agentManager.terminate(spawned.id, "completed");
+
+      await agentManager.resume(spawned.id);
+
+      // loadSession should be called with the agent's original cwd, not the default
+      expect(mockHandle.loadSession).toHaveBeenCalledWith(
+        expect.any(String), // session ID
+        "/custom/project/path",
+      );
+    });
+
+    it("should use provider_session_id when loading session", async () => {
+      const spawned = await agentManager.spawn({ task: "Test" });
+
+      // Verify the agent has provider_session_id from createSession
+      const agent = agentManager.get(spawned.id);
+      expect(agent?.provider_session_id).toBeDefined();
+
+      await agentManager.terminate(spawned.id, "completed");
+      await agentManager.resume(spawned.id);
+
+      // loadSession should be called with the provider_session_id (Claude Code UUID)
+      expect(mockHandle.loadSession).toHaveBeenCalledWith(
+        agent!.provider_session_id,
+        expect.any(String),
+      );
+    });
+
+    it("should fall back to session_id if provider_session_id is not set", async () => {
+      // Create agent directly without provider_session_id
+      const agentId = "agent_no_provider";
+      const sessionId = "session_no_provider";
+      eventStore.emit({
+        type: "spawn",
+        source: { agent_id: "system" },
+        payload: {
+          agent_id: agentId,
+          session_id: sessionId,
+          task: "Test",
+          parent: null,
+          cwd: "/tmp",
+        },
+      });
+      // Emit started status WITHOUT provider_session_id
+      eventStore.emit({
+        type: "status",
+        source: { agent_id: agentId },
+        payload: { status_type: "started" },
+      });
+
+      await agentManager.resume(agentId);
+
+      // Should fall back to the macro-agent session_id
+      expect(mockHandle.loadSession).toHaveBeenCalledWith(
+        sessionId,
+        "/tmp",
+      );
+    });
   });
 
   describe("getOrCreateHeadManager()", () => {

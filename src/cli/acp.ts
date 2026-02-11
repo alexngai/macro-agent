@@ -39,7 +39,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
@@ -119,6 +120,17 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
   return options;
 }
 
+/**
+ * Generate a stable instance ID from the working directory.
+ * This ensures the same project always uses the same EventStore,
+ * so agents and sessions persist across server restarts.
+ */
+export function getStableInstanceId(cwd: string): string {
+  const normalizedPath = resolve(cwd);
+  const hash = createHash("sha256").update(normalizedPath).digest("hex").slice(0, 12);
+  return `inst_${hash}`;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Stream Setup
 // ─────────────────────────────────────────────────────────────────
@@ -159,9 +171,12 @@ async function main() {
   const defaultCwd = options.cwd ?? process.cwd();
 
   // Initialize services
+  // Use explicit --instance-id if provided, otherwise derive a stable ID from the CWD
+  // so the same project always reuses the same EventStore across server restarts
+  const instanceId = options.instanceId ?? getStableInstanceId(defaultCwd);
   const eventStore = await createEventStore({
     inMemory: false,
-    instanceId: options.instanceId,
+    instanceId,
   });
 
   // We need to create agentManager first (with a placeholder router),
