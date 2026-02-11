@@ -674,8 +674,7 @@ describe('Event Archival', () => {
   beforeEach(async () => {
     // Create a temporary directory for testing
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'event-store-test-'));
-    const storePath = path.join(testDir, 'store.json');
-    store = await createEventStore({ path: storePath });
+    store = await createEventStore({ baseDir: testDir, instanceId: 'archive-test' });
   });
 
   afterEach(async () => {
@@ -987,18 +986,11 @@ describe('Event Archival', () => {
       }
     });
 
-    it('should emit deprecation warning when using legacy path option', async () => {
+    it('should throw when using removed legacy path option', async () => {
       const legacyPath = path.join(testDir, 'legacy-store.json');
-      const legacyStore = await createEventStore({ path: legacyPath });
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('DEPRECATION WARNING')
+      await expect(createEventStore({ path: legacyPath })).rejects.toThrow(
+        'The `path` option has been removed'
       );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('path` option is deprecated')
-      );
-
-      await legacyStore.close();
     });
 
     it('should not emit deprecation warning for new-style configuration', async () => {

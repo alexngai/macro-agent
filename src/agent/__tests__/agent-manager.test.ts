@@ -720,7 +720,7 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       );
     });
 
-    it("should fall back to session_id if provider_session_id is not set", async () => {
+    it("should create new session if provider_session_id is not set", async () => {
       // Create agent directly without provider_session_id
       const agentId = "agent_no_provider";
       const sessionId = "session_no_provider";
@@ -744,11 +744,9 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
 
       await agentManager.resume(agentId);
 
-      // Should fall back to the macro-agent session_id
-      expect(mockHandle.loadSession).toHaveBeenCalledWith(
-        sessionId,
-        "/tmp",
-      );
+      // Should create a new session instead of loading with invalid macro-agent session_id
+      expect(mockHandle.createSession).toHaveBeenCalledWith("/tmp");
+      expect(mockHandle.loadSession).not.toHaveBeenCalled();
     });
   });
 

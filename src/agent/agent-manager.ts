@@ -901,16 +901,34 @@ export function createAgentManager(
       );
     }
 
-    // Spawn new process and load existing session
+    // Spawn new process
     const handle = await AgentFactory.spawn(defaultAgentType, {
       permissionMode: defaultPermissionMode,
     });
 
-    // Load the existing session using the provider's session ID (e.g., Claude Code UUID)
-    // Falls back to macro-agent session_id for backwards compatibility
-    const loadSessionId = agent.provider_session_id ?? agent.session_id;
     const agentCwd = agent.cwd ?? defaultCwd;
-    const session = await handle.loadSession(loadSessionId, agentCwd);
+    let session;
+
+    if (agent.provider_session_id) {
+      // Load existing session using the provider's session ID (e.g., Claude Code UUID)
+      session = await handle.loadSession(agent.provider_session_id, agentCwd);
+    } else {
+      // No provider session ID available (agent predates this feature or wasn't persisted).
+      // Create a new session instead of loading with the macro-agent session_id
+      // which is not a valid provider session ID (e.g., Claude Code expects UUIDs).
+      session = await handle.createSession(agentCwd);
+
+      // Store the provider session ID for future resumes
+      eventStore.emit({
+        type: "status",
+        source: { agent_id: agentId },
+        payload: {
+          status_type: "started",
+          summary: "Agent session created (no provider session to resume)",
+          provider_session_id: session.id,
+        },
+      });
+    }
 
     // Track active session
     const activeSession: ActiveSession = {
@@ -929,6 +947,7 @@ export function createAgentManager(
       payload: {
         status_type: "started",
         summary: "Agent session resumed",
+        provider_session_id: session.id,
       },
     });
 

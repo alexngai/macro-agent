@@ -213,9 +213,6 @@ export interface ResolvedInstance {
   /** Whether this is a new instance */
   isNew: boolean;
 
-  /** Whether this is using legacy path mode */
-  isLegacy: boolean;
-
   /** Backend type to use */
   backendType: string;
 }
@@ -300,25 +297,11 @@ export function resolveInstancePath(config: StoreConfig): ResolvedInstance {
       instancePath: ':memory:',
       namespace,
       isNew: true,
-      isLegacy: false,
       backendType: 'memory',
     };
   }
 
-  // Legacy path takes precedence for backward compat
-  if (config.path) {
-    const legacyInstanceId = deriveInstanceIdFromPath(config.path);
-    return {
-      instanceId: legacyInstanceId,
-      instancePath: config.path,
-      namespace,
-      isNew: !fs.existsSync(config.path),
-      isLegacy: true,
-      backendType: 'json',
-    };
-  }
-
-  // New instance resolution
+  // Instance resolution
   const instanceId = config.instanceId ?? generateInstanceId();
 
   if (!isValidInstanceId(instanceId)) {
@@ -339,19 +322,8 @@ export function resolveInstancePath(config: StoreConfig): ResolvedInstance {
     instancePath,
     namespace,
     isNew,
-    isLegacy: false,
     backendType,
   };
-}
-
-/**
- * Derive an instance ID from a legacy path
- */
-function deriveInstanceIdFromPath(legacyPath: string): string {
-  // Use the filename without extension as the instance ID
-  const basename = path.basename(legacyPath, path.extname(legacyPath));
-  // Sanitize to valid instance ID
-  return basename.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

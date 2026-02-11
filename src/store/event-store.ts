@@ -9,8 +9,8 @@
  */
 
 import { createStore, Store } from 'tinybase';
-import { createFilePersister } from 'tinybase/persisters/persister-file';
-import { createCustomPersister } from 'tinybase/persisters';
+import { createCustomPersister, createCustomSqlitePersister } from 'tinybase/persisters';
+import type { DatabasePersisterConfig } from 'tinybase/persisters';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import * as path from 'path';
@@ -65,38 +65,80 @@ import type { StorageBackend, ExportedEvent } from './backends/types.js';
 import { createTinyBaseBackend } from './backends/tinybase-backend.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Custom better-sqlite3 Persister
+// Tabular better-sqlite3 Persister
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Creates a custom TinyBase persister for better-sqlite3.
- * TinyBase's built-in createSqlite3Persister expects node-sqlite3 (async/callback API),
- * but we use better-sqlite3 (sync API). This custom persister bridges the gap.
+ * Build tabular config for the 10 TinyBase tables.
+ * Identity mapping: TinyBase table name === SQLite table name.
  */
-function createBetterSqlite3Persister(
+function getTabularConfig(): DatabasePersisterConfig {
+  const tableNames = [
+    'events', 'agents', 'tasks', 'messages',
+    'sessions', 'conversations', 'turns',
+    'threads', 'subscriptions', 'participants',
+  ];
+
+  const load: Record<string, string> = {};
+  const save: Record<string, string> = {};
+  for (const t of tableNames) {
+    load[t] = t;   // SQLite table -> TinyBase table (same name)
+    save[t] = t;   // TinyBase table -> SQLite table (same name)
+  }
+
+  return {
+    mode: 'tabular',
+    tables: { load, save },
+    autoLoadIntervalSeconds: 1,
+  };
+}
+
+/**
+ * Creates a tabular TinyBase persister backed by better-sqlite3.
+ *
+ * Unlike the old JSON blob approach (entire store as one JSON string in a
+ * single row), tabular mode maps each TinyBase table to a real SQLite table
+ * and only writes changed rows on autoSave — making persistence O(delta)
+ * instead of O(total).
+ */
+function createTabularBetterSqlite3Persister(
   store: Store,
   db: ReturnType<typeof Database>,
-  tableName: string = 'tinybase_store'
 ) {
-  // Create table if not exists
-  db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (_id TEXT PRIMARY KEY, store TEXT)`);
+  // Wrap better-sqlite3's sync API as the async DatabaseExecuteCommand.
+  // TinyBase generates SQL with $1, $2, ... placeholders (PostgreSQL-style),
+  // but better-sqlite3 uses ? for positional array binding. Convert them.
+  const executeCommand = async (sql: string, params?: any[]): Promise<Record<string, any>[]> => {
+    const convertedSql = sql.replace(/\$\d+/g, '?');
+    const trimmed = convertedSql.trimStart().toUpperCase();
+    const stmt = db.prepare(convertedSql);
+    if (trimmed.startsWith('SELECT') || trimmed.startsWith('PRAGMA')) {
+      return (params ? stmt.all(...params) : stmt.all()) as Record<string, any>[];
+    }
+    params ? stmt.run(...params) : stmt.run();
+    return [];
+  };
 
-  return createCustomPersister(
+  return createCustomSqlitePersister(
     store,
-    // getPersisted - load from SQLite
-    async () => {
-      const row = db.prepare(`SELECT store FROM ${tableName} WHERE _id = '_'`).get() as { store: string } | undefined;
-      return row ? JSON.parse(row.store) : undefined;
-    },
-    // setPersisted - save to SQLite
-    async (getContent) => {
-      const json = JSON.stringify(getContent());
-      db.prepare(`INSERT OR REPLACE INTO ${tableName} (_id, store) VALUES ('_', ?)`).run(json);
-    },
-    // addPersisterListener - poll for external changes (cross-process)
-    (listener) => setInterval(listener, 1000),
-    // delPersisterListener - cleanup polling
-    (interval: ReturnType<typeof setInterval>) => clearInterval(interval),
+    getTabularConfig(),
+    executeCommand,
+    // addChangeListener — better-sqlite3 has no native change events
+    (_listener: (tableName: string) => void) => null as any,
+    // delChangeListener — no-op
+    (_handle: any) => {},
+    // onSqlCommand
+    undefined,
+    // onIgnoredError
+    (error: any) => console.warn('[EventStore] Persister error:', error),
+    // destroy
+    () => db.close(),
+    // persist mode (1 = StoreOnly)
+    1 as any,
+    // thing (the db instance)
+    db,
+    // getThing accessor name
+    'getDb',
   );
 }
 
@@ -252,7 +294,15 @@ export function parseDuration(duration: string): number {
 export async function createEventStore(config: StoreConfig = {}): Promise<EventStore> {
   // Resolve instance configuration
   const resolved = resolveInstancePath(config);
-  const { instanceId, instancePath, namespace, isNew, isLegacy, backendType } = resolved;
+  const { instanceId, instancePath, namespace, isNew, backendType } = resolved;
+
+  // Reject deprecated legacy path option
+  if (config.path) {
+    throw new Error(
+      '[macro-agent] The `path` option has been removed. ' +
+        'Use `instanceId` and `baseDir` instead for per-instance isolation.'
+    );
+  }
 
   // Track baseDir for MCP subprocess communication
   const baseDir = config.baseDir ?? path.join(os.homedir(), '.multiagent');
@@ -260,15 +310,6 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   // Get peer visibility config (default is restrictive)
   const peerVisibility: PeerVisibilityConfig =
     config.peerVisibility ?? DEFAULT_PEER_VISIBILITY;
-
-  // Emit deprecation warning for legacy path option
-  if (isLegacy) {
-    console.warn(
-      '[macro-agent] DEPRECATION WARNING: The `path` option is deprecated and will be removed in a future version. ' +
-        'Use `instanceId` and `baseDir` instead for per-instance isolation. ' +
-        'See documentation for migration guide.'
-    );
-  }
 
   // Emit warning for in-memory mode (only in non-test environments)
   if (config.inMemory && process.env.NODE_ENV !== 'test') {
@@ -282,31 +323,53 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   const store = createStore();
 
   // Set up persister based on backend type
-  let persister: ReturnType<typeof createFilePersister> | ReturnType<typeof createBetterSqlite3Persister> | null = null;
+  let persister: ReturnType<typeof createTabularBetterSqlite3Persister> | null = null;
   let db: ReturnType<typeof Database> | null = null;
 
   if (!config.inMemory) {
-    if (isLegacy) {
-      // Legacy mode: Use JSON file persister at the specified path
-      const dir = path.dirname(instancePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      persister = createFilePersister(store, instancePath);
-    } else {
-      // New instances: Use SQLite with custom better-sqlite3 persister
-      ensureInstanceDir(instancePath);
-      const dbPath = path.join(instancePath, 'store.sqlite');
-      db = new Database(dbPath);
-      db.pragma('journal_mode = WAL');
-      db.pragma('busy_timeout = 5000');
-      persister = createBetterSqlite3Persister(store, db);
+    ensureInstanceDir(instancePath);
+    const dbPath = path.join(instancePath, 'store.sqlite');
+    db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
+
+    // Migration: if old JSON blob table exists, load data from it first
+    const oldTableExists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='tinybase_store'"
+    ).get();
+
+    if (oldTableExists) {
+      const oldPersister = createCustomPersister(
+        store,
+        async () => {
+          const row = db!.prepare("SELECT store FROM tinybase_store WHERE _id = '_'").get() as { store: string } | undefined;
+          return row ? JSON.parse(row.store) : undefined;
+        },
+        async () => {},
+        (listener) => setInterval(listener, 1000),
+        (interval: ReturnType<typeof setInterval>) => clearInterval(interval),
+      );
+      await oldPersister.load();
+      oldPersister.destroy();
     }
+
+    persister = createTabularBetterSqlite3Persister(store, db);
+
+    if (oldTableExists) {
+      // Save migrated data to new tabular format, then drop old table
+      await persister.save();
+      db.exec('DROP TABLE IF EXISTS tinybase_store');
+    }
+
     await persister.load();
+    // Auto-save: persist to disk whenever the in-memory store changes.
+    // Without this, emit() only writes to TinyBase's in-memory store and
+    // data is lost if the server is killed before an explicit persist().
+    await persister.startAutoSave();
   }
 
   // Initialize/update instance metadata
-  if (!config.inMemory && !isLegacy) {
+  if (!config.inMemory) {
     if (isNew) {
       const meta = createInstanceMeta(resolved, config);
       writeInstanceMeta(instancePath, meta);
@@ -876,11 +939,6 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
    * Get archives directory path
    */
   function getArchivesDir(): string {
-    // For legacy mode, use parent of the file path
-    // For new mode, use the instance directory
-    if (isLegacy) {
-      return path.join(path.dirname(instancePath), 'archives');
-    }
     return path.join(instancePath, 'archives');
   }
 

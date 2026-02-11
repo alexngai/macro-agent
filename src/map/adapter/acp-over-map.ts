@@ -277,7 +277,7 @@ export class ACPOverMAPHandler {
         streamState.agentId = existing.id;
         this.sessionMapper.createMapping(sessionId as ACPSessionId, existing.id);
         this.emitSessionInfo(streamState, sessionId, emitNotification);
-        return {};
+        return { sessionId };
       }
 
       // Agent exists but no active session - resume it
@@ -287,7 +287,7 @@ export class ACPOverMAPHandler {
       streamState.agentId = spawned.id;
       this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
       this.emitSessionInfo(streamState, sessionId, emitNotification);
-      return {};
+      return { sessionId };
     }
 
     // No existing agent found - create new with the specified session ID
@@ -302,7 +302,7 @@ export class ACPOverMAPHandler {
     this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
     this.emitSessionInfo(streamState, sessionId, emitNotification);
 
-    return {};
+    return { sessionId };
   }
 
   private async handleAuthenticate(_params: unknown): Promise<unknown> {
@@ -322,7 +322,9 @@ export class ACPOverMAPHandler {
       messages?: Array<{ role: string; content: string }>;
     }) ?? {};
 
-    const sessionId = paramSessionId ?? sessionIdFromContext ?? streamState.sessionId;
+    // Prefer the server's resolved session ID (set during loadSession) over the
+    // client's acpContext.sessionId which may be stale (e.g., "_resolve_" sentinel)
+    const sessionId = streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
     if (!sessionId) {
       throw new Error("No session - call newSession or loadSession first");
     }
@@ -380,6 +382,15 @@ export class ACPOverMAPHandler {
       emitNotification(notification);
     };
 
+    // Ensure conversation exists in EventStore for history persistence
+    this.ensureConversation(sessionId as ACPSessionId, agentId);
+
+    // Accumulate response content for history recording
+    const buffer: { textChunks: string[]; toolCalls: Record<string, unknown>[] } = {
+      textChunks: [],
+      toolCalls: [],
+    };
+
     try {
       // Stream responses from the agent
       let updateCount = 0;
@@ -389,12 +400,36 @@ export class ACPOverMAPHandler {
           return { stopReason: "cancelled" };
         }
 
+        // Accumulate content for history persistence
+        const u = update as Record<string, unknown>;
+        const updateType = u.sessionUpdate as string ?? u.type as string;
+        if (updateType === "agent_message_chunk") {
+          const content = u.content as { type?: string; text?: string } | undefined;
+          if (content?.text) {
+            buffer.textChunks.push(content.text);
+          }
+        } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+          const status = u.status as string | undefined;
+          if (status === "completed" || (updateType === "tool_call" && status !== "running")) {
+            buffer.toolCalls.push({
+              toolCallId: u.toolCallId,
+              title: u.title,
+              status: u.status,
+              input: u.rawInput,
+              output: u.output,
+            });
+          }
+        }
+
         // Stream the update back to the client
         emitSessionUpdate(update);
         updateCount++;
       }
 
       console.error(`[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates`);
+
+      // Persist conversation turns for history
+      this.recordPromptTurns(sessionId as ACPSessionId, agentId, messageContent, buffer);
 
       // Emit updated session info after prompt completes
       this.emitSessionInfo(streamState, sessionId, emitNotification);
@@ -417,7 +452,8 @@ export class ACPOverMAPHandler {
     sessionIdFromContext?: string,
   ): Promise<unknown> {
     const { sessionId: paramSessionId } = (params as { sessionId?: string }) ?? {};
-    const sessionId = paramSessionId ?? sessionIdFromContext ?? streamState.sessionId;
+    // Prefer server's resolved session ID over client's potentially stale one
+    const sessionId = streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
 
     // Signal cancellation
     streamState.abortController.abort();
@@ -538,8 +574,156 @@ export class ACPOverMAPHandler {
         };
       }
 
+      case "_macro/getHistory": {
+        const { sessionId, agentId: historyAgentId, limit } = methodParams as {
+          sessionId?: string;
+          agentId?: string;
+          limit?: number;
+        };
+
+        // Resolve conversationId: prefer agentId lookup (resolves to the
+        // original session_id where turns were recorded), fall back to
+        // explicit sessionId. This allows history to survive across server
+        // restarts even when the ACP session ID changes (e.g., resume()
+        // fails → TUI creates new session with different ID).
+        let conversationId: string | undefined;
+        if (historyAgentId) {
+          const agent = this.eventStore.getAgent(historyAgentId as AgentId);
+          if (agent) {
+            conversationId = agent.session_id;
+          }
+        }
+        if (!conversationId) {
+          conversationId = sessionId;
+        }
+        if (!conversationId) {
+          return { turns: [] };
+        }
+
+        const turns = this.eventStore.listTurns({
+          conversationId,
+          order: "asc",
+          limit: limit ?? 200,
+        });
+        return {
+          turns: turns.map((turn) => ({
+            role:
+              turn.contentType === "user_prompt"
+                ? ("user" as const)
+                : ("assistant" as const),
+            timestamp: turn.timestamp,
+            content: turn.content,
+          })),
+        };
+      }
+
       default:
         throw new Error(`Unknown extension method: ${method}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // History Persistence
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Ensure a conversation exists in the EventStore for a given session.
+   * This must be called before recording turns.
+   */
+  private ensureConversation(
+    acpSessionId: ACPSessionId,
+    agentId: AgentId,
+  ): void {
+    if (typeof this.eventStore.getConversation !== "function") {
+      return;
+    }
+
+    const existing = this.eventStore.getConversation(acpSessionId);
+    if (existing) return;
+
+    try {
+      this.eventStore.emit({
+        type: "conversation",
+        source: { agent_id: agentId },
+        payload: {
+          action: "created",
+          conversation_id: acpSessionId,
+          conversation_type: "session",
+          subject: `ACP session ${acpSessionId}`,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[ACP-over-MAP] Failed to create conversation for session ${acpSessionId}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * Record user and assistant turns after a prompt completes.
+   * Mirrors MacroAgent.recordPromptTurns() for the ACP-over-MAP path.
+   */
+  private recordPromptTurns(
+    acpSessionId: ACPSessionId,
+    agentId: AgentId,
+    userMessage: string,
+    buffer: { textChunks: string[]; toolCalls: Record<string, unknown>[] },
+  ): void {
+    const now = Date.now();
+
+    try {
+      // Record user turn
+      if (userMessage) {
+        this.eventStore.emit({
+          type: "turn",
+          source: { agent_id: agentId },
+          payload: {
+            action: "recorded",
+            turn_id: `turn_user_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            conversation_id: acpSessionId,
+            participant: "user",
+            timestamp: now,
+            content_type: "user_prompt",
+            content: userMessage,
+            source_type: "explicit",
+          },
+        });
+      }
+
+      // Record assistant turn with accumulated content
+      const assistantText = buffer.textChunks.join("");
+      const parts: unknown[] = [];
+
+      if (assistantText) {
+        parts.push({ type: "text", text: assistantText });
+      }
+
+      for (const tool of buffer.toolCalls) {
+        parts.push({ type: "tool", ...tool });
+      }
+
+      if (parts.length > 0) {
+        this.eventStore.emit({
+          type: "turn",
+          source: { agent_id: agentId },
+          payload: {
+            action: "recorded",
+            turn_id: `turn_asst_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            conversation_id: acpSessionId,
+            participant: agentId,
+            timestamp: now + 1,
+            content_type: "assistant_response",
+            content: { parts },
+            source_type: "explicit",
+          },
+        });
+      }
+    } catch (error) {
+      console.warn(
+        `[ACP-over-MAP] Failed to record turns for session ${acpSessionId}:`,
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 

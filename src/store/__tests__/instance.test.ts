@@ -90,7 +90,6 @@ describe('Path Resolution', () => {
 
     expect(resolved.instancePath).toBe(':memory:');
     expect(resolved.isNew).toBe(true);
-    expect(resolved.isLegacy).toBe(false);
     expect(resolved.backendType).toBe('memory');
     expect(resolved.instanceId).toMatch(/^inst_/);
   });
@@ -142,15 +141,14 @@ describe('Path Resolution', () => {
     expect(resolved.namespace).toBe('my-project');
   });
 
-  it('should handle legacy path option', () => {
+  it('should ignore legacy path option and use defaults', () => {
     const legacyPath = path.join(testBaseDir, 'legacy-store.json');
-    const config: StoreConfig = { path: legacyPath };
+    const config: StoreConfig = { path: legacyPath, baseDir: testBaseDir };
     const resolved = resolveInstancePath(config);
 
-    expect(resolved.isLegacy).toBe(true);
-    expect(resolved.backendType).toBe('json');
-    expect(resolved.instancePath).toBe(legacyPath);
-    expect(resolved.instanceId).toBe('legacy-store');
+    // path option is no longer handled — resolveInstancePath ignores it
+    expect(resolved.backendType).toBe(DEFAULT_BACKEND_TYPE);
+    expect(resolved.instanceId).toMatch(/^inst_/);
   });
 
   it('should throw on invalid instance ID', () => {
