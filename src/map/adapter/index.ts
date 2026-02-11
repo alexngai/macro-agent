@@ -114,6 +114,8 @@ export {
   unregisterWakeExtension,
   registerWorkspaceExtension,
   unregisterWorkspaceExtension,
+  registerWorkspaceFileExtensions,
+  unregisterWorkspaceFileExtensions,
   // Constants
   MACRO_EXTENSION_METHODS,
   EXTENSION_CAPABILITIES,
@@ -122,6 +124,7 @@ export {
   type TaskExtensionServices,
   type WakeExtensionServices,
   type WorkspaceExtensionServices,
+  type WorkspaceFileServices,
   type SessionInfo,
   type InternalWorkspace,
 } from "./extensions/index.js";

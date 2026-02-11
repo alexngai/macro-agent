@@ -25,6 +25,7 @@ import { createAPIApp, setupAPIWebSocket } from "../api/server.js";
 import {
   createMAPAdapter,
   createMAPWebSocketHandler,
+  registerWorkspaceFileExtensions,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
@@ -240,6 +241,15 @@ export function createCombinedServer(
       { name: "macro-agent", version: "1.0.0" },
       mapServices
     );
+
+    // Register workspace file extensions for TUI file attachment.
+    // Uses defaultCwd (project root) as the workspace path for all agents,
+    // since the head manager doesn't have an isolated worktree.
+    registerWorkspaceFileExtensions(mapAdapter, {
+      getWorkspace: () => ({ path: defaultCwd } as any),
+      agentExists: () => true,
+    });
+
     mapHandler = createMAPWebSocketHandler(mapAdapter);
   }
 
