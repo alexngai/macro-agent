@@ -95,6 +95,10 @@ export type {
   MountAgentResponse,
   ForkAgentRequest,
   ForkAgentResponse,
+  // History types
+  HistoryTurn,
+  GetHistoryRequest,
+  GetHistoryResponse,
   // Union types
   ACPExtensionMethod,
   ACPExtensionRequests,

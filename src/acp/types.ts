@@ -630,8 +630,42 @@ export interface ResumeAgentResponse {
   /** The resumed agent's ID */
   agentId: AgentId;
 
-  /** The agent's session ID */
+  /** The agent's session ID (from resume) */
   sessionId: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// History Extension Types
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * A historical turn in a session conversation
+ */
+export interface HistoryTurn {
+  /** Turn role */
+  role: "user" | "assistant";
+  /** Timestamp of the turn */
+  timestamp: number;
+  /** Turn content — plain text for user, structured parts for assistant */
+  content: unknown;
+}
+
+/**
+ * Request for _macro/getHistory extension
+ */
+export interface GetHistoryRequest {
+  /** ACP session ID to get history for */
+  sessionId: string;
+  /** Maximum number of turns to return */
+  limit?: number;
+}
+
+/**
+ * Response for _macro/getHistory extension
+ */
+export interface GetHistoryResponse {
+  /** Conversation turns in chronological order */
+  turns: HistoryTurn[];
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -657,7 +691,8 @@ export type ACPExtensionMethod =
   | "_macro/checkCapability"
   | "_macro/respondToPermission"
   | "_macro/cancelPermission"
-  | "_macro/resume";
+  | "_macro/resume"
+  | "_macro/getHistory";
 
 /**
  * Map of extension methods to their request types
@@ -679,6 +714,7 @@ export interface ACPExtensionRequests {
   "_macro/respondToPermission": RespondToPermissionRequest;
   "_macro/cancelPermission": CancelPermissionRequest;
   "_macro/resume": ResumeAgentRequest;
+  "_macro/getHistory": GetHistoryRequest;
 }
 
 /**
@@ -701,6 +737,7 @@ export interface ACPExtensionResponses {
   "_macro/respondToPermission": RespondToPermissionResponse;
   "_macro/cancelPermission": CancelPermissionResponse;
   "_macro/resume": ResumeAgentResponse;
+  "_macro/getHistory": GetHistoryResponse;
 }
 
 // ─────────────────────────────────────────────────────────────────

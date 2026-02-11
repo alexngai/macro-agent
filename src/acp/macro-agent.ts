@@ -63,6 +63,9 @@ import type {
   CancelPermissionResponse,
   ResumeAgentRequest,
   ResumeAgentResponse,
+  GetHistoryRequest,
+  GetHistoryResponse,
+  HistoryTurn,
 } from "./types.js";
 import { ACPError } from "./types.js";
 import type { PeerManager } from "../peer/peer-manager.js";
@@ -95,6 +98,7 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/respondToPermission",
   "_macro/cancelPermission",
   "_macro/resume",
+  "_macro/getHistory",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -148,6 +152,10 @@ export class MacroAgent implements Agent {
 
   /** Map of ACP session ID to cancellation abort controllers */
   private cancellationControllers: Map<ACPSessionId, AbortController> =
+    new Map();
+
+  /** Accumulates assistant response parts during prompt streaming for history persistence */
+  private promptBuffers: Map<ACPSessionId, { textChunks: string[]; toolCalls: Record<string, unknown>[] }> =
     new Map();
 
   constructor(connection: AgentSideConnection, config: MacroAgentConfig) {
@@ -231,6 +239,9 @@ export class MacroAgent implements Agent {
     // Create abort controller for cancellation
     this.cancellationControllers.set(acpSessionId, new AbortController());
 
+    // Create a conversation in EventStore for history tracking
+    this.ensureConversation(acpSessionId, spawned.id);
+
     return {
       sessionId: acpSessionId,
     };
@@ -274,6 +285,7 @@ export class MacroAgent implements Agent {
         if (!this.cancellationControllers.has(acpSessionId)) {
           this.cancellationControllers.set(acpSessionId, new AbortController());
         }
+        this.ensureConversation(acpSessionId, existing.id);
         return {};
       }
 
@@ -286,6 +298,7 @@ export class MacroAgent implements Agent {
       // Create session mapping
       this.sessionMapper.createMapping(acpSessionId, spawned.id);
       this.cancellationControllers.set(acpSessionId, new AbortController());
+      this.ensureConversation(acpSessionId, spawned.id);
 
       return {};
     }
@@ -302,6 +315,7 @@ export class MacroAgent implements Agent {
     // Create session mapping
     this.sessionMapper.createMapping(acpSessionId, spawned.id);
     this.cancellationControllers.set(acpSessionId, new AbortController());
+    this.ensureConversation(acpSessionId, spawned.id);
 
     return {};
   }
@@ -338,6 +352,9 @@ export class MacroAgent implements Agent {
     // Mark session as processing (for health monitoring)
     this.sessionMapper.setProcessing(acpSessionId, true);
 
+    // Initialize prompt buffer for history accumulation
+    this.promptBuffers.set(acpSessionId, { textChunks: [], toolCalls: [] });
+
     try {
       // Stream responses from the agent
       for await (const update of this.agentManager.prompt(
@@ -354,6 +371,9 @@ export class MacroAgent implements Agent {
         // Forward session updates to the client
         await this.forwardSessionUpdate(acpSessionId, update);
       }
+
+      // Persist conversation turns for history
+      this.recordPromptTurns(acpSessionId, agentId, messageContent);
 
       return {
         stopReason: "end_turn",
@@ -511,6 +531,11 @@ export class MacroAgent implements Agent {
       case "_macro/resume":
         return this.handleResumeAgent(
           params as unknown as ResumeAgentRequest
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/getHistory":
+        return this.handleGetHistory(
+          params as unknown as GetHistoryRequest
         ) as unknown as Record<string, unknown>;
 
       default:
@@ -1348,6 +1373,28 @@ export class MacroAgent implements Agent {
         console.log(`[MacroAgent] Forwarding ${updateType}`);
     }
 
+    // Accumulate content for history persistence
+    const buffer = this.promptBuffers.get(acpSessionId);
+    if (buffer) {
+      if (updateType === "agent_message_chunk") {
+        const content = sessionUpdate.content as { type?: string; text?: string } | undefined;
+        if (content?.text) {
+          buffer.textChunks.push(content.text);
+        }
+      } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+        const status = sessionUpdate.status as string | undefined;
+        if (status === "completed" || (updateType === "tool_call" && status !== "running")) {
+          buffer.toolCalls.push({
+            toolCallId: sessionUpdate.toolCallId,
+            title: sessionUpdate.title,
+            status: sessionUpdate.status,
+            input: sessionUpdate.rawInput,
+            output: sessionUpdate.output,
+          });
+        }
+      }
+    }
+
     // Forward updates via sessionUpdate (except permission_request which is handled above)
     try {
       await this.connection.sessionUpdate({
@@ -1446,6 +1493,135 @@ export class MacroAgent implements Agent {
         env: server.env,
       })),
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // History Persistence Helpers
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Ensure a conversation exists in the EventStore for a session.
+   * Uses the ACP session ID as the conversation ID for direct lookup.
+   */
+  private ensureConversation(acpSessionId: ACPSessionId, agentId: AgentId): void {
+    // Guard: EventStore may not support conversations (e.g., in tests with mocks)
+    if (typeof this.eventStore.getConversation !== "function") return;
+
+    // Check if conversation already exists
+    const existing = this.eventStore.getConversation(acpSessionId);
+    if (existing) return;
+
+    try {
+      this.eventStore.emit({
+        type: "conversation",
+        source: { agent_id: agentId },
+        payload: {
+          action: "created",
+          conversation_id: acpSessionId,
+          conversation_type: "session",
+          subject: `ACP session ${acpSessionId}`,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[MacroAgent] Failed to create conversation for session ${acpSessionId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  /**
+   * Record user and assistant turns after a prompt completes.
+   */
+  private recordPromptTurns(
+    acpSessionId: ACPSessionId,
+    agentId: AgentId,
+    userMessage: string
+  ): void {
+    const buffer = this.promptBuffers.get(acpSessionId);
+    if (!buffer) return;
+
+    const now = Date.now();
+
+    try {
+      // Record user turn
+      if (userMessage) {
+        this.eventStore.emit({
+          type: "turn",
+          source: { agent_id: agentId },
+          payload: {
+            action: "recorded",
+            turn_id: `turn_user_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            conversation_id: acpSessionId,
+            participant: "user",
+            timestamp: now,
+            content_type: "user_prompt",
+            content: userMessage,
+            source_type: "explicit",
+          },
+        });
+      }
+
+      // Record assistant turn with accumulated content
+      const assistantText = buffer.textChunks.join("");
+      const parts: unknown[] = [];
+
+      if (assistantText) {
+        parts.push({ type: "text", text: assistantText });
+      }
+
+      for (const tool of buffer.toolCalls) {
+        parts.push({ type: "tool", ...tool });
+      }
+
+      if (parts.length > 0) {
+        this.eventStore.emit({
+          type: "turn",
+          source: { agent_id: agentId },
+          payload: {
+            action: "recorded",
+            turn_id: `turn_asst_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            conversation_id: acpSessionId,
+            participant: agentId,
+            timestamp: now + 1, // +1ms to ensure ordering after user turn
+            content_type: "assistant_response",
+            content: { parts },
+            source_type: "explicit",
+          },
+        });
+      }
+    } catch (error) {
+      console.warn(
+        `[MacroAgent] Failed to record turns for session ${acpSessionId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      // Clean up the buffer
+      this.promptBuffers.delete(acpSessionId);
+    }
+  }
+
+  /**
+   * Handle _macro/getHistory extension — returns conversation turns for a session
+   */
+  private handleGetHistory(params: GetHistoryRequest): GetHistoryResponse {
+    const { sessionId, limit } = params;
+
+    // Query turns from EventStore (conversation ID = session ID)
+    const turns = this.eventStore.listTurns({
+      conversationId: sessionId,
+      order: "asc",
+      limit: limit ?? 200,
+    });
+
+    // Convert to HistoryTurn format
+    const historyTurns: HistoryTurn[] = turns.map((turn) => ({
+      role: turn.contentType === "user_prompt" ? "user" as const : "assistant" as const,
+      timestamp: turn.timestamp,
+      content: turn.content,
+    }));
+
+    return { turns: historyTurns };
   }
 
   // ─────────────────────────────────────────────────────────────────

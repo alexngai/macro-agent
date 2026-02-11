@@ -372,7 +372,8 @@ describe("ACP Mode Integration", () => {
       expect(extensions).toContain("_macro/respondToPermission");
       expect(extensions).toContain("_macro/cancelPermission");
       expect(extensions).toContain("_macro/resume");
-      expect(extensions?.length).toBe(16);
+      expect(extensions).toContain("_macro/getHistory");
+      expect(extensions?.length).toBe(17);
 
       expect(initResponse.agentCapabilities?._meta?.agentType).toBe(
         "macro-agent"
