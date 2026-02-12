@@ -440,7 +440,11 @@ export class ACPOverMAPHandler {
         updateCount++;
       }
 
-      console.error(`[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates`);
+      // Check if the loop ended because of cancellation
+      const wasCancelled = streamState.abortController.signal.aborted;
+      const stopReason = wasCancelled ? "cancelled" : "end_turn";
+
+      console.error(`[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates, stopReason=${stopReason}`);
 
       // Persist conversation turns for history
       this.recordPromptTurns(sessionId as ACPSessionId, agentId, messageContent, buffer);
@@ -448,7 +452,7 @@ export class ACPOverMAPHandler {
       // Emit updated session info after prompt completes
       this.emitSessionInfo(streamState, sessionId, emitNotification);
 
-      return { stopReason: "end_turn" };
+      return { stopReason };
     } catch (error) {
       console.error(`[ACP-over-MAP] Prompt error:`, error);
       return {

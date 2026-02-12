@@ -814,16 +814,27 @@ export class MAPAdapterImpl implements MAPAdapter {
           break;
         }
 
-        const result = await session.rpcHandler.process(value, {
-          participantId: session.participantId,
-          capabilities: participant.capabilities,
-          signal: session.abortController.signal,
-        });
+        // Process messages concurrently (same pattern as toad reference).
+        // The message loop must not block on any handler, otherwise
+        // session/cancel can't be delivered while session/prompt is running.
+        // The stream writer queues writes safely, so concurrent responses
+        // don't interleave.
+        const processAndRespond = async () => {
+          const result = await session.rpcHandler.process(value, {
+            participantId: session.participantId,
+            capabilities: participant.capabilities,
+            signal: session.abortController.signal,
+          });
 
-        // Send response if needed
-        if (result.type === "response") {
-          await this.sendToSession(session, result.response);
-        }
+          if (result.type === "response") {
+            await this.sendToSession(session, result.response);
+          }
+        };
+        processAndRespond().catch((err) => {
+          if (!session.abortController.signal.aborted) {
+            console.error(`[MAPAdapter] Error processing message:`, err);
+          }
+        });
       }
     } catch (error) {
       if (!session.abortController.signal.aborted) {
