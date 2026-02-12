@@ -258,10 +258,10 @@ describe("_macro/getHistory", () => {
     const assistantContent = turns[1].content as {
       parts: { type: string; text?: string; toolCallId?: string; title?: string; output?: unknown }[];
     };
-    expect(assistantContent.parts).toHaveLength(2);
+    expect(assistantContent.parts).toHaveLength(3);
     expect(assistantContent.parts[0]).toEqual({
       type: "text",
-      text: "Let me check that. Done!",
+      text: "Let me check that.",
     });
     expect(assistantContent.parts[1]).toMatchObject({
       type: "tool",
@@ -269,6 +269,10 @@ describe("_macro/getHistory", () => {
       title: "Read file",
       status: "completed",
       output: "file contents here",
+    });
+    expect(assistantContent.parts[2]).toEqual({
+      type: "text",
+      text: " Done!",
     });
   });
 

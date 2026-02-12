@@ -400,9 +400,8 @@ export class ACPOverMAPHandler {
     this.ensureConversation(sessionId as ACPSessionId, agentId);
 
     // Accumulate response content for history recording
-    const buffer: { textChunks: string[]; toolCalls: Record<string, unknown>[] } = {
-      textChunks: [],
-      toolCalls: [],
+    const buffer: { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> } = {
+      parts: [],
     };
 
     try {
@@ -414,18 +413,24 @@ export class ACPOverMAPHandler {
           return { stopReason: "cancelled" };
         }
 
-        // Accumulate content for history persistence
+        // Accumulate content for history persistence (preserving text/tool interleaving order)
         const u = update as Record<string, unknown>;
         const updateType = u.sessionUpdate as string ?? u.type as string;
         if (updateType === "agent_message_chunk") {
           const content = u.content as { type?: string; text?: string } | undefined;
           if (content?.text) {
-            buffer.textChunks.push(content.text);
+            const last = buffer.parts[buffer.parts.length - 1];
+            if (last && last.type === "text") {
+              last.text += content.text;
+            } else {
+              buffer.parts.push({ type: "text", text: content.text });
+            }
           }
         } else if (updateType === "tool_call" || updateType === "tool_call_update") {
           const status = u.status as string | undefined;
           if (status === "completed" || (updateType === "tool_call" && status !== "running")) {
-            buffer.toolCalls.push({
+            buffer.parts.push({
+              type: "tool",
               toolCallId: u.toolCallId,
               title: u.title,
               status: u.status,
@@ -690,7 +695,7 @@ export class ACPOverMAPHandler {
     acpSessionId: ACPSessionId,
     agentId: AgentId,
     userMessage: string,
-    buffer: { textChunks: string[]; toolCalls: Record<string, unknown>[] },
+    buffer: { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> },
   ): void {
     const now = Date.now();
 
@@ -713,17 +718,8 @@ export class ACPOverMAPHandler {
         });
       }
 
-      // Record assistant turn with accumulated content
-      const assistantText = buffer.textChunks.join("");
-      const parts: unknown[] = [];
-
-      if (assistantText) {
-        parts.push({ type: "text", text: assistantText });
-      }
-
-      for (const tool of buffer.toolCalls) {
-        parts.push({ type: "tool", ...tool });
-      }
+      // Record assistant turn with accumulated content (parts already in order)
+      const parts = buffer.parts;
 
       if (parts.length > 0) {
         this.eventStore.emit({

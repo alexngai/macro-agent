@@ -157,7 +157,7 @@ export class MacroAgent implements Agent {
   /** Accumulates assistant response parts during prompt streaming for history persistence */
   private promptBuffers: Map<
     ACPSessionId,
-    { textChunks: string[]; toolCalls: Record<string, unknown>[] }
+    { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> }
   > = new Map();
 
   constructor(connection: AgentSideConnection, config: MacroAgentConfig) {
@@ -361,7 +361,7 @@ export class MacroAgent implements Agent {
     this.sessionMapper.setProcessing(acpSessionId, true);
 
     // Initialize prompt buffer for history accumulation
-    this.promptBuffers.set(acpSessionId, { textChunks: [], toolCalls: [] });
+    this.promptBuffers.set(acpSessionId, { parts: [] });
 
     try {
       // Stream responses from the agent
@@ -1396,7 +1396,7 @@ export class MacroAgent implements Agent {
         console.log(`[MacroAgent] Forwarding ${updateType}`);
     }
 
-    // Accumulate content for history persistence
+    // Accumulate content for history persistence (preserving text/tool interleaving order)
     const buffer = this.promptBuffers.get(acpSessionId);
     if (buffer) {
       if (updateType === "agent_message_chunk") {
@@ -1404,7 +1404,12 @@ export class MacroAgent implements Agent {
           | { type?: string; text?: string }
           | undefined;
         if (content?.text) {
-          buffer.textChunks.push(content.text);
+          const last = buffer.parts[buffer.parts.length - 1];
+          if (last && last.type === "text") {
+            last.text += content.text;
+          } else {
+            buffer.parts.push({ type: "text", text: content.text });
+          }
         }
       } else if (
         updateType === "tool_call" ||
@@ -1415,7 +1420,8 @@ export class MacroAgent implements Agent {
           status === "completed" ||
           (updateType === "tool_call" && status !== "running")
         ) {
-          buffer.toolCalls.push({
+          buffer.parts.push({
+            type: "tool",
             toolCallId: sessionUpdate.toolCallId,
             title: sessionUpdate.title,
             status: sessionUpdate.status,
@@ -1627,17 +1633,8 @@ export class MacroAgent implements Agent {
         });
       }
 
-      // Record assistant turn with accumulated content
-      const assistantText = buffer.textChunks.join("");
-      const parts: unknown[] = [];
-
-      if (assistantText) {
-        parts.push({ type: "text", text: assistantText });
-      }
-
-      for (const tool of buffer.toolCalls) {
-        parts.push({ type: "tool", ...tool });
-      }
+      // Record assistant turn with accumulated content (parts already in order)
+      const parts = buffer.parts;
 
       if (parts.length > 0) {
         this.eventStore.emit({
