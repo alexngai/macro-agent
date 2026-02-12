@@ -65,6 +65,7 @@ import {
   type ScopeId,
 } from "../types.js";
 import type { AgentId } from "../../store/types/index.js";
+import type { AgentStopReason } from "../../agent/types.js";
 import {
   createConnectionManager,
   type ConnectionManager,
@@ -712,6 +713,10 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/agents/get": async (params) =>
         this.handleGetAgent(participantId, params),
 
+      // Agent lifecycle
+      "map/agents/stop": async (params) =>
+        this.handleStopAgent(participantId, params),
+
       // Scope queries
       "map/scopes/list": async () => this.handleListScopes(participantId),
       "map/scopes/get": async (params) =>
@@ -764,6 +769,7 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/send": "canMessage",
       "map/agents/list": "canQuery",
       "map/agents/get": "canQuery",
+      "map/agents/stop": "canStop",
       "map/scopes/list": "canQuery",
       "map/scopes/get": "canQuery",
       "map/scopes/create": "canManageScopes",
@@ -1179,6 +1185,59 @@ export class MAPAdapterImpl implements MAPAdapter {
     }
     const agent = this.getAgent(participantId, agentId);
     return { agent: agent ?? null };
+  }
+
+  private async handleStopAgent(
+    _participantId: ParticipantId,
+    params: unknown,
+  ): Promise<{ stopping: boolean; agent?: AgentInfo }> {
+    const { agentId, reason, force } = (params as {
+      agentId?: AgentId;
+      reason?: string;
+      force?: boolean;
+    }) ?? {};
+
+    if (!agentId) {
+      throw RPCError.invalidParams("agentId required");
+    }
+
+    if (!this.services.agentManager) {
+      throw RPCError.internalError("Agent manager not available");
+    }
+
+    // Abort any active ACP streams for this agent
+    if (this.acpOverMapHandler) {
+      this.acpOverMapHandler.abortStreamsForAgent(agentId);
+    }
+
+    // Terminate the agent
+    try {
+      await this.services.agentManager.terminate(
+        agentId,
+        (reason ?? "cancelled") as AgentStopReason,
+      );
+    } catch (error) {
+      console.error(`[MAPAdapter] Error stopping agent ${agentId}:`, error);
+      throw RPCError.internalError(
+        `Failed to stop agent: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    // Emit agent state changed event for subscribers
+    this.emitEvent({
+      eventId: `stop-${Date.now()}`,
+      type: "agent.state.changed" as MAPEventType,
+      timestamp: Date.now(),
+      agentId,
+      data: {
+        agentId,
+        current: "stopped",
+        previous: "running",
+        reason: reason ?? "cancelled",
+      },
+    });
+
+    return { stopping: true };
   }
 
   private async handleListScopes(

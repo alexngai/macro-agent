@@ -80,6 +80,20 @@ export class ACPOverMAPHandler {
   }
 
   /**
+   * Abort all active streams targeting a specific agent.
+   * Called when an agent is stopped via MAP protocol to interrupt
+   * any in-progress ACP prompt streaming.
+   */
+  abortStreamsForAgent(agentId: AgentId): void {
+    for (const [streamId, streamState] of this.streams) {
+      if (streamState.agentId === agentId) {
+        console.error(`[ACP-over-MAP] Aborting stream ${streamId} for stopped agent ${agentId}`);
+        streamState.abortController.abort();
+      }
+    }
+  }
+
+  /**
    * Process an ACP request and return the response.
    * @param targetAgentId - Target agent for the request
    * @param envelope - ACP request envelope
@@ -455,28 +469,32 @@ export class ACPOverMAPHandler {
     // Prefer server's resolved session ID over client's potentially stale one
     const sessionId = streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
 
-    // Signal cancellation
+    const agentId = sessionId
+      ? this.sessionMapper.getAgentId(sessionId as ACPSessionId)
+      : streamState.agentId;
+
+    console.error(
+      `[ACP-over-MAP] Cancel - streamId=${streamState.streamId} sessionId=${sessionId} agentId=${agentId}`,
+    );
+
+    // 1. Abort the for-await loop in handlePrompt so it stops yielding updates
     streamState.abortController.abort();
 
-    if (!sessionId) {
-      return { cancelled: true };
+    // 2. Cancel the agent's active session (sends session/cancel to the subprocess)
+    // This does NOT terminate the agent — it only interrupts the current prompt.
+    // The subprocess stays alive and can accept new prompts.
+    // Use map/agents/stop for full agent termination.
+    if (agentId) {
+      const session = this.agentManager.getSession(agentId);
+      if (session) {
+        try {
+          await session.cancel();
+          console.error(`[ACP-over-MAP] Session cancelled for agent ${agentId}`);
+        } catch (error) {
+          console.warn(`[ACP-over-MAP] session.cancel() failed for ${agentId}:`, error);
+        }
+      }
     }
-
-    // Get the mapped agent
-    const agentId = this.sessionMapper.getAgentId(sessionId as ACPSessionId);
-    if (!agentId) {
-      return { cancelled: true };
-    }
-
-    // Terminate the agent
-    try {
-      await this.agentManager.terminate(agentId, "cancelled");
-    } catch (error) {
-      console.warn(`[ACP-over-MAP] Error terminating agent ${agentId}:`, error);
-    }
-
-    // Clean up
-    this.sessionMapper.removeMapping(sessionId as ACPSessionId);
 
     return { cancelled: true };
   }
