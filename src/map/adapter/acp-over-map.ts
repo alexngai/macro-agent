@@ -72,6 +72,9 @@ export class ACPOverMAPHandler {
   /** Session mapper for ACP session -> Agent mapping */
   private sessionMapper: SessionMapper = new SessionMapper();
 
+  /** Latest plan entries per conversation (agentId → plan) */
+  private planCache: Map<string, Array<{ content: string; priority: string; status: string }>> = new Map();
+
   constructor(config: ACPOverMAPConfig) {
     this.agentManager = config.agentManager;
     this.eventStore = config.eventStore;
@@ -404,6 +407,9 @@ export class ACPOverMAPHandler {
       parts: [],
     };
 
+    // Track latest plan for persistence
+    let latestPlan: Array<{ content: string; priority: string; status: string }> | null = null;
+
     try {
       // Stream responses from the agent
       let updateCount = 0;
@@ -425,6 +431,11 @@ export class ACPOverMAPHandler {
             } else {
               buffer.parts.push({ type: "text", text: content.text });
             }
+          }
+        } else if (updateType === "plan") {
+          const entries = (u as { entries?: Array<{ content: string; priority: string; status: string }> }).entries;
+          if (entries) {
+            latestPlan = entries;
           }
         } else if (updateType === "tool_call" || updateType === "tool_call_update") {
           const status = u.status as string | undefined;
@@ -453,6 +464,11 @@ export class ACPOverMAPHandler {
 
       // Persist conversation turns for history
       this.recordPromptTurns(sessionId as ACPSessionId, agentId, messageContent, buffer);
+
+      // Cache latest plan for history loading
+      if (latestPlan) {
+        this.planCache.set(agentId, latestPlan);
+      }
 
       // Emit updated session info after prompt completes
       this.emitSessionInfo(streamState, sessionId, emitNotification);
@@ -632,6 +648,11 @@ export class ACPOverMAPHandler {
           order: "asc",
           limit: limit ?? 200,
         });
+
+        // Include cached plan and agent cwd if available
+        const plan = historyAgentId ? this.planCache.get(historyAgentId) ?? [] : [];
+        const agent = historyAgentId ? this.eventStore.getAgent(historyAgentId as AgentId) : undefined;
+
         return {
           turns: turns.map((turn) => ({
             role:
@@ -641,6 +662,8 @@ export class ACPOverMAPHandler {
             timestamp: turn.timestamp,
             content: turn.content,
           })),
+          plan,
+          cwd: agent?.cwd ?? null,
         };
       }
 

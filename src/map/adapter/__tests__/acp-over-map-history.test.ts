@@ -661,4 +661,375 @@ describe("ACP-over-MAP history persistence", () => {
     const turnsNoAgent = (historyNoAgent.acp.result as { turns: unknown[] }).turns;
     expect(turnsNoAgent).toHaveLength(0);
   });
+
+  it("should include agent cwd in getHistory response", async () => {
+    await setup([
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Working in dir" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-cwd";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Where are you?" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+
+    const result = historyResult.acp.result as { turns: unknown[]; cwd: string | null };
+    expect(result.cwd).toBe("/test/cwd");
+  });
+
+  it("should return null cwd when agentId is not provided", async () => {
+    await setup([
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Hello" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-cwd-null";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Hi" }],
+      }, sessionId),
+    );
+
+    // Query without agentId — cwd should be null
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId }),
+    );
+
+    const result = historyResult.acp.result as { turns: unknown[]; cwd: string | null };
+    expect(result.cwd).toBeNull();
+  });
+
+  it("should capture plan entries from streaming and include in getHistory", async () => {
+    await setup([
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Planning..." },
+      },
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Analyze codebase", priority: "high", status: "in_progress" },
+          { content: "Write tests", priority: "medium", status: "pending" },
+          { content: "Deploy", priority: "low", status: "pending" },
+        ],
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: " Done." },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-plan";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Make a plan" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+
+    const result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+    };
+
+    expect(result.plan).toHaveLength(3);
+    expect(result.plan[0]).toEqual({
+      content: "Analyze codebase",
+      priority: "high",
+      status: "in_progress",
+    });
+    expect(result.plan[1]).toEqual({
+      content: "Write tests",
+      priority: "medium",
+      status: "pending",
+    });
+    expect(result.plan[2]).toEqual({
+      content: "Deploy",
+      priority: "low",
+      status: "pending",
+    });
+  });
+
+  it("should return empty plan when no plan updates were received", async () => {
+    await setup([
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "No plan here" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-no-plan";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Just chat" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+
+    const result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: unknown[];
+    };
+
+    expect(result.plan).toEqual([]);
+  });
+
+  it("should use latest plan when multiple plan updates are received", async () => {
+    await setup([
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Step 1", priority: "high", status: "pending" },
+        ],
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Working..." },
+      },
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Step 1", priority: "high", status: "completed" },
+          { content: "Step 2", priority: "medium", status: "in_progress" },
+        ],
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-plan-latest";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Work on it" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+
+    const result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+    };
+
+    // Should have the LATEST plan (second update)
+    expect(result.plan).toHaveLength(2);
+    expect(result.plan[0].status).toBe("completed");
+    expect(result.plan[1].status).toBe("in_progress");
+  });
+
+  it("should persist plan across multiple prompts (latest wins)", async () => {
+    const { agentManager } = await setup([
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Initial task", priority: "high", status: "in_progress" },
+        ],
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "First response" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-plan-persist";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    // First prompt — sets initial plan
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Start working" }],
+      }, sessionId),
+    );
+
+    // Verify plan from first prompt
+    let historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+    let result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+    };
+    expect(result.plan).toHaveLength(1);
+    expect(result.plan[0].content).toBe("Initial task");
+
+    // Second prompt with updated plan
+    (agentManager.prompt as ReturnType<typeof vi.fn>).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield {
+          sessionUpdate: "plan",
+          entries: [
+            { content: "Initial task", priority: "high", status: "completed" },
+            { content: "New task", priority: "medium", status: "in_progress" },
+          ],
+        };
+        yield {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Second response" },
+        };
+      },
+    } as any);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Continue" }],
+      }, sessionId),
+    );
+
+    // Plan should now reflect the second prompt's update
+    historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+    result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+    };
+    expect(result.plan).toHaveLength(2);
+    expect(result.plan[0].status).toBe("completed");
+    expect(result.plan[1].content).toBe("New task");
+  });
+
+  it("should keep plan from earlier prompt if new prompt has no plan updates", async () => {
+    const { agentManager } = await setup([
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Persistent task", priority: "high", status: "in_progress" },
+        ],
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "First" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-plan-keep";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    // First prompt — sets plan
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Plan it" }],
+      }, sessionId),
+    );
+
+    // Second prompt with NO plan updates
+    (agentManager.prompt as ReturnType<typeof vi.fn>).mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "No plan this time" },
+        };
+      },
+    } as any);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Just chat" }],
+      }, sessionId),
+    );
+
+    // Plan should still be present from the first prompt
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+    const result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+    };
+    expect(result.plan).toHaveLength(1);
+    expect(result.plan[0].content).toBe("Persistent task");
+  });
+
+  it("should include both plan and cwd together in getHistory response", async () => {
+    await setup([
+      {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Do something", priority: "high", status: "pending" },
+        ],
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Got it" },
+      },
+    ]);
+
+    const agentId = "agent-1" as AgentId;
+    const streamId = "test-stream-plan-cwd";
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Go" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId, agentId }),
+    );
+
+    const result = historyResult.acp.result as {
+      turns: unknown[];
+      plan: Array<{ content: string; priority: string; status: string }>;
+      cwd: string | null;
+    };
+
+    // Both fields present
+    expect(result.turns).toHaveLength(2);
+    expect(result.plan).toHaveLength(1);
+    expect(result.plan[0].content).toBe("Do something");
+    expect(result.cwd).toBe("/test/cwd");
+  });
 });
