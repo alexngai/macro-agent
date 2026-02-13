@@ -23,6 +23,7 @@ import type {
   EventFilter,
   Agent,
   AgentState,
+  AgentMetadataUpdate,
   Task,
   TaskStatus,
   QueuedMessage,
@@ -204,6 +205,7 @@ export interface EventStore {
   getAgent(agentId: AgentId): Agent | null;
   listAgents(filter?: { state?: AgentState; parent?: AgentId | null }): Agent[];
   updateAgentPlan(agentId: AgentId, plan: Array<{ content: string; priority: string; status: string }>): void;
+  updateAgentMetadata(agentId: AgentId, updates: AgentMetadataUpdate): void;
 
   // Task view
   getTask(taskId: TaskId): Task | null;
@@ -521,23 +523,49 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   }
 
   /**
-   * Update an agent's plan entries (persisted to SQLite via TinyBase)
+   * Update agent metadata fields (name, plan, metadata).
+   * Only provided fields are updated. Metadata is shallow-merged with existing.
+   */
+  function updateAgentMetadata(
+    agentId: AgentId,
+    updates: AgentMetadataUpdate,
+  ): void {
+    const row = store.getRow('agents', agentId);
+    if (!row.id) return;
+
+    const partial: Record<string, string | number | boolean> = {
+      last_activity_at: Date.now(),
+    };
+
+    if (updates.name !== undefined) {
+      partial.name = updates.name;
+    }
+    if (updates.plan !== undefined) {
+      partial.plan = JSON.stringify(updates.plan);
+    }
+    if (updates.metadata !== undefined) {
+      // Shallow merge with existing metadata
+      const existing = row.metadata ? JSON.parse(row.metadata as string) : {};
+      partial.metadata = JSON.stringify({ ...existing, ...updates.metadata });
+    }
+
+    store.setPartialRow('agents', agentId, partial);
+
+    const agent = rowToAgent(store.getRow('agents', agentId));
+    notifyAgentChange(agentId, agent);
+  }
+
+  /**
+   * Update an agent's plan entries (persisted to SQLite via TinyBase).
+   * Convenience wrapper around updateAgentMetadata.
    */
   function updateAgentPlan(
     agentId: AgentId,
     plan: Array<{ content: string; priority: string; status: string }>,
   ): void {
-    const row = store.getRow('agents', agentId);
-    if (!row.id) return;
-
-    store.setPartialRow('agents', agentId, {
-      plan: JSON.stringify(plan),
-      last_activity_at: Date.now(),
-    });
-
-    const agent = rowToAgent(store.getRow('agents', agentId));
-    notifyAgentChange(agentId, agent);
+    updateAgentMetadata(agentId, { plan });
   }
+
 
   /**
    * Get task by ID
@@ -1224,6 +1252,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     getAgent,
     listAgents,
     updateAgentPlan,
+    updateAgentMetadata,
     getTask,
     listTasks,
     getMessages,
@@ -1291,13 +1320,21 @@ function initializeTables(store: Store): void {
  */
 function rebuildViews(store: Store): void {
   // Preserve out-of-band agent fields that aren't derived from events.
-  // `plan` is written directly via updateAgentPlan(), not through events,
-  // so it would be lost when we clear and replay.
-  const savedAgentPlan = new Map<string, string>();
+  // These fields are written directly (not through events),
+  // so they would be lost when we clear and replay.
+  const OUT_OF_BAND_FIELDS = ['plan', 'name', 'metadata'] as const;
+  const savedOutOfBand = new Map<string, Record<string, string>>();
   for (const rowId of store.getRowIds('agents')) {
     const row = store.getRow('agents', rowId);
-    if (row.plan && row.plan !== '[]') {
-      savedAgentPlan.set(rowId, row.plan as string);
+    const saved: Record<string, string> = {};
+    for (const field of OUT_OF_BAND_FIELDS) {
+      const val = row[field] as string | undefined;
+      if (val && val !== '' && val !== '[]') {
+        saved[field] = val;
+      }
+    }
+    if (Object.keys(saved).length > 0) {
+      savedOutOfBand.set(rowId, saved);
     }
   }
 
@@ -1358,10 +1395,10 @@ function rebuildViews(store: Store): void {
   }
 
   // Restore out-of-band agent fields preserved before the wipe
-  for (const [agentId, plan] of savedAgentPlan) {
+  for (const [agentId, fields] of savedOutOfBand) {
     const row = store.getRow('agents', agentId);
     if (row.id) {
-      store.setPartialRow('agents', agentId, { plan });
+      store.setPartialRow('agents', agentId, fields);
     }
   }
 }
@@ -1451,6 +1488,7 @@ function applySpawnEvent(
 
   store.setRow('agents', agentId, {
     id: agentId,
+    name: '',
     session_id: payload.session_id,
     provider_session_id: '',
     parent: parent ?? '',
@@ -1463,6 +1501,7 @@ function applySpawnEvent(
     config: JSON.stringify(payload.config ?? {}),
     cwd: payload.cwd ?? process.cwd(),
     plan: '[]',
+    metadata: '',
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
@@ -1800,6 +1839,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
   const stopReason = row.stop_reason as string;
   return {
     id: row.id as AgentId,
+    name: (row.name as string) || undefined,
     session_id: row.session_id as string,
     provider_session_id: (row.provider_session_id as string) || undefined,
     parent: (row.parent as string) || null,
@@ -1812,6 +1852,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     config: row.config ? JSON.parse(row.config as string) : {},
     cwd: (row.cwd as string) || process.cwd(),
     plan: row.plan ? JSON.parse(row.plan as string) : [],
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,

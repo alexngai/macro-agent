@@ -52,6 +52,13 @@ export {
   type AgentDetectionExtensionServices,
 } from "./agent-detection.js";
 
+// Update metadata extension
+export {
+  registerUpdateMetadataExtension,
+  unregisterUpdateMetadataExtension,
+  type UpdateMetadataExtensionServices,
+} from "./update-metadata.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
@@ -59,12 +66,14 @@ import type { WorkspaceExtensionServices } from "./workspace.js";
 import type { WorkspaceFileServices } from "./workspace-files.js";
 import type { ResumeExtensionServices } from "./resume.js";
 import type { AgentDetectionExtensionServices } from "./agent-detection.js";
+import type { UpdateMetadataExtensionServices } from "./update-metadata.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
 import { registerWorkspaceFileExtensions } from "./workspace-files.js";
 import { registerResumeExtension } from "./resume.js";
 import { registerAgentDetectionExtensions } from "./agent-detection.js";
+import { registerUpdateMetadataExtension } from "./update-metadata.js";
 
 // =============================================================================
 // Combined Registration
@@ -80,6 +89,7 @@ export interface MacroExtensionServices {
   workspaceFiles?: WorkspaceFileServices;
   resume?: ResumeExtensionServices;
   agentDetection?: AgentDetectionExtensionServices;
+  updateMetadata?: UpdateMetadataExtensionServices;
 }
 
 /**
@@ -140,6 +150,10 @@ export function registerMacroExtensions(
   if (services.agentDetection) {
     registerAgentDetectionExtensions(adapter, services.agentDetection);
   }
+
+  if (services.updateMetadata) {
+    registerUpdateMetadataExtension(adapter, services.updateMetadata);
+  }
 }
 
 /**
@@ -164,6 +178,7 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
     adapter.unregisterExtension("_macro/resume");
     adapter.unregisterExtension("_macro/agents/available");
     adapter.unregisterExtension("_macro/agents/refresh");
+    adapter.unregisterExtension("_macro/agents/update");
   } catch {
     // Ignore errors from unregistering non-existent extensions
   }
@@ -197,6 +212,8 @@ export const MACRO_EXTENSION_METHODS = [
   // Agent detection extensions
   "_macro/agents/available",
   "_macro/agents/refresh",
+  // Update metadata extension
+  "_macro/agents/update",
 ] as const;
 
 /**
@@ -217,4 +234,5 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   "_macro/resume": "canManageLifecycle",
   "_macro/agents/available": "canQuery",
   "_macro/agents/refresh": "canQuery",
+  "_macro/agents/update": "canQuery",
 };

@@ -26,6 +26,7 @@ import {
   createMAPAdapter,
   createMAPWebSocketHandler,
   registerWorkspaceFileExtensions,
+  registerUpdateMetadataExtension,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
@@ -137,10 +138,12 @@ function createMAPServices(services: CombinedServerServices): MAPAdapterServices
     agent
       ? {
           id: agent.id,
+          name: agent.name,
           role: agent.role,
           state: agent.state,
           parent: agent.parent ?? undefined,
           createdAt: agent.created_at,
+          metadata: agent.metadata,
         }
       : undefined;
 
@@ -248,6 +251,12 @@ export function createCombinedServer(
     registerWorkspaceFileExtensions(mapAdapter, {
       getWorkspace: () => ({ path: defaultCwd } as any),
       agentExists: () => true,
+    });
+
+    // Register generic metadata update extension
+    registerUpdateMetadataExtension(mapAdapter, {
+      getAgent: (id) => services.agentManager.get(id),
+      updateAgentMetadata: (id, updates) => services.eventStore.updateAgentMetadata(id, updates),
     });
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);

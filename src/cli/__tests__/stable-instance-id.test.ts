@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import { resolve } from "node:path";
-import { getStableInstanceId } from "../acp.js";
+import { getStableInstanceId } from "../stable-instance-id.js";
 
 describe("getStableInstanceId", () => {
   it("should return the same ID for the same path", () => {

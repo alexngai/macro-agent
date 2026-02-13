@@ -767,6 +767,53 @@ export class ACPOverMAPHandler {
         return { success: false, error: `No active session found for agent ${targetAgentId}` };
       }
 
+      case "_macro/agents/update": {
+        const { agentId, name, plan, metadata } = methodParams as {
+          agentId?: string;
+          name?: string;
+          plan?: Array<{ content: string; priority: string; status: string }>;
+          metadata?: Record<string, unknown>;
+        };
+        if (!agentId) {
+          throw new Error("agentId is required");
+        }
+        if (name === undefined && plan === undefined && metadata === undefined) {
+          throw new Error("At least one field to update is required (name, plan, or metadata)");
+        }
+        if (name !== undefined && !name.trim()) {
+          throw new Error("name must not be empty");
+        }
+
+        const agent = this.eventStore.getAgent(agentId as AgentId);
+        if (!agent) {
+          throw new Error(`Agent not found: ${agentId}`);
+        }
+
+        const updates: Record<string, unknown> = {};
+        const updatedFields: string[] = [];
+
+        if (name !== undefined) {
+          updates.name = name.trim();
+          updatedFields.push("name");
+        }
+        if (plan !== undefined) {
+          updates.plan = plan;
+          updatedFields.push("plan");
+        }
+        if (metadata !== undefined) {
+          updates.metadata = metadata;
+          updatedFields.push("metadata");
+        }
+
+        this.eventStore.updateAgentMetadata(agentId as AgentId, updates);
+
+        return {
+          success: true,
+          agentId,
+          updated: updatedFields,
+        };
+      }
+
       default:
         throw new Error(`Unknown extension method: ${method}`);
     }

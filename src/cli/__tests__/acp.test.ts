@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parseArgs, type ACPServerOptions } from "../acp.js";
+import { parseArgs, type ACPServerOptions } from "../parse-args.js";
 
 // ─────────────────────────────────────────────────────────────────
 // parseArgs Tests

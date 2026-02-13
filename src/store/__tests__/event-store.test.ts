@@ -1096,6 +1096,201 @@ describe('Event Archival', () => {
 
       await planStore.close();
     });
+
+    it('should update agent name via updateAgentMetadata', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_meta' },
+        payload: {
+          agent_id: 'agent_meta',
+          session_id: 'sess_meta',
+          task: 'test metadata',
+        },
+      });
+
+      // Name starts undefined
+      expect(metaStore.getAgent('agent_meta')?.name).toBeUndefined();
+
+      // Set name via updateAgentMetadata
+      metaStore.updateAgentMetadata('agent_meta', { name: 'MyAgent' });
+      expect(metaStore.getAgent('agent_meta')?.name).toBe('MyAgent');
+
+      await metaStore.close();
+    });
+
+    it('should update agent metadata via updateAgentMetadata', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_meta2' },
+        payload: {
+          agent_id: 'agent_meta2',
+          session_id: 'sess_meta2',
+          task: 'test metadata field',
+        },
+      });
+
+      // Metadata starts undefined
+      expect(metaStore.getAgent('agent_meta2')?.metadata).toBeUndefined();
+
+      // Set metadata
+      metaStore.updateAgentMetadata('agent_meta2', {
+        metadata: { color: 'blue', priority: 1 },
+      });
+      const after = metaStore.getAgent('agent_meta2');
+      expect(after?.metadata).toEqual({ color: 'blue', priority: 1 });
+
+      await metaStore.close();
+    });
+
+    it('should shallow-merge metadata with existing values', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_merge' },
+        payload: {
+          agent_id: 'agent_merge',
+          session_id: 'sess_merge',
+          task: 'test metadata merge',
+        },
+      });
+
+      // Set initial metadata
+      metaStore.updateAgentMetadata('agent_merge', {
+        metadata: { color: 'blue', size: 'large' },
+      });
+      expect(metaStore.getAgent('agent_merge')?.metadata).toEqual({
+        color: 'blue',
+        size: 'large',
+      });
+
+      // Merge with new metadata — existing keys preserved, new keys added
+      metaStore.updateAgentMetadata('agent_merge', {
+        metadata: { color: 'red', shape: 'circle' },
+      });
+      expect(metaStore.getAgent('agent_merge')?.metadata).toEqual({
+        color: 'red',
+        size: 'large',
+        shape: 'circle',
+      });
+
+      await metaStore.close();
+    });
+
+    it('should update multiple fields in a single updateAgentMetadata call', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_multi' },
+        payload: {
+          agent_id: 'agent_multi',
+          session_id: 'sess_multi',
+          task: 'test multi-field update',
+        },
+      });
+
+      const plan = [
+        { content: 'Step 1', priority: 'high', status: 'pending' },
+      ];
+
+      metaStore.updateAgentMetadata('agent_multi', {
+        name: 'MultiAgent',
+        plan,
+        metadata: { tag: 'test' },
+      });
+
+      const agent = metaStore.getAgent('agent_multi');
+      expect(agent?.name).toBe('MultiAgent');
+      expect(agent?.plan).toEqual(plan);
+      expect(agent?.metadata).toEqual({ tag: 'test' });
+
+      await metaStore.close();
+    });
+
+    it('should notify agent change listeners on metadata update', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_notify' },
+        payload: {
+          agent_id: 'agent_notify',
+          session_id: 'sess_notify',
+          task: 'test notify',
+        },
+      });
+
+      const changes: string[] = [];
+      metaStore.onAgentChange((agentId) => {
+        changes.push(agentId);
+      });
+
+      metaStore.updateAgentMetadata('agent_notify', { name: 'Notified' });
+      expect(changes).toContain('agent_notify');
+
+      await metaStore.close();
+    });
+
+    it('should preserve all out-of-band fields across reload', async () => {
+      const metaStore = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'metadata-reload-test',
+      });
+
+      metaStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_reload' },
+        payload: {
+          agent_id: 'agent_reload',
+          session_id: 'sess_reload',
+          task: 'test reload persistence',
+        },
+      });
+
+      // Set all out-of-band fields
+      const plan = [
+        { content: 'Research', priority: 'high', status: 'completed' },
+      ];
+      metaStore.updateAgentMetadata('agent_reload', {
+        name: 'ReloadAgent',
+        plan,
+        metadata: { version: 2, env: 'test' },
+      });
+
+      // Verify before reload
+      const before = metaStore.getAgent('agent_reload');
+      expect(before?.name).toBe('ReloadAgent');
+      expect(before?.plan).toEqual(plan);
+      expect(before?.metadata).toEqual({ version: 2, env: 'test' });
+
+      // Persist and reload (rebuildViews)
+      await metaStore.persist();
+      await metaStore.reload();
+
+      // All fields should survive
+      const after = metaStore.getAgent('agent_reload');
+      expect(after).toBeDefined();
+      expect(after?.name).toBe('ReloadAgent');
+      expect(after?.plan).toEqual(plan);
+      expect(after?.metadata).toEqual({ version: 2, env: 'test' });
+
+      await metaStore.close();
+    });
+
+    it('should no-op when agent does not exist', async () => {
+      const metaStore = await createEventStore({ inMemory: true });
+
+      // Should not throw
+      metaStore.updateAgentMetadata('nonexistent', { name: 'Ghost' });
+      expect(metaStore.getAgent('nonexistent')).toBeNull();
+
+      await metaStore.close();
+    });
   });
 });
 
