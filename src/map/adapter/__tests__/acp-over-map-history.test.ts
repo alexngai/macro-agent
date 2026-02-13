@@ -30,6 +30,7 @@ function createMockAgent(overrides: Partial<Agent> = {}): Agent {
     lineage: [],
     config: {},
     cwd: "/test/cwd",
+    plan: [],
     created_at: Date.now(),
     started_at: Date.now(),
     ...overrides,

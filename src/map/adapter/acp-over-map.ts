@@ -88,9 +88,6 @@ export class ACPOverMAPHandler {
   /** Session mapper for ACP session -> Agent mapping */
   private sessionMapper: SessionMapper = new SessionMapper();
 
-  /** Latest plan entries per conversation (agentId → plan) */
-  private planCache: Map<string, Array<{ content: string; priority: string; status: string }>> = new Map();
-
   constructor(config: ACPOverMAPConfig) {
     this.agentManager = config.agentManager;
     this.eventStore = config.eventStore;
@@ -500,9 +497,9 @@ export class ACPOverMAPHandler {
       // Persist conversation turns for history
       this.recordPromptTurns(sessionId as ACPSessionId, agentId, messageContent, buffer);
 
-      // Cache latest plan for history loading
+      // Persist latest plan in EventStore for history loading across restarts
       if (latestPlan) {
-        this.planCache.set(agentId, latestPlan);
+        this.eventStore.updateAgentPlan(agentId as AgentId, latestPlan);
       }
 
       // Emit updated session info after prompt completes
@@ -684,9 +681,9 @@ export class ACPOverMAPHandler {
           limit: limit ?? 200,
         });
 
-        // Include cached plan and agent cwd if available
-        const plan = historyAgentId ? this.planCache.get(historyAgentId) ?? [] : [];
+        // Include persisted plan and agent cwd if available
         const agent = historyAgentId ? this.eventStore.getAgent(historyAgentId as AgentId) : undefined;
+        const plan = agent?.plan ?? [];
 
         return {
           turns: turns.map((turn) => ({

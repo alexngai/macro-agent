@@ -203,6 +203,7 @@ export interface EventStore {
   // Agent view
   getAgent(agentId: AgentId): Agent | null;
   listAgents(filter?: { state?: AgentState; parent?: AgentId | null }): Agent[];
+  updateAgentPlan(agentId: AgentId, plan: Array<{ content: string; priority: string; status: string }>): void;
 
   // Task view
   getTask(taskId: TaskId): Task | null;
@@ -517,6 +518,25 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     }
 
     return agents;
+  }
+
+  /**
+   * Update an agent's plan entries (persisted to SQLite via TinyBase)
+   */
+  function updateAgentPlan(
+    agentId: AgentId,
+    plan: Array<{ content: string; priority: string; status: string }>,
+  ): void {
+    const row = store.getRow('agents', agentId);
+    if (!row.id) return;
+
+    store.setPartialRow('agents', agentId, {
+      plan: JSON.stringify(plan),
+      last_activity_at: Date.now(),
+    });
+
+    const agent = rowToAgent(store.getRow('agents', agentId));
+    notifyAgentChange(agentId, agent);
   }
 
   /**
@@ -1203,6 +1223,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     // Views
     getAgent,
     listAgents,
+    updateAgentPlan,
     getTask,
     listTasks,
     getMessages,
@@ -1422,6 +1443,7 @@ function applySpawnEvent(
     role: payload.role ?? '',
     config: JSON.stringify(payload.config ?? {}),
     cwd: payload.cwd ?? process.cwd(),
+    plan: '[]',
     created_at: event.timestamp,
     started_at: 0,
     stopped_at: 0,
@@ -1770,6 +1792,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     role: (row.role as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
     cwd: (row.cwd as string) || process.cwd(),
+    plan: row.plan ? JSON.parse(row.plan as string) : [],
     created_at: row.created_at as Timestamp,
     started_at: (row.started_at as number) || undefined,
     stopped_at: (row.stopped_at as number) || undefined,

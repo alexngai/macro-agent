@@ -40,6 +40,7 @@ export interface Agent {
   role?: string;
   config: AgentConfig;
   cwd: string;
+  plan: Array<{ content: string; priority: string; status: string }>;
   created_at: Timestamp;
   started_at?: Timestamp;
   stopped_at?: Timestamp;
