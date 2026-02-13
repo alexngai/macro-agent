@@ -1056,6 +1056,46 @@ describe('Event Archival', () => {
       await store1.close();
       await store2.close();
     });
+
+    it('should preserve agent plan across reload (rebuildViews)', async () => {
+      const planStore = await createEventStore({
+        baseDir: testDir,
+        instanceId: 'plan-reload-test',
+      });
+
+      // Spawn an agent
+      planStore.emit({
+        type: 'spawn',
+        source: { agent_id: 'agent_plan' },
+        payload: {
+          agent_id: 'agent_plan',
+          session_id: 'sess_plan',
+          task: 'test plan persistence',
+        },
+      });
+
+      // Set plan via updateAgentPlan
+      const plan = [
+        { content: 'Read files', priority: 'high', status: 'completed' },
+        { content: 'Write code', priority: 'medium', status: 'in_progress' },
+      ];
+      planStore.updateAgentPlan('agent_plan' as AgentId, plan);
+
+      // Verify plan is set
+      const before = planStore.getAgent('agent_plan' as AgentId);
+      expect(before?.plan).toEqual(plan);
+
+      // Persist, then reload (simulates server restart: load from SQLite + rebuildViews)
+      await planStore.persist();
+      await planStore.reload();
+
+      // Plan should survive the reload
+      const after = planStore.getAgent('agent_plan' as AgentId);
+      expect(after).toBeDefined();
+      expect(after?.plan).toEqual(plan);
+
+      await planStore.close();
+    });
   });
 });
 

@@ -1290,6 +1290,17 @@ function initializeTables(store: Store): void {
  * Rebuild materialized views from the event log
  */
 function rebuildViews(store: Store): void {
+  // Preserve out-of-band agent fields that aren't derived from events.
+  // `plan` is written directly via updateAgentPlan(), not through events,
+  // so it would be lost when we clear and replay.
+  const savedAgentPlan = new Map<string, string>();
+  for (const rowId of store.getRowIds('agents')) {
+    const row = store.getRow('agents', rowId);
+    if (row.plan && row.plan !== '[]') {
+      savedAgentPlan.set(rowId, row.plan as string);
+    }
+  }
+
   // Clear existing views
   for (const rowId of store.getRowIds('agents')) {
     store.delRow('agents', rowId);
@@ -1344,6 +1355,14 @@ function rebuildViews(store: Store): void {
   const noop = () => {};
   for (const event of events) {
     applyEventToViews(store, event, noop, noop, noop, noop, noop, noop);
+  }
+
+  // Restore out-of-band agent fields preserved before the wipe
+  for (const [agentId, plan] of savedAgentPlan) {
+    const row = store.getRow('agents', agentId);
+    if (row.id) {
+      store.setPartialRow('agents', agentId, { plan });
+    }
   }
 }
 
