@@ -455,6 +455,9 @@ export interface OpenTasksBackendConfig {
 
   /** Source label for issues created by this backend (default: "macro-agent") */
   sourceLabel?: string;
+
+  /** Tool mode for this backend (overrides global if set) */
+  toolMode?: "native" | "mapped" | "both";
 }
 
 /**
@@ -506,4 +509,5 @@ export const DEFAULT_SUDOCODE_CONFIG: Omit<SudocodeBackendConfig, "type"> = {
 export const DEFAULT_OPENTASKS_CONFIG: Omit<OpenTasksBackendConfig, "type"> = {
   syncStatus: true,
   sourceLabel: "macro-agent",
+  toolMode: "native",
 };

@@ -106,6 +106,8 @@ export {
   IPCOpenTasksClient,
   OpenTasksClientError,
   createOpenTasksClient,
+  OpenTasksTaskToolProvider,
+  createOpenTasksToolProvider,
 } from "./opentasks/index.js";
 
 export type {
@@ -114,6 +116,10 @@ export type {
   OpenTasksIssue,
   OpenTasksEdge,
   OpenTasksNodeSummary,
+  OpenTasksToolMode,
+  OpenTasksToolContext,
+  GetOpenTasksToolContext,
+  OpenTasksToolProviderConfig,
 } from "./opentasks/index.js";
 
 // =============================================================================
@@ -257,8 +263,25 @@ export async function createTaskBackend(
       sourceLabel: openTasksConfig.sourceLabel,
     });
 
-    // OpenTasks uses abstract tools (same as in-memory)
-    const effectiveMode = toolMode === "auto" ? "abstract" : toolMode;
+    // Determine effective tool mode
+    // OpenTasks uses 'native' by default to expose full graph tools
+    const backendToolMode = openTasksConfig.toolMode ?? "native";
+
+    // Map OpenTasks tool modes to TaskToolMode
+    const mapOpenTasksMode = (mode: "native" | "mapped" | "both"): TaskToolMode => {
+      if (mode === "mapped") return "abstract";
+      return mode; // 'native' and 'both' are same in both systems
+    };
+
+    // Determine the effective TaskToolMode
+    let effectiveMode: TaskToolMode;
+    if (toolMode === "auto") {
+      effectiveMode = mapOpenTasksMode(backendToolMode);
+    } else if (toolMode === "abstract" || toolMode === "native" || toolMode === "both") {
+      effectiveMode = toolMode;
+    } else {
+      effectiveMode = mapOpenTasksMode(backendToolMode);
+    }
 
     return {
       backend,
@@ -305,11 +328,17 @@ export function loadTaskConfigFromEnv(): TaskConfig {
 
   if (backendType === "opentasks") {
     const socketPath = process.env.OPENTASKS_SOCKET_PATH;
+    const opentasksToolMode = process.env.OPENTASKS_TOOL_MODE as
+      | "native"
+      | "mapped"
+      | "both"
+      | undefined;
 
     return {
       backend: {
         type: "opentasks",
         socketPath,
+        toolMode: opentasksToolMode ?? "native",
       },
       toolMode,
     };
