@@ -43,6 +43,7 @@ export type {
   ExecutionTrackingConfig,
   ExecutionFilter,
   SudocodeBackendConfig,
+  OpenTasksBackendConfig,
   TaskBackendConfig,
   TaskConfig,
 } from "./types.js";
@@ -95,12 +96,33 @@ export type {
 } from "./sudocode/index.js";
 
 // =============================================================================
+// OpenTasks Backend (re-export)
+// =============================================================================
+
+export {
+  OpenTasksTaskBackend,
+  OpenTasksBackendError,
+  createOpenTasksTaskBackend,
+  IPCOpenTasksClient,
+  OpenTasksClientError,
+  createOpenTasksClient,
+} from "./opentasks/index.js";
+
+export type {
+  OpenTasksClient,
+  OpenTasksClientConfig,
+  OpenTasksIssue,
+  OpenTasksEdge,
+  OpenTasksNodeSummary,
+} from "./opentasks/index.js";
+
+// =============================================================================
 // Backend Factory
 // =============================================================================
 
 import type { EventStore } from "../../store/event-store.js";
 import type { TaskBackend, TaskConfig, TaskBackendConfig, TaskToolMode, TaskToolProvider } from "./types.js";
-import { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG } from "./types.js";
+import { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG, DEFAULT_OPENTASKS_CONFIG } from "./types.js";
 import { InMemoryTaskBackend } from "./memory.js";
 import { InMemoryTaskToolProvider } from "./tool-provider.js";
 
@@ -212,6 +234,38 @@ export async function createTaskBackend(
     };
   }
 
+  if (backendConfig.type === "opentasks") {
+    // Dynamic import to avoid loading opentasks dependencies if not needed
+    const { createOpenTasksClient } = await import("./opentasks/client.js");
+    const { OpenTasksTaskBackend } = await import("./opentasks/backend.js");
+
+    // Merge with defaults
+    const openTasksConfig = {
+      ...DEFAULT_OPENTASKS_CONFIG,
+      ...backendConfig,
+    };
+
+    // Create OpenTasks client
+    const client = await createOpenTasksClient({
+      socketPath: openTasksConfig.socketPath,
+    });
+
+    // Create backend
+    const backend = new OpenTasksTaskBackend(eventStore, client, {
+      socketPath: openTasksConfig.socketPath,
+      syncStatus: openTasksConfig.syncStatus,
+      sourceLabel: openTasksConfig.sourceLabel,
+    });
+
+    // OpenTasks uses abstract tools (same as in-memory)
+    const effectiveMode = toolMode === "auto" ? "abstract" : toolMode;
+
+    return {
+      backend,
+      toolMode: effectiveMode,
+    };
+  }
+
   throw new Error(`Unknown backend type: ${(backendConfig as TaskBackendConfig).type}`);
 }
 
@@ -219,10 +273,11 @@ export async function createTaskBackend(
  * Load task configuration from environment variables
  *
  * Environment variables:
- * - MACRO_TASK_BACKEND: 'memory' | 'sudocode' (default: 'memory')
+ * - MACRO_TASK_BACKEND: 'memory' | 'sudocode' | 'opentasks' (default: 'memory')
  * - MACRO_TASK_TOOL_MODE: 'abstract' | 'native' | 'both' | 'auto' (default: 'auto')
  * - SUDOCODE_PROJECT_PATH: Path to sudocode project (default: cwd)
  * - SUDOCODE_TOOL_MODE: 'native' | 'mapped' | 'both' (default: 'mapped')
+ * - OPENTASKS_SOCKET_PATH: Path to OpenTasks daemon socket (auto-discovered if not set)
  *
  * @returns Task configuration
  */
@@ -248,6 +303,18 @@ export function loadTaskConfigFromEnv(): TaskConfig {
     };
   }
 
+  if (backendType === "opentasks") {
+    const socketPath = process.env.OPENTASKS_SOCKET_PATH;
+
+    return {
+      backend: {
+        type: "opentasks",
+        socketPath,
+      },
+      toolMode,
+    };
+  }
+
   return {
     backend: { type: "memory" },
     toolMode,
@@ -257,4 +324,4 @@ export function loadTaskConfigFromEnv(): TaskConfig {
 /**
  * Default task configuration (in-memory backend)
  */
-export { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG };
+export { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG, DEFAULT_OPENTASKS_CONFIG };

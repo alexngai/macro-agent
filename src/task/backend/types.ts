@@ -442,9 +442,28 @@ export interface SudocodeBackendConfig {
 }
 
 /**
+ * OpenTasks backend configuration
+ */
+export interface OpenTasksBackendConfig {
+  type: "opentasks";
+
+  /** Path to the OpenTasks daemon socket (auto-discovered if not set) */
+  socketPath?: string;
+
+  /** Whether to sync status changes to OpenTasks (default: true) */
+  syncStatus?: boolean;
+
+  /** Source label for issues created by this backend (default: "macro-agent") */
+  sourceLabel?: string;
+}
+
+/**
  * Task backend configuration
  */
-export type TaskBackendConfig = InMemoryBackendConfig | SudocodeBackendConfig;
+export type TaskBackendConfig =
+  | InMemoryBackendConfig
+  | SudocodeBackendConfig
+  | OpenTasksBackendConfig;
 
 /**
  * Macro-agent task configuration
@@ -479,4 +498,12 @@ export const DEFAULT_SUDOCODE_CONFIG: Omit<SudocodeBackendConfig, "type"> = {
   executionTracking: { mode: "bound-only" },
   autoLinkSpecs: true,
   toolMode: "mapped",
+};
+
+/**
+ * Default OpenTasks backend configuration
+ */
+export const DEFAULT_OPENTASKS_CONFIG: Omit<OpenTasksBackendConfig, "type"> = {
+  syncStatus: true,
+  sourceLabel: "macro-agent",
 };
