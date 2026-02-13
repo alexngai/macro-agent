@@ -16,6 +16,22 @@ import { SessionMapper } from "../../acp/session-mapper.js";
 import type { ACPSessionId } from "../../acp/types.js";
 
 // ─────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────
+
+/** Extract a plain-text output string from `rawOutput` (string | ContentBlock[] | undefined). */
+function extractToolOutput(rawOutput: unknown): string | undefined {
+  if (typeof rawOutput === "string") return rawOutput;
+  if (Array.isArray(rawOutput)) {
+    return rawOutput
+      .filter((item: any) => item.type === "text" && typeof item.text === "string")
+      .map((item: any) => item.text as string)
+      .join("\n") || undefined;
+  }
+  return undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────
 
@@ -410,6 +426,10 @@ export class ACPOverMAPHandler {
     // Track latest plan for persistence
     let latestPlan: Array<{ content: string; priority: string; status: string }> | null = null;
 
+    // Track tool info from initial tool_call events (title, name, input)
+    // so we can merge them when tool_call_update arrives with status "completed"
+    const toolInfoCache = new Map<string, { title?: string; name?: string; input?: unknown }>();
+
     try {
       // Stream responses from the agent
       let updateCount = 0;
@@ -438,15 +458,30 @@ export class ACPOverMAPHandler {
             latestPlan = entries;
           }
         } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+          const toolCallId = u.toolCallId as string | undefined;
           const status = u.status as string | undefined;
-          if (status === "completed" || (updateType === "tool_call" && status !== "running")) {
+          const meta = u._meta as { claudeCode?: { toolName?: string } } | undefined;
+
+          // Cache tool info from initial tool_call events
+          if (updateType === "tool_call" && toolCallId) {
+            toolInfoCache.set(toolCallId, {
+              title: u.title as string | undefined,
+              name: meta?.claudeCode?.toolName,
+              input: u.rawInput,
+            });
+          }
+
+          if (status === "completed" || status === "failed") {
+            // Merge cached info for tool_call_update events that lack title/input
+            const cached = toolCallId ? toolInfoCache.get(toolCallId) : undefined;
             buffer.parts.push({
               type: "tool",
-              toolCallId: u.toolCallId,
-              title: u.title,
+              toolCallId,
+              title: u.title ?? cached?.title,
+              name: meta?.claudeCode?.toolName ?? cached?.name,
               status: u.status,
-              input: u.rawInput,
-              output: u.output,
+              input: u.rawInput ?? cached?.input,
+              output: extractToolOutput(u.rawOutput),
             });
           }
         }

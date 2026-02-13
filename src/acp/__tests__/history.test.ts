@@ -228,7 +228,7 @@ describe("_macro/getHistory", () => {
         title: "Read file",
         status: "completed",
         rawInput: { path: "/test.txt" },
-        output: "file contents here",
+        rawOutput: "file contents here",
       },
       {
         sessionUpdate: "agent_message_chunk",
@@ -410,7 +410,7 @@ describe("_macro/getHistory", () => {
         title: "Done tool",
         status: "completed",
         rawInput: { x: 1 },
-        output: "result",
+        rawOutput: "result",
       },
     ]);
 

@@ -76,6 +76,22 @@ import { AGENT_CAPABILITIES } from "../roles/capabilities.js";
 import { DefaultRoleRegistry } from "../roles/registry.js";
 
 // ─────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────
+
+/** Extract a plain-text output string from `rawOutput` (string | ContentBlock[] | undefined). */
+function extractToolOutput(rawOutput: unknown): string | undefined {
+  if (typeof rawOutput === "string") return rawOutput;
+  if (Array.isArray(rawOutput)) {
+    return rawOutput
+      .filter((item: any) => item.type === "text" && typeof item.text === "string")
+      .map((item: any) => item.text as string)
+      .join("\n") || undefined;
+  }
+  return undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Protocol Constants
 // ─────────────────────────────────────────────────────────────────
 
@@ -158,6 +174,12 @@ export class MacroAgent implements Agent {
   private promptBuffers: Map<
     ACPSessionId,
     { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> }
+  > = new Map();
+
+  /** Caches tool info (title, name, input) from initial tool_call events per session */
+  private toolInfoCaches: Map<
+    ACPSessionId,
+    Map<string, { title?: string; name?: string; input?: unknown }>
   > = new Map();
 
   constructor(connection: AgentSideConnection, config: MacroAgentConfig) {
@@ -360,8 +382,9 @@ export class MacroAgent implements Agent {
     // Mark session as processing (for health monitoring)
     this.sessionMapper.setProcessing(acpSessionId, true);
 
-    // Initialize prompt buffer for history accumulation
+    // Initialize prompt buffer and tool info cache for history accumulation
     this.promptBuffers.set(acpSessionId, { parts: [] });
+    this.toolInfoCaches.set(acpSessionId, new Map());
 
     try {
       // Stream responses from the agent
@@ -1415,18 +1438,31 @@ export class MacroAgent implements Agent {
         updateType === "tool_call" ||
         updateType === "tool_call_update"
       ) {
+        const toolCallId = sessionUpdate.toolCallId as string | undefined;
         const status = sessionUpdate.status as string | undefined;
-        if (
-          status === "completed" ||
-          (updateType === "tool_call" && status !== "running")
-        ) {
+        const meta = sessionUpdate._meta as { claudeCode?: { toolName?: string } } | undefined;
+        const toolInfoCache = this.toolInfoCaches.get(acpSessionId);
+
+        // Cache tool info from initial tool_call events
+        if (updateType === "tool_call" && toolCallId && toolInfoCache) {
+          toolInfoCache.set(toolCallId, {
+            title: sessionUpdate.title as string | undefined,
+            name: meta?.claudeCode?.toolName,
+            input: sessionUpdate.rawInput,
+          });
+        }
+
+        if (status === "completed" || status === "failed") {
+          // Merge cached info for tool_call_update events that lack title/input
+          const cached = toolCallId ? toolInfoCache?.get(toolCallId) : undefined;
           buffer.parts.push({
             type: "tool",
-            toolCallId: sessionUpdate.toolCallId,
-            title: sessionUpdate.title,
+            toolCallId,
+            title: sessionUpdate.title ?? cached?.title,
+            name: meta?.claudeCode?.toolName ?? cached?.name,
             status: sessionUpdate.status,
-            input: sessionUpdate.rawInput,
-            output: sessionUpdate.output,
+            input: sessionUpdate.rawInput ?? cached?.input,
+            output: extractToolOutput(sessionUpdate.rawOutput),
           });
         }
       }
@@ -1658,8 +1694,9 @@ export class MacroAgent implements Agent {
         error instanceof Error ? error.message : String(error),
       );
     } finally {
-      // Clean up the buffer
+      // Clean up the buffer and tool info cache
       this.promptBuffers.delete(acpSessionId);
+      this.toolInfoCaches.delete(acpSessionId);
     }
   }
 

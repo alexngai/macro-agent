@@ -268,7 +268,7 @@ describe("ACP-over-MAP history persistence", () => {
         title: "Read file",
         status: "completed",
         rawInput: { path: "/test.txt" },
-        output: "file contents",
+        rawOutput: "file contents",
       },
     ]);
 
@@ -304,6 +304,93 @@ describe("ACP-over-MAP history persistence", () => {
       status: "completed",
       output: "file contents",
     });
+  });
+
+  it("should extract tool output from rawOutput ContentBlock array", async () => {
+    await setup([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-array",
+        title: "Read file",
+        status: "completed",
+        rawInput: { path: "/test.txt" },
+        rawOutput: [
+          { type: "text", text: "line 1" },
+          { type: "text", text: "line 2" },
+        ],
+      },
+    ]);
+
+    const streamId = "test-stream-array-output";
+    const agentId = "agent-1" as AgentId;
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Read it" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+    const assistantContent = turns[1].content as {
+      parts: { type: string; output?: string }[];
+    };
+    const toolPart = assistantContent.parts.find((p) => p.type === "tool");
+    expect(toolPart?.output).toBe("line 1\nline 2");
+  });
+
+  it("should merge title from initial tool_call into tool_call_update", async () => {
+    // Simulates WebSearch/WebFetch: initial tool_call has title, but
+    // tool_call_update (completed) does not include title.
+    await setup([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-ws",
+        title: "Search query here",
+        status: "pending",
+        rawInput: { query: "test" },
+        _meta: { claudeCode: { toolName: "WebSearch" } },
+      },
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-ws",
+        status: "completed",
+        rawOutput: "search results",
+        // No title, no rawInput, no _meta — should use cached values
+      },
+    ]);
+
+    const streamId = "test-stream-merge-title";
+    const agentId = "agent-1" as AgentId;
+    const sessionId = await initAndCreateSession(streamId, agentId);
+
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "session/prompt", {
+        prompt: [{ type: "text", text: "Search for test" }],
+      }, sessionId),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { sessionId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+    const assistantContent = turns[1].content as {
+      parts: { type: string; title?: string; name?: string; input?: unknown; output?: string }[];
+    };
+    const toolPart = assistantContent.parts.find((p) => p.type === "tool");
+    expect(toolPart?.title).toBe("Search query here");
+    expect(toolPart?.name).toBe("WebSearch");
+    expect(toolPart?.input).toEqual({ query: "test" });
+    expect(toolPart?.output).toBe("search results");
   });
 
   it("should accumulate history across multiple prompts", async () => {
@@ -392,7 +479,7 @@ describe("ACP-over-MAP history persistence", () => {
         title: "Done tool",
         status: "completed",
         rawInput: { x: 1 },
-        output: "result",
+        rawOutput: "result",
       },
     ]);
 
