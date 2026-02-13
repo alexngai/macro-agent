@@ -351,6 +351,12 @@ export function createMCPServer(
         debugLog(`[MCP spawn_agent] Agent IDs: ${allAgents.map(a => a.id).join(', ')}`);
       }
 
+      // Inherit the parent's permission mode so sub-agents respect
+      // the same mode (e.g., "interactive") set during initialization.
+      // Read from env var since the MCP server is a separate process
+      // without access to the macro-agent server's in-memory state.
+      const parentPermissionMode = process.env.MACRO_PERMISSION_MODE;
+
       const spawned = await agentManager.spawn({
         task: args.task,
         parent: context.agent_id,
@@ -358,6 +364,7 @@ export function createMCPServer(
         topics: args.topics ?? [],
         config: args.config,
         cwd: args.cwd ?? context.cwd,
+        permissionMode: (parentPermissionMode || undefined) as import("acp-factory").PermissionMode | undefined,
       });
 
       return {

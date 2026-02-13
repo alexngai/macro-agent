@@ -70,6 +70,8 @@ interface StreamState {
   sessionId?: string;
   agentId?: AgentId;
   abortController: AbortController;
+  /** Permission mode from initialization _meta */
+  permissionMode?: "auto-approve" | "auto-deny" | "callback" | "interactive";
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -211,6 +213,14 @@ export class ACPOverMAPHandler {
 
     streamState.initialized = true;
 
+    // Extract permission mode from _meta.macroConfig if provided
+    const meta = (params as Record<string, unknown> | undefined)?._meta as Record<string, unknown> | undefined;
+    const macroConfig = meta?.macroConfig as Record<string, unknown> | undefined;
+    const defaultSubAgentConfig = macroConfig?.defaultSubAgentConfig as Record<string, unknown> | undefined;
+    if (defaultSubAgentConfig?.permissionMode) {
+      streamState.permissionMode = defaultSubAgentConfig.permissionMode as StreamState["permissionMode"];
+    }
+
     return {
       protocolVersion: 1,
       agentCapabilities: {
@@ -244,6 +254,7 @@ export class ACPOverMAPHandler {
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd: workingDir,
       forceNew: true,
+      permissionMode: streamState.permissionMode,
     });
 
     const sessionId = spawned.session_id;
@@ -312,7 +323,7 @@ export class ACPOverMAPHandler {
 
       // Agent exists but no active session - resume it
       console.error(`[ACP-over-MAP] loadSession: Resuming stopped agent ${existing.id}`);
-      const spawned = await this.agentManager.resume(existing.id);
+      const spawned = await this.agentManager.resume(existing.id, streamState.permissionMode);
       streamState.sessionId = sessionId;
       streamState.agentId = spawned.id;
       this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
@@ -325,6 +336,7 @@ export class ACPOverMAPHandler {
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd: workingDir,
       sessionId,
+      permissionMode: streamState.permissionMode,
     });
 
     streamState.sessionId = sessionId;
@@ -439,6 +451,11 @@ export class ACPOverMAPHandler {
         // Accumulate content for history persistence (preserving text/tool interleaving order)
         const u = update as Record<string, unknown>;
         const updateType = u.sessionUpdate as string ?? u.type as string;
+
+        // Annotate permission_request updates with agentId so clients can respond
+        if (updateType === "permission_request") {
+          u._agentId = agentId;
+        }
         if (updateType === "agent_message_chunk") {
           const content = u.content as { type?: string; text?: string } | undefined;
           if (content?.text) {
@@ -697,6 +714,57 @@ export class ACPOverMAPHandler {
           plan,
           cwd: agent?.cwd ?? null,
         };
+      }
+
+      case "_macro/respondToPermission": {
+        const { agentId: targetAgentId, requestId, optionId } = methodParams as {
+          agentId: string;
+          requestId: string;
+          optionId: string;
+        };
+        if (!targetAgentId || !requestId || !optionId) {
+          throw new Error("agentId, requestId, and optionId are required");
+        }
+        const success = this.agentManager.respondToPermission(
+          targetAgentId as AgentId,
+          requestId,
+          optionId,
+        );
+        return { success };
+      }
+
+      case "_macro/cancelPermission": {
+        const { agentId: targetAgentId, requestId } = methodParams as {
+          agentId: string;
+          requestId: string;
+        };
+        if (!targetAgentId || !requestId) {
+          throw new Error("agentId and requestId are required");
+        }
+        const success = this.agentManager.cancelPermission(
+          targetAgentId as AgentId,
+          requestId,
+        );
+        return { success };
+      }
+
+      case "_macro/setPermissionMode": {
+        const { agentId: targetAgentId, permissionMode } = methodParams as {
+          agentId: string;
+          permissionMode: string;
+        };
+        if (!targetAgentId || !permissionMode) {
+          throw new Error("agentId and permissionMode are required");
+        }
+        const previousMode = this.agentManager.getPermissionMode(targetAgentId as AgentId);
+        const success = this.agentManager.setPermissionMode(
+          targetAgentId as AgentId,
+          permissionMode as "auto-approve" | "auto-deny" | "callback" | "interactive",
+        );
+        if (success) {
+          return { success: true, previousMode: previousMode ?? undefined };
+        }
+        return { success: false, error: `No active session found for agent ${targetAgentId}` };
       }
 
       default:

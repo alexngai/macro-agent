@@ -103,8 +103,9 @@ export interface AgentManager {
 
   /**
    * Resume a stopped agent by loading its existing session.
+   * @param permissionMode - Optional permission mode override (defaults to the agent manager's default)
    */
-  resume(agentId: AgentId): Promise<SpawnedAgent>;
+  resume(agentId: AgentId, permissionMode?: PermissionMode): Promise<SpawnedAgent>;
 
   /**
    * Continue a terminated agent by spawning a new agent with the same
@@ -570,6 +571,7 @@ export function createAgentManager(
             { name: "MACRO_AGENT_CWD", value: cwd },
             { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
             { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
+            { name: "MACRO_PERMISSION_MODE", value: permissionMode },
           ],
         };
 
@@ -588,8 +590,17 @@ export function createAgentManager(
         // Create session with MCP servers
         // Note: The MCP server subprocess will start here and look for the agent
         // in EventStore. We already persisted the spawn event above.
+        //
+        // When permissionMode is "interactive", we strip settingSources so that
+        // the Claude Code subprocess doesn't read pre-approved tool rules from
+        // the user's ~/.claude/settings.local.json. This ensures ALL tool calls
+        // go through the canUseTool → requestPermission ACP flow.
+        const agentMeta = permissionMode === "interactive"
+          ? { claudeCode: { options: { settingSources: [] } } }
+          : undefined;
         const session = await handle.createSession(cwd, {
           mcpServers: [macroAgentMcp, ...userMcpServers],
+          ...(agentMeta && { agentMeta }),
         });
 
         // Emit started status (session is ready)
@@ -920,7 +931,7 @@ export function createAgentManager(
     }
   }
 
-  async function resume(agentId: AgentId): Promise<SpawnedAgent> {
+  async function resume(agentId: AgentId, overridePermissionMode?: PermissionMode): Promise<SpawnedAgent> {
     if (isShuttingDown) {
       throw new AgentManagerError(
         "Cannot resume agent during shutdown",
@@ -947,23 +958,37 @@ export function createAgentManager(
       );
     }
 
+    const permissionMode = overridePermissionMode ?? defaultPermissionMode;
+
     // Spawn new process
     const handle = await AgentFactory.spawn(defaultAgentType, {
-      permissionMode: defaultPermissionMode,
+      permissionMode,
     });
 
     try {
       const agentCwd = agent.cwd ?? defaultCwd;
       let session;
 
+      // When interactive mode, strip settings to prevent auto-approval
+      const resumeAgentMeta = permissionMode === "interactive"
+        ? { claudeCode: { options: { settingSources: [] } } }
+        : undefined;
+
       if (agent.provider_session_id) {
         // Load existing session using the provider's session ID (e.g., Claude Code UUID)
-        session = await handle.loadSession(agent.provider_session_id, agentCwd);
+        session = await handle.loadSession(
+          agent.provider_session_id,
+          agentCwd,
+          undefined,
+          resumeAgentMeta ? { agentMeta: resumeAgentMeta } : undefined
+        );
       } else {
         // No provider session ID available (agent predates this feature or wasn't persisted).
         // Create a new session instead of loading with the macro-agent session_id
         // which is not a valid provider session ID (e.g., Claude Code expects UUIDs).
-        session = await handle.createSession(agentCwd);
+        session = await handle.createSession(agentCwd, {
+          ...(resumeAgentMeta && { agentMeta: resumeAgentMeta }),
+        });
 
         // Store the provider session ID for future resumes
         eventStore.emit({

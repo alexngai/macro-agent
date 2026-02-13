@@ -616,8 +616,8 @@ export interface CancelPermissionResponse {
  * Takes effect on the next permission request; in-flight requests use the old mode.
  */
 export interface SetPermissionModeRequest {
-  /** ACP session ID of the agent to change */
-  sessionId: ACPSessionId;
+  /** Agent ID to change (looked up directly, bypassing session mapper) */
+  agentId: string;
 
   /** New permission mode */
   permissionMode: ACPPermissionMode;

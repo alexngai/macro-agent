@@ -284,6 +284,7 @@ export class MacroAgent implements Agent {
     let acpSessionId = params.sessionId;
     const cwd = params.cwd ?? this.defaultCwd;
 
+    // DEBUG: Log loadSession params
     // Extension: If _meta.agentId provided, look up session from agent record
     // This allows resuming a stopped head manager by MAP agent ID
     // when the TUI doesn't know the ACP session ID
@@ -324,7 +325,8 @@ export class MacroAgent implements Agent {
       console.log(
         `[MacroAgent] loadSession: Resuming stopped agent ${existing.id}`,
       );
-      const spawned = await this.agentManager.resume(existing.id);
+      const defaultConfig = this.initConfig.defaultSubAgentConfig;
+      const spawned = await this.agentManager.resume(existing.id, defaultConfig?.permissionMode);
 
       // Create session mapping
       this.sessionMapper.createMapping(acpSessionId, spawned.id);
@@ -339,9 +341,11 @@ export class MacroAgent implements Agent {
     console.log(
       `[MacroAgent] loadSession: No existing agent for session ${acpSessionId}, creating new`,
     );
+    const defaultConfig = this.initConfig.defaultSubAgentConfig;
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd,
       sessionId: acpSessionId,
+      permissionMode: defaultConfig?.permissionMode,
     });
 
     // Create session mapping
@@ -1196,29 +1200,22 @@ export class MacroAgent implements Agent {
   private async handleSetPermissionMode(
     params: SetPermissionModeRequest,
   ): Promise<SetPermissionModeResponse> {
-    const { sessionId, permissionMode } = params;
-
-    // Get the agent ID from session mapper
-    const agentId = this.sessionMapper.getAgentId(sessionId);
-    if (!agentId) {
-      return {
-        success: false,
-        error: `No agent found for session: ${sessionId}`,
-      };
-    }
+    const { agentId, permissionMode } = params;
 
     // Get the current mode before changing
-    const previousMode = this.agentManager.getPermissionMode(agentId);
+    const previousMode = this.agentManager.getPermissionMode(
+      agentId as AgentId,
+    );
 
     // Set the new mode via agent manager
     const success = this.agentManager.setPermissionMode(
-      agentId,
+      agentId as AgentId,
       permissionMode,
     );
 
     if (success) {
       console.log(
-        `[MacroAgent] Set permission mode for session ${sessionId} (agent ${agentId}) from ${previousMode} to ${permissionMode}`,
+        `[MacroAgent] Set permission mode for agent ${agentId} from ${previousMode} to ${permissionMode}`,
       );
       return {
         success: true,
@@ -1227,7 +1224,7 @@ export class MacroAgent implements Agent {
     } else {
       return {
         success: false,
-        error: `Failed to set permission mode for agent ${agentId}`,
+        error: `No active session found for agent ${agentId}`,
       };
     }
   }
@@ -1384,11 +1381,14 @@ export class MacroAgent implements Agent {
           }>;
         };
 
-        // Get the agent ID for this session to forward the response back
-        const agentId = this.sessionMapper.getAgentId(permReq.sessionId);
+        // Look up agent ID using the ACP session ID (from the client connection),
+        // NOT permReq.sessionId which is the agent's internal session ID.
+        // The session mapper maps ACP session IDs → agent IDs, so using the
+        // internal session ID would fail silently and drop the permission request.
+        const agentId = this.sessionMapper.getAgentId(acpSessionId);
         if (!agentId) {
           console.warn(
-            `[MacroAgent] No agent found for session ${permReq.sessionId}, cannot forward permission request`,
+            `[MacroAgent] No agent found for ACP session ${acpSessionId}, cannot forward permission request`,
           );
           return;
         }
