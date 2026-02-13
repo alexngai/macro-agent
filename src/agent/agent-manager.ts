@@ -8,6 +8,7 @@
  */
 
 import { nanoid } from "nanoid";
+import { uniqueNamesGenerator, adjectives, animals } from "unique-names-generator";
 import {
   AgentFactory,
   type Session,
@@ -535,6 +536,14 @@ export function createAgentManager(
         cwd,
       },
     });
+
+    // Generate a human-readable default name
+    const generatedName = uniqueNamesGenerator({
+      dictionaries: [adjectives, animals],
+      separator: "-",
+      length: 2,
+    });
+    eventStore.updateAgentMetadata(agentId as AgentId, { name: generatedName });
 
     // Persist immediately so MCP server subprocess can read the agent
     await eventStore.persist();
