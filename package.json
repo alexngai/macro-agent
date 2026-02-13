@@ -51,7 +51,7 @@
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@multi-agent-protocol/sdk": "^0.0.9",
     "@sudocode-ai/claude-code-acp": "^0.13.9",
-    "acp-factory": "^0.1.10",
+    "acp-factory": "^0.1.11",
     "better-sqlite3": "^12.5.0",
     "chalk": "^5.6.2",
     "commander": "^14.0.2",

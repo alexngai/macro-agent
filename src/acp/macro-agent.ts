@@ -61,6 +61,8 @@ import type {
   RespondToPermissionResponse,
   CancelPermissionRequest,
   CancelPermissionResponse,
+  SetPermissionModeRequest,
+  SetPermissionModeResponse,
   ResumeAgentRequest,
   ResumeAgentResponse,
   GetHistoryRequest,
@@ -113,6 +115,7 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/checkCapability",
   "_macro/respondToPermission",
   "_macro/cancelPermission",
+  "_macro/setPermissionMode",
   "_macro/resume",
   "_macro/getHistory",
 ];
@@ -562,6 +565,11 @@ export class MacroAgent implements Agent {
       case "_macro/cancelPermission":
         return this.handleCancelPermission(
           params as unknown as CancelPermissionRequest,
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/setPermissionMode":
+        return this.handleSetPermissionMode(
+          params as unknown as SetPermissionModeRequest,
         ) as unknown as Record<string, unknown>;
 
       case "_macro/resume":
@@ -1178,6 +1186,48 @@ export class MacroAgent implements Agent {
       return {
         success: false,
         error: `Failed to cancel permission ${requestId} for agent ${agentId}`,
+      };
+    }
+  }
+
+  /**
+   * Change the permission mode for a running agent at runtime
+   */
+  private async handleSetPermissionMode(
+    params: SetPermissionModeRequest,
+  ): Promise<SetPermissionModeResponse> {
+    const { sessionId, permissionMode } = params;
+
+    // Get the agent ID from session mapper
+    const agentId = this.sessionMapper.getAgentId(sessionId);
+    if (!agentId) {
+      return {
+        success: false,
+        error: `No agent found for session: ${sessionId}`,
+      };
+    }
+
+    // Get the current mode before changing
+    const previousMode = this.agentManager.getPermissionMode(agentId);
+
+    // Set the new mode via agent manager
+    const success = this.agentManager.setPermissionMode(
+      agentId,
+      permissionMode,
+    );
+
+    if (success) {
+      console.log(
+        `[MacroAgent] Set permission mode for session ${sessionId} (agent ${agentId}) from ${previousMode} to ${permissionMode}`,
+      );
+      return {
+        success: true,
+        previousMode: previousMode ?? undefined,
+      };
+    } else {
+      return {
+        success: false,
+        error: `Failed to set permission mode for agent ${agentId}`,
       };
     }
   }

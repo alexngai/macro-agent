@@ -380,4 +380,5 @@ export type AgentManagerErrorCode =
   | "NOT_RUNNING"
   | "INVALID_STATE"
   | "PERMISSION_DENIED"
-  | "CAPABILITY_DENIED";
+  | "CAPABILITY_DENIED"
+  | "SHUTDOWN_IN_PROGRESS";

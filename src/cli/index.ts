@@ -237,6 +237,17 @@ program
         output: process.stdout,
       });
 
+      // Handle Ctrl+C and SIGTERM to clean up child processes
+      const cleanup = async () => {
+        console.log(chalk.yellow("\nShutting down..."));
+        await agentManager.close();
+        await eventStore.close();
+        rl.close();
+        process.exit(0);
+      };
+      process.on("SIGINT", cleanup);
+      process.on("SIGTERM", cleanup);
+
       const prompt = () => {
         rl.question(chalk.cyan("You: "), async (input) => {
           const trimmed = input.trim();

@@ -995,6 +995,144 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(result).toBe(false);
     });
   });
+
+  describe("Process cleanup on spawn failure", () => {
+    it("should close handle when createSession throws", async () => {
+      mockHandle.createSession = vi.fn().mockRejectedValue(
+        new Error("Session creation failed")
+      );
+
+      await expect(
+        agentManager.spawn({ task: "Test", cwd: "/tmp" })
+      ).rejects.toThrow("Failed to spawn agent");
+
+      // The handle should have been closed to prevent orphaned process
+      expect(mockHandle.close).toHaveBeenCalled();
+    });
+
+    it("should not leave handle in activeSessions when createSession throws", async () => {
+      mockHandle.createSession = vi.fn().mockRejectedValue(
+        new Error("Session creation failed")
+      );
+
+      await expect(
+        agentManager.spawn({ task: "Test", cwd: "/tmp" })
+      ).rejects.toThrow();
+
+      // No active sessions should remain
+      const agents = agentManager.list({ state: "running" as any });
+      for (const agent of agents) {
+        expect(agentManager.hasActiveSession(agent.id)).toBe(false);
+      }
+    });
+
+    it("should close handle even if handle.close() itself throws", async () => {
+      mockHandle.createSession = vi.fn().mockRejectedValue(
+        new Error("Session creation failed")
+      );
+      mockHandle.close = vi.fn().mockRejectedValue(
+        new Error("Close also failed")
+      );
+
+      // Should still throw the original spawn error, not the close error
+      await expect(
+        agentManager.spawn({ task: "Test", cwd: "/tmp" })
+      ).rejects.toThrow("Failed to spawn agent");
+
+      // close() was attempted
+      expect(mockHandle.close).toHaveBeenCalled();
+    });
+  });
+
+  describe("Process cleanup on resume failure", () => {
+    it("should close handle when loadSession throws", async () => {
+      // Spawn and terminate to create a resumable agent
+      const spawned = await agentManager.spawn({ task: "Test" });
+      await agentManager.terminate(spawned.id, "completed");
+
+      // Make loadSession fail on resume
+      mockHandle.loadSession = vi.fn().mockRejectedValue(
+        new Error("Load session failed")
+      );
+
+      await expect(
+        agentManager.resume(spawned.id)
+      ).rejects.toThrow("Load session failed");
+
+      // The handle should have been closed to prevent orphaned process
+      expect(mockHandle.close).toHaveBeenCalledTimes(2); // once for terminate, once for failed resume
+    });
+
+    it("should close handle when createSession throws during resume (no provider_session_id)", async () => {
+      // Create agent directly without provider_session_id
+      const agentId = "agent_no_provider_resume";
+      eventStore.emit({
+        type: "spawn",
+        source: { agent_id: "system" },
+        payload: {
+          agent_id: agentId,
+          session_id: "session_no_provider_resume",
+          task: "Test",
+          parent: null,
+          cwd: "/tmp",
+        },
+      });
+      eventStore.emit({
+        type: "status",
+        source: { agent_id: agentId },
+        payload: { status_type: "started" },
+      });
+
+      // Make createSession fail on resume
+      mockHandle.createSession = vi.fn().mockRejectedValue(
+        new Error("Create session failed")
+      );
+
+      await expect(
+        agentManager.resume(agentId)
+      ).rejects.toThrow("Create session failed");
+
+      // The handle should have been closed
+      expect(mockHandle.close).toHaveBeenCalled();
+    });
+  });
+
+  describe("Shutdown guard", () => {
+    it("should reject spawn() after close() is called", async () => {
+      await agentManager.close();
+
+      await expect(
+        agentManager.spawn({ task: "Test", cwd: "/tmp" })
+      ).rejects.toThrow("Cannot spawn agent during shutdown");
+    });
+
+    it("should reject resume() after close() is called", async () => {
+      // Create a resumable agent before shutdown
+      const spawned = await agentManager.spawn({ task: "Test" });
+      await agentManager.terminate(spawned.id, "completed");
+
+      await agentManager.close();
+
+      await expect(
+        agentManager.resume(spawned.id)
+      ).rejects.toThrow("Cannot resume agent during shutdown");
+    });
+
+    it("should not spawn new processes after close()", async () => {
+      const { AgentFactory } = await import("acp-factory");
+      const spawnSpy = vi.mocked(AgentFactory.spawn);
+
+      await agentManager.close();
+      spawnSpy.mockClear();
+
+      await expect(
+        agentManager.spawn({ task: "Test", cwd: "/tmp" })
+      ).rejects.toThrow("Cannot spawn agent during shutdown");
+
+      // AgentFactory.spawn should never have been called
+      expect(spawnSpy).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("AgentManager HealthCheckService Integration", () => {

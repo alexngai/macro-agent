@@ -247,6 +247,24 @@ export interface AgentManager {
    */
   cancelPermission(agentId: AgentId, requestId: string): boolean;
 
+  /**
+   * Change the permission mode for a running agent at runtime.
+   * Takes effect on the next permission request.
+   *
+   * @param agentId - Agent ID to change permission mode for
+   * @param mode - New permission mode
+   * @returns true if the mode was changed successfully
+   */
+  setPermissionMode(agentId: AgentId, mode: PermissionMode): boolean;
+
+  /**
+   * Get the current permission mode for a running agent.
+   *
+   * @param agentId - Agent ID to query
+   * @returns The current permission mode, or null if no active session
+   */
+  getPermissionMode(agentId: AgentId): PermissionMode | null;
+
   // ── Lifecycle Callbacks ────────────────────────────────────────
 
   /**
@@ -385,11 +403,21 @@ export function createAgentManager(
   // Lifecycle event listeners
   const lifecycleListeners = new Set<AgentLifecycleCallback>();
 
+  // Shutdown guard — prevents spawns during close()
+  let isShuttingDown = false;
+
   // ─────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────
 
   async function spawn(rawOptions: SpawnAgentOptions): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot spawn agent during shutdown",
+        "SHUTDOWN_IN_PROGRESS"
+      );
+    }
+
     // Apply spawn interceptor if set (used by TeamRuntime for team context injection)
     const options = spawnInterceptor
       ? await spawnInterceptor(rawOptions)
@@ -527,191 +555,201 @@ export function createAgentManager(
         env: agentConfig?.env,
       });
 
-      // Build MCP server configuration for the macro-agent MCP server
-      // Note: McpServerStdio doesn't have a 'type' field - stdio is the implicit default
-      // when neither 'type: http' nor 'type: sse' is specified
-      const macroAgentMcp = {
-        name: "macro-agent",
-        command: "npx",
-        args: ["multiagent-mcp"],
-        env: [
-          { name: "MACRO_AGENT_ID", value: agentId },
-          { name: "MACRO_PARENT_ID", value: parent ?? "" },
-          { name: "MACRO_TASK_ID", value: taskId },
-          { name: "MACRO_AGENT_CWD", value: cwd },
-          { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
-          { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
-        ],
-      };
+      try {
+        // Build MCP server configuration for the macro-agent MCP server
+        // Note: McpServerStdio doesn't have a 'type' field - stdio is the implicit default
+        // when neither 'type: http' nor 'type: sse' is specified
+        const macroAgentMcp = {
+          name: "macro-agent",
+          command: "npx",
+          args: ["multiagent-mcp"],
+          env: [
+            { name: "MACRO_AGENT_ID", value: agentId },
+            { name: "MACRO_PARENT_ID", value: parent ?? "" },
+            { name: "MACRO_TASK_ID", value: taskId },
+            { name: "MACRO_AGENT_CWD", value: cwd },
+            { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+            { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
+          ],
+        };
 
-      // Combine with any user-provided MCP servers
-      // Note: Like macroAgentMcp, user MCP servers use stdio (no 'type' field)
-      const userMcpServers =
-        agentConfig?.mcpServers?.map((s) => ({
-          name: s.name,
-          command: s.command,
-          args: s.args ?? [],
-          env: s.env
-            ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
-            : [],
-        })) ?? [];
+        // Combine with any user-provided MCP servers
+        // Note: Like macroAgentMcp, user MCP servers use stdio (no 'type' field)
+        const userMcpServers =
+          agentConfig?.mcpServers?.map((s) => ({
+            name: s.name,
+            command: s.command,
+            args: s.args ?? [],
+            env: s.env
+              ? Object.entries(s.env).map(([name, value]) => ({ name, value }))
+              : [],
+          })) ?? [];
 
-      // Create session with MCP servers
-      // Note: The MCP server subprocess will start here and look for the agent
-      // in EventStore. We already persisted the spawn event above.
-      const session = await handle.createSession(cwd, {
-        mcpServers: [macroAgentMcp, ...userMcpServers],
-      });
+        // Create session with MCP servers
+        // Note: The MCP server subprocess will start here and look for the agent
+        // in EventStore. We already persisted the spawn event above.
+        const session = await handle.createSession(cwd, {
+          mcpServers: [macroAgentMcp, ...userMcpServers],
+        });
 
-      // Emit started status (session is ready)
-      // Include the provider's session ID (e.g., Claude Code UUID) so
-      // it can be used for handle.loadSession() during resume
-      eventStore.emit({
-        type: "status",
-        source: { agent_id: agentId },
-        payload: {
-          status_type: "started",
-          summary: "Agent session started",
-          provider_session_id: session.id,
-        },
-      });
+        // Emit started status (session is ready)
+        // Include the provider's session ID (e.g., Claude Code UUID) so
+        // it can be used for handle.loadSession() during resume
+        eventStore.emit({
+          type: "status",
+          source: { agent_id: agentId },
+          payload: {
+            status_type: "started",
+            summary: "Agent session started",
+            provider_session_id: session.id,
+          },
+        });
 
-      // Persist the status event
-      await eventStore.persist();
+        // Persist the status event
+        await eventStore.persist();
 
-      // Set up default subscriptions via MessageRouter
-      messageRouter.setupDefaultSubscriptions({
-        agent_id: agentId,
-        parent_id: parent ?? undefined,
-        task_id: taskId,
-        subscribe_parent: subscribeParent,
-        additional_topics: topics,
-        role: role ?? undefined,
-      });
+        // Set up default subscriptions via MessageRouter
+        messageRouter.setupDefaultSubscriptions({
+          agent_id: agentId,
+          parent_id: parent ?? undefined,
+          task_id: taskId,
+          subscribe_parent: subscribeParent,
+          additional_topics: topics,
+          role: role ?? undefined,
+        });
 
-      // ─────────────────────────────────────────────────────────────────
-      // Mail: Create task conversation for this agent
-      // ─────────────────────────────────────────────────────────────────
-      if (mailService && conversationMap) {
-        try {
-          const parentConversationId = parent
-            ? conversationMap.getAgentConversation(parent) ??
-              conversationMap.getSessionConversation(parent)
-            : undefined;
+        // ─────────────────────────────────────────────────────────────────
+        // Mail: Create task conversation for this agent
+        // ─────────────────────────────────────────────────────────────────
+        if (mailService && conversationMap) {
+          try {
+            const parentConversationId = parent
+              ? conversationMap.getAgentConversation(parent) ??
+                conversationMap.getSessionConversation(parent)
+              : undefined;
 
-          const { conversationId: taskConvId } =
-            mailService.createConversation({
-              type: "task",
-              subject: task?.slice(0, 80),
-              createdBy: parent ?? agentId,
-              parentConversationId: parentConversationId,
-            });
+            const { conversationId: taskConvId } =
+              mailService.createConversation({
+                type: "task",
+                subject: task?.slice(0, 80),
+                createdBy: parent ?? agentId,
+                parentConversationId: parentConversationId,
+              });
 
-          // Join parent and child as participants
-          if (parent) {
+            // Join parent and child as participants
+            if (parent) {
+              mailService.joinConversation({
+                conversationId: taskConvId,
+                participantId: parent,
+                participantType: "agent",
+                role: "initiator",
+                agentId: parent,
+              });
+            }
             mailService.joinConversation({
               conversationId: taskConvId,
-              participantId: parent,
+              participantId: agentId,
               participantType: "agent",
-              role: "initiator",
-              agentId: parent,
+              role: "worker",
+              agentId,
             });
+
+            conversationMap.setAgentConversation(agentId, taskConvId);
+          } catch (err) {
+            // Never fail spawn due to mail errors
+            console.warn(
+              `[AgentManager] Failed to create task conversation for ${agentId}:`,
+              err
+            );
           }
-          mailService.joinConversation({
-            conversationId: taskConvId,
-            participantId: agentId,
-            participantType: "agent",
-            role: "worker",
-            agentId,
-          });
-
-          conversationMap.setAgentConversation(agentId, taskConvId);
-        } catch (err) {
-          // Never fail spawn due to mail errors
-          console.warn(
-            `[AgentManager] Failed to create task conversation for ${agentId}:`,
-            err
-          );
         }
-      }
 
-      // Track active session
-      const activeSession: ActiveSession = {
-        agentId,
-        handle,
-        session,
-        createdAt: Date.now(),
-        isPrompting: false,
-      };
-      activeSessions.set(agentId, activeSession);
+        // Track active session
+        const activeSession: ActiveSession = {
+          agentId,
+          handle,
+          session,
+          createdAt: Date.now(),
+          isPrompting: false,
+        };
+        activeSessions.set(agentId, activeSession);
 
-      // Get the agent from materialized view
-      const agent = eventStore.getAgent(agentId)!;
+        // Get the agent from materialized view
+        const agent = eventStore.getAgent(agentId)!;
 
-      // ─────────────────────────────────────────────────────────────────
-      // Workspace Creation (Phase 2)
-      // ─────────────────────────────────────────────────────────────────
-      let workspace: Workspace | undefined;
-      let resolvedStreamId = streamId;
+        // ─────────────────────────────────────────────────────────────────
+        // Workspace Creation (Phase 2)
+        // ─────────────────────────────────────────────────────────────────
+        let workspace: Workspace | undefined;
+        let resolvedStreamId = streamId;
 
-      if (workspaceManager && role) {
-        try {
-          workspace = await createWorkspaceForRole(
-            workspaceManager,
-            agentId,
-            role,
-            {
-              streamId,
-              streamConfig,
-              dataplaneTaskId,
-              cwd,
-            }
-          );
+        if (workspaceManager && role) {
+          try {
+            workspace = await createWorkspaceForRole(
+              workspaceManager,
+              agentId,
+              role,
+              {
+                streamId,
+                streamConfig,
+                dataplaneTaskId,
+                cwd,
+              }
+            );
 
-          if (workspace) {
-            agentWorkspaces.set(agentId, workspace);
-            resolvedStreamId = workspace.streamId;
+            if (workspace) {
+              agentWorkspaces.set(agentId, workspace);
+              resolvedStreamId = workspace.streamId;
 
-            // Register with parent coordinator if applicable
-            if (
-              parent &&
-              (role === "worker" || role === "integrator")
-            ) {
-              const parentWorkspace = agentWorkspaces.get(parent);
-              if (parentWorkspace?.role === "coordinator") {
-                workspaceManager.registerChildWorkspace(
-                  parent,
-                  agentId,
-                  workspace.path
-                );
+              // Register with parent coordinator if applicable
+              if (
+                parent &&
+                (role === "worker" || role === "integrator")
+              ) {
+                const parentWorkspace = agentWorkspaces.get(parent);
+                if (parentWorkspace?.role === "coordinator") {
+                  workspaceManager.registerChildWorkspace(
+                    parent,
+                    agentId,
+                    workspace.path
+                  );
+                }
               }
             }
+          } catch (wsError) {
+            console.error(
+              `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`
+            );
+            // Continue without workspace - don't fail the spawn
           }
-        } catch (wsError) {
-          console.error(
-            `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`
-          );
-          // Continue without workspace - don't fail the spawn
         }
+
+        // Notify lifecycle listeners
+        notifyLifecycle({ type: "spawned", agent });
+        notifyLifecycle({ type: "started", agent });
+
+        // Start health monitoring for coordinators
+        if (healthCheckService && role === "coordinator") {
+          healthCheckService.startForCoordinator(agentId);
+        }
+
+        return {
+          id: agentId,
+          session_id: sessionId, // Macro-agent's own session ID for ACP protocol mapping
+          agent,
+          session,
+          workspace,
+          streamId: resolvedStreamId,
+        };
+      } catch (handleError) {
+        // Close the spawned process to prevent orphaning
+        try {
+          await handle.close();
+        } catch {
+          // Ignore errors during cleanup
+        }
+        throw handleError;
       }
-
-      // Notify lifecycle listeners
-      notifyLifecycle({ type: "spawned", agent });
-      notifyLifecycle({ type: "started", agent });
-
-      // Start health monitoring for coordinators
-      if (healthCheckService && role === "coordinator") {
-        healthCheckService.startForCoordinator(agentId);
-      }
-
-      return {
-        id: agentId,
-        session_id: sessionId, // Macro-agent's own session ID for ACP protocol mapping
-        agent,
-        session,
-        workspace,
-        streamId: resolvedStreamId,
-      };
     } catch (error) {
       // Clean up the spawn event we already emitted
       eventStore.emit({
@@ -883,6 +921,14 @@ export function createAgentManager(
   }
 
   async function resume(agentId: AgentId): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot resume agent during shutdown",
+        "SHUTDOWN_IN_PROGRESS",
+        agentId
+      );
+    }
+
     const agent = eventStore.getAgent(agentId);
     if (!agent) {
       throw new AgentManagerError(
@@ -906,57 +952,67 @@ export function createAgentManager(
       permissionMode: defaultPermissionMode,
     });
 
-    const agentCwd = agent.cwd ?? defaultCwd;
-    let session;
+    try {
+      const agentCwd = agent.cwd ?? defaultCwd;
+      let session;
 
-    if (agent.provider_session_id) {
-      // Load existing session using the provider's session ID (e.g., Claude Code UUID)
-      session = await handle.loadSession(agent.provider_session_id, agentCwd);
-    } else {
-      // No provider session ID available (agent predates this feature or wasn't persisted).
-      // Create a new session instead of loading with the macro-agent session_id
-      // which is not a valid provider session ID (e.g., Claude Code expects UUIDs).
-      session = await handle.createSession(agentCwd);
+      if (agent.provider_session_id) {
+        // Load existing session using the provider's session ID (e.g., Claude Code UUID)
+        session = await handle.loadSession(agent.provider_session_id, agentCwd);
+      } else {
+        // No provider session ID available (agent predates this feature or wasn't persisted).
+        // Create a new session instead of loading with the macro-agent session_id
+        // which is not a valid provider session ID (e.g., Claude Code expects UUIDs).
+        session = await handle.createSession(agentCwd);
 
-      // Store the provider session ID for future resumes
+        // Store the provider session ID for future resumes
+        eventStore.emit({
+          type: "status",
+          source: { agent_id: agentId },
+          payload: {
+            status_type: "started",
+            summary: "Agent session created (no provider session to resume)",
+            provider_session_id: session.id,
+          },
+        });
+      }
+
+      // Track active session
+      const activeSession: ActiveSession = {
+        agentId,
+        handle,
+        session,
+        createdAt: Date.now(),
+        isPrompting: false,
+      };
+      activeSessions.set(agentId, activeSession);
+
+      // Emit status event for resume
       eventStore.emit({
         type: "status",
         source: { agent_id: agentId },
         payload: {
           status_type: "started",
-          summary: "Agent session created (no provider session to resume)",
+          summary: "Agent session resumed",
           provider_session_id: session.id,
         },
       });
+
+      return {
+        id: agentId,
+        session_id: agent.session_id, // Macro-agent's own session ID
+        agent: eventStore.getAgent(agentId)!,
+        session,
+      };
+    } catch (handleError) {
+      // Close the spawned process to prevent orphaning
+      try {
+        await handle.close();
+      } catch {
+        // Ignore errors during cleanup
+      }
+      throw handleError;
     }
-
-    // Track active session
-    const activeSession: ActiveSession = {
-      agentId,
-      handle,
-      session,
-      createdAt: Date.now(),
-      isPrompting: false,
-    };
-    activeSessions.set(agentId, activeSession);
-
-    // Emit status event for resume
-    eventStore.emit({
-      type: "status",
-      source: { agent_id: agentId },
-      payload: {
-        status_type: "started",
-        summary: "Agent session resumed",
-        provider_session_id: session.id,
-      },
-    });
-
-    return {
-      id: agentId,
-      session_id: agent.session_id, // Macro-agent's own session ID
-      agent: eventStore.getAgent(agentId)!,
-      session,
-    };
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1342,6 +1398,41 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     }
   }
 
+  function setPermissionMode(
+    agentId: AgentId,
+    mode: PermissionMode
+  ): boolean {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      console.warn(
+        `[AgentManager] Cannot set permission mode: no active session for agent ${agentId}`
+      );
+      return false;
+    }
+
+    try {
+      activeSession.handle.setPermissionMode(mode);
+      console.log(
+        `[AgentManager] Set permission mode for agent ${agentId} to ${mode}`
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[AgentManager] Error setting permission mode for agent ${agentId}:`,
+        err
+      );
+      return false;
+    }
+  }
+
+  function getPermissionMode(agentId: AgentId): PermissionMode | null {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      return null;
+    }
+    return activeSession.handle.getPermissionMode();
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Lifecycle Callbacks
   // ─────────────────────────────────────────────────────────────────
@@ -1378,6 +1469,9 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
   // ─────────────────────────────────────────────────────────────────
 
   async function close(): Promise<void> {
+    // Prevent new spawns/resumes from racing with cleanup
+    isShuttingDown = true;
+
     // Stop all health checks
     if (healthCheckService) {
       healthCheckService.stopAll();
@@ -1502,6 +1596,8 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     isProcessRunning,
     respondToPermission,
     cancelPermission,
+    setPermissionMode,
+    getPermissionMode,
     onLifecycleEvent,
     setSpawnInterceptor,
     getRoleRegistry,

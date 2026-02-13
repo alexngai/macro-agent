@@ -606,6 +606,38 @@ export interface CancelPermissionResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ACP Extension: _macro/setPermissionMode
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Request for _macro/setPermissionMode extension
+ *
+ * Changes the permission mode for a running agent at runtime.
+ * Takes effect on the next permission request; in-flight requests use the old mode.
+ */
+export interface SetPermissionModeRequest {
+  /** ACP session ID of the agent to change */
+  sessionId: ACPSessionId;
+
+  /** New permission mode */
+  permissionMode: ACPPermissionMode;
+}
+
+/**
+ * Response for _macro/setPermissionMode extension
+ */
+export interface SetPermissionModeResponse {
+  /** Whether the mode was changed successfully */
+  success: boolean;
+
+  /** The previous permission mode (if success) */
+  previousMode?: ACPPermissionMode;
+
+  /** Error message if success is false */
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // ACP Extension: _macro/resume
 // ─────────────────────────────────────────────────────────────────
 
@@ -691,6 +723,7 @@ export type ACPExtensionMethod =
   | "_macro/checkCapability"
   | "_macro/respondToPermission"
   | "_macro/cancelPermission"
+  | "_macro/setPermissionMode"
   | "_macro/resume"
   | "_macro/getHistory";
 
@@ -713,6 +746,7 @@ export interface ACPExtensionRequests {
   "_macro/checkCapability": CheckCapabilityRequest;
   "_macro/respondToPermission": RespondToPermissionRequest;
   "_macro/cancelPermission": CancelPermissionRequest;
+  "_macro/setPermissionMode": SetPermissionModeRequest;
   "_macro/resume": ResumeAgentRequest;
   "_macro/getHistory": GetHistoryRequest;
 }
@@ -736,6 +770,7 @@ export interface ACPExtensionResponses {
   "_macro/checkCapability": CheckCapabilityResponse;
   "_macro/respondToPermission": RespondToPermissionResponse;
   "_macro/cancelPermission": CancelPermissionResponse;
+  "_macro/setPermissionMode": SetPermissionModeResponse;
   "_macro/resume": ResumeAgentResponse;
   "_macro/getHistory": GetHistoryResponse;
 }
