@@ -119,6 +119,7 @@ const SUPPORTED_EXTENSIONS: ACPExtensionMethod[] = [
   "_macro/setPermissionMode",
   "_macro/resume",
   "_macro/getHistory",
+  "_macro/getModels",
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -609,6 +610,11 @@ export class MacroAgent implements Agent {
       case "_macro/getHistory":
         return this.handleGetHistory(
           params as unknown as GetHistoryRequest,
+        ) as unknown as Record<string, unknown>;
+
+      case "_macro/getModels":
+        return this.handleGetModels(
+          params as { sessionId: string },
         ) as unknown as Record<string, unknown>;
 
       default:
@@ -1773,6 +1779,52 @@ export class MacroAgent implements Agent {
       this.promptBuffers.delete(acpSessionId);
       this.toolInfoCaches.delete(acpSessionId);
     }
+  }
+
+  /**
+   * Handle _macro/getModels extension — returns the session's available models.
+   * Claude Code populates models asynchronously after session creation
+   * (via _model_state_update notification), so this allows the TUI to poll
+   * for the model list once it's available.
+   *
+   * Returns full model info (modelId + name) since Claude Code uses shorthand
+   * model IDs ("default", "sonnet") that don't match models.dev. The name
+   * field (e.g., "Claude Sonnet 4") enables better model registry matching.
+   */
+  private handleGetModels(params: { sessionId: string }): {
+    currentModelId: string | null;
+    availableModels: Array<{ modelId: string; name: string }>;
+  } {
+    const { sessionId } = params;
+    const agentId = this.sessionMapper.getAgentId(sessionId);
+    if (!agentId) {
+      return { currentModelId: null, availableModels: [] };
+    }
+    const session = this.agentManager.getSession(agentId);
+    if (!session) {
+      return { currentModelId: null, availableModels: [] };
+    }
+    // Try clientHandler's model info store first (from _model_state_update notification)
+    const clientHandler = (session as unknown as {
+      clientHandler?: {
+        getSessionModelInfo?: (id: string) => {
+          currentModelId: string | null;
+          availableModels: Array<{ modelId: string; name: string }>;
+        } | null;
+      };
+    }).clientHandler;
+    const modelInfo = clientHandler?.getSessionModelInfo?.(session.id);
+    if (modelInfo && modelInfo.availableModels.length > 0) {
+      return modelInfo;
+    }
+    // Fall back to Session.models (from initial session response — just IDs)
+    if (session.models && session.models.length > 0) {
+      return {
+        currentModelId: session.models[0],
+        availableModels: session.models.map((id) => ({ modelId: id, name: id })),
+      };
+    }
+    return { currentModelId: null, availableModels: [] };
   }
 
   /**

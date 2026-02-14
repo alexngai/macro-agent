@@ -725,7 +725,8 @@ export type ACPExtensionMethod =
   | "_macro/cancelPermission"
   | "_macro/setPermissionMode"
   | "_macro/resume"
-  | "_macro/getHistory";
+  | "_macro/getHistory"
+  | "_macro/getModels";
 
 /**
  * Map of extension methods to their request types
