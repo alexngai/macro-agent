@@ -118,6 +118,124 @@ export interface UpdateIssueInput {
 }
 
 // =============================================================================
+// Task Lifecycle Types (mirrors opentasks tools.task interface)
+// =============================================================================
+
+/**
+ * Semantic task actions supported by TaskManageable providers
+ */
+export type TaskAction = "start" | "complete" | "block" | "reopen" | "close";
+
+/**
+ * Parameters for the tools.task IPC method.
+ * Exactly one operation must be specified.
+ */
+export interface TaskParams {
+  /** Transition a task's status using a semantic action */
+  transition?: {
+    /** Task ID or provider URI */
+    id: string;
+    /** Semantic action */
+    action: TaskAction;
+  };
+
+  /** Get tasks ready to work on (federated across TaskManageable providers) */
+  ready?: {
+    /** Only query these providers (by name). Omit to query all. */
+    providers?: string[];
+    /** Maximum results */
+    limit?: number;
+    /** Filter by tags */
+    tags?: string[];
+    /** Filter by minimum priority */
+    priority?: number;
+    /** Filter by assignee */
+    assignee?: string;
+  };
+
+  /** Assign a task to an owner */
+  assign?: {
+    /** Task ID or provider URI */
+    id: string;
+    /** Assignee identifier */
+    assignee: string;
+  };
+
+  /** Get valid next actions for a task in its current state */
+  validActions?: {
+    /** Task ID or provider URI */
+    id: string;
+  };
+
+  /** Return full objects instead of summaries (default: false) */
+  verbose?: boolean;
+}
+
+/**
+ * Result from tools.task operations
+ */
+export interface TaskResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+  /** Result data (shape depends on operation) */
+  data?: TaskTransitionData | TaskReadyData | TaskAssignData | TaskValidActionsData;
+  /** Error message if operation failed */
+  error?: string;
+}
+
+export interface TaskTransitionData {
+  type: "transition";
+  node: TaskNodeSummary;
+  provider: string;
+  action: string;
+}
+
+export interface TaskReadyData {
+  type: "ready";
+  items: TaskNodeSummary[];
+  total: number;
+}
+
+export interface TaskAssignData {
+  type: "assign";
+  node: TaskNodeSummary;
+  provider: string;
+}
+
+export interface TaskValidActionsData {
+  type: "validActions";
+  actions: string[];
+}
+
+/**
+ * Node summary returned by task operations
+ */
+export interface TaskNodeSummary {
+  id: string;
+  type: string;
+  title: string;
+  status?: string;
+  priority?: number;
+  archived: boolean;
+}
+
+/**
+ * Provider summary from provider.list
+ */
+export interface ProviderSummary {
+  name: string;
+  schemes: string[];
+  capabilities: Record<string, boolean>;
+  isDefault: boolean;
+  taskCapabilities?: {
+    actions: TaskAction[];
+    supportsAssignment: boolean;
+    supportsReadyQuery: boolean;
+    statusModel: string[];
+  };
+}
+
+// =============================================================================
 // Event Types
 // =============================================================================
 
@@ -218,6 +336,28 @@ export interface OpenTasksClient {
 
   /** Get nodes that the given node blocks */
   getBlocking(nodeId: string): Promise<OpenTasksNodeSummary[]>;
+
+  // ─── Task Lifecycle (provider-agnostic via tools.task) ──────
+
+  /** Execute a task lifecycle operation (tools.task IPC) */
+  task(params: TaskParams): Promise<TaskResult>;
+
+  /** Transition a task's status using a semantic action */
+  taskTransition(id: string, action: TaskAction): Promise<TaskResult>;
+
+  /** Get tasks ready to work on across all TaskManageable providers */
+  taskReady(options?: TaskParams["ready"]): Promise<TaskResult>;
+
+  /** Assign a task to an owner */
+  taskAssign(id: string, assignee: string): Promise<TaskResult>;
+
+  /** Get valid next actions for a task in its current state */
+  taskValidActions(id: string): Promise<TaskResult>;
+
+  // ─── Provider Introspection ───────────────────────────────
+
+  /** List all registered providers and their capabilities */
+  listProviders(): Promise<ProviderSummary[]>;
 
   // ─── Lifecycle ───────────────────────────────────────────────
 
@@ -434,6 +574,39 @@ export class IPCOpenTasksClient implements OpenTasksClient {
       },
     });
     return (result.items ?? []) as OpenTasksNodeSummary[];
+  }
+
+  // ─── Task Lifecycle (tools.task) ──────────────────────────────
+
+  async task(params: TaskParams): Promise<TaskResult> {
+    await this.ensureConnected();
+    return this.client.call("tools.task", params) as Promise<TaskResult>;
+  }
+
+  async taskTransition(id: string, action: TaskAction): Promise<TaskResult> {
+    return this.task({ transition: { id, action } });
+  }
+
+  async taskReady(options?: TaskParams["ready"]): Promise<TaskResult> {
+    return this.task({ ready: options ?? {} });
+  }
+
+  async taskAssign(id: string, assignee: string): Promise<TaskResult> {
+    return this.task({ assign: { id, assignee } });
+  }
+
+  async taskValidActions(id: string): Promise<TaskResult> {
+    return this.task({ validActions: { id } });
+  }
+
+  // ─── Provider Introspection ─────────────────────────────────
+
+  async listProviders(): Promise<ProviderSummary[]> {
+    await this.ensureConnected();
+    const result = await this.client.call("provider.list", {}) as {
+      providers: ProviderSummary[];
+    };
+    return result.providers ?? [];
   }
 }
 

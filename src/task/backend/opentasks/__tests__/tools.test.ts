@@ -13,7 +13,7 @@ import {
 } from "../tools.js";
 import type { GetOpenTasksToolContext } from "../tools.js";
 import type { OpenTasksTaskBackend } from "../backend.js";
-import type { OpenTasksClient, OpenTasksIssue } from "../client.js";
+import type { OpenTasksClient, OpenTasksIssue, TaskResult } from "../client.js";
 
 // =============================================================================
 // Mock Backend
@@ -184,6 +184,130 @@ function createMockClient(): OpenTasksClient {
     getBlockers: vi.fn(async () => []),
     getBlocking: vi.fn(async () => []),
 
+    // Task lifecycle (tools.task)
+    task: vi.fn(async (params): Promise<TaskResult> => {
+      if (params.transition) {
+        return {
+          success: true,
+          data: {
+            type: "transition" as const,
+            node: {
+              id: params.transition.id,
+              type: "issue",
+              title: "Test",
+              status: params.transition.action === "start" ? "in_progress" : "closed",
+              archived: false,
+            },
+            provider: "native",
+            action: params.transition.action,
+          },
+        };
+      }
+      if (params.ready !== undefined) {
+        return {
+          success: true,
+          data: {
+            type: "ready" as const,
+            items: Array.from(issues.values())
+              .filter((i) => i.status === "open" && !i.assignee)
+              .map((i) => ({
+                id: i.id,
+                type: "issue",
+                title: i.title,
+                status: i.status,
+                archived: false,
+              })),
+            total: Array.from(issues.values()).filter(
+              (i) => i.status === "open" && !i.assignee
+            ).length,
+          },
+        };
+      }
+      if (params.assign) {
+        return {
+          success: true,
+          data: {
+            type: "assign" as const,
+            node: {
+              id: params.assign.id,
+              type: "issue",
+              title: "Test",
+              status: "open",
+              archived: false,
+            },
+            provider: "native",
+          },
+        };
+      }
+      if (params.validActions) {
+        return {
+          success: true,
+          data: {
+            type: "validActions" as const,
+            actions: ["start", "block", "close"],
+          },
+        };
+      }
+      return { success: false, error: "Unknown operation" };
+    }),
+    taskTransition: vi.fn(async (id: string, action: string): Promise<TaskResult> => ({
+      success: true,
+      data: {
+        type: "transition" as const,
+        node: {
+          id,
+          type: "issue",
+          title: "Test",
+          status: action === "start" ? "in_progress" : "closed",
+          archived: false,
+        },
+        provider: "native",
+        action,
+      },
+    })),
+    taskReady: vi.fn(async (): Promise<TaskResult> => ({
+      success: true,
+      data: {
+        type: "ready" as const,
+        items: Array.from(issues.values())
+          .filter((i) => i.status === "open" && !i.assignee)
+          .map((i) => ({
+            id: i.id,
+            type: "issue",
+            title: i.title,
+            status: i.status,
+            archived: false,
+          })),
+        total: Array.from(issues.values()).filter(
+          (i) => i.status === "open" && !i.assignee
+        ).length,
+      },
+    })),
+    taskAssign: vi.fn(async (id: string): Promise<TaskResult> => ({
+      success: true,
+      data: {
+        type: "assign" as const,
+        node: {
+          id,
+          type: "issue",
+          title: "Test",
+          status: "open",
+          archived: false,
+        },
+        provider: "native",
+      },
+    })),
+    taskValidActions: vi.fn(async (): Promise<TaskResult> => ({
+      success: true,
+      data: {
+        type: "validActions" as const,
+        actions: ["start", "block", "close"],
+      },
+    })),
+
+    // Provider introspection
+    listProviders: vi.fn(async () => []),
+
     isConnected: vi.fn(() => true),
     connect: vi.fn(async () => {}),
     disconnect: vi.fn(),
@@ -226,6 +350,7 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(toolNames).toContain("opentasks_query");
       expect(toolNames).toContain("opentasks_link");
       expect(toolNames).toContain("opentasks_annotate");
+      expect(toolNames).toContain("opentasks_task");
 
       // Should not have mapped tools
       expect(toolNames).not.toContain("create_task");
@@ -276,6 +401,7 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(toolNames).toContain("opentasks_query");
       expect(toolNames).toContain("opentasks_link");
       expect(toolNames).toContain("opentasks_annotate");
+      expect(toolNames).toContain("opentasks_task");
 
       // Mapped tools
       expect(toolNames).toContain("create_task");
@@ -331,6 +457,7 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(excluded).toContain("opentasks_create");
       expect(excluded).toContain("opentasks_get");
       expect(excluded).toContain("opentasks_query");
+      expect(excluded).toContain("opentasks_task");
       expect(excluded).not.toContain("create_task");
     });
 
@@ -466,13 +593,13 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(result).toEqual({ id: "i-mock1", deleted: true });
     });
 
-    it("opentasks_query with ready should call getReadyIssues", async () => {
+    it("opentasks_query with ready should call taskReady (federated)", async () => {
       const tools = provider.getTools();
       const query = tools.find((t) => t.name === "opentasks_query");
 
       const result = await query!.handler({ ready: {} });
 
-      expect(client.getReadyIssues).toHaveBeenCalled();
+      expect(client.taskReady).toHaveBeenCalled();
       expect(result).toEqual(
         expect.objectContaining({ type: "ready" })
       );
@@ -687,6 +814,141 @@ describe("OpenTasksTaskToolProvider", () => {
         "i-source",
         "i-target",
         "discovered-from"
+      );
+    });
+  });
+
+  // ─── Task Tool Handler Tests ─────────────────────────────────────────
+
+  describe("opentasks_task handler", () => {
+    let provider: OpenTasksTaskToolProvider;
+
+    beforeEach(() => {
+      provider = new OpenTasksTaskToolProvider(backend, client, getContext, {
+        mode: "native",
+      });
+    });
+
+    it("transition should call client.taskTransition", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      const result = await taskTool!.handler({
+        transition: { id: "i-abc1", action: "start" },
+      });
+
+      expect(client.taskTransition).toHaveBeenCalledWith("i-abc1", "start");
+      expect(result).toEqual(
+        expect.objectContaining({
+          type: "transition",
+          action: "start",
+          provider: "native",
+        })
+      );
+    });
+
+    it("transition should support provider URIs", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      await taskTool!.handler({
+        transition: { id: "sudocode://proj/i-456", action: "complete" },
+      });
+
+      expect(client.taskTransition).toHaveBeenCalledWith(
+        "sudocode://proj/i-456",
+        "complete"
+      );
+    });
+
+    it("transition should throw on failure", async () => {
+      (client.taskTransition as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "Provider not found",
+      });
+
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      await expect(
+        taskTool!.handler({ transition: { id: "i-bad", action: "start" } })
+      ).rejects.toThrow("Provider not found");
+    });
+
+    it("ready should call client.taskReady", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      const result = await taskTool!.handler({ ready: {} });
+
+      expect(client.taskReady).toHaveBeenCalledWith({});
+      expect(result).toEqual(
+        expect.objectContaining({ type: "ready" })
+      );
+    });
+
+    it("ready should pass provider filter", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      await taskTool!.handler({
+        ready: { providers: ["sudocode"], limit: 5 },
+      });
+
+      expect(client.taskReady).toHaveBeenCalledWith({
+        providers: ["sudocode"],
+        limit: 5,
+      });
+    });
+
+    it("assign should call client.taskAssign", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      const result = await taskTool!.handler({
+        assign: { id: "i-abc1", assignee: "worker-1" },
+      });
+
+      expect(client.taskAssign).toHaveBeenCalledWith("i-abc1", "worker-1");
+      expect(result).toEqual(
+        expect.objectContaining({ type: "assign" })
+      );
+    });
+
+    it("assign should default assignee to calling agent", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      await taskTool!.handler({
+        assign: { id: "i-abc1" },
+      });
+
+      expect(client.taskAssign).toHaveBeenCalledWith("i-abc1", "test-agent");
+    });
+
+    it("validActions should call client.taskValidActions", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      const result = await taskTool!.handler({
+        validActions: { id: "i-abc1" },
+      });
+
+      expect(client.taskValidActions).toHaveBeenCalledWith("i-abc1");
+      expect(result).toEqual(
+        expect.objectContaining({
+          type: "validActions",
+          actions: ["start", "block", "close"],
+        })
+      );
+    });
+
+    it("should throw when no operation specified", async () => {
+      const tools = provider.getTools();
+      const taskTool = tools.find((t) => t.name === "opentasks_task");
+
+      await expect(taskTool!.handler({})).rejects.toThrow(
+        "Specify exactly one operation"
       );
     });
   });
@@ -928,7 +1190,7 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(names.length).toBe(uniqueNames.size);
     });
 
-    it("should have 7 native tools", () => {
+    it("should have 8 native tools", () => {
       const provider = new OpenTasksTaskToolProvider(
         backend,
         client,
@@ -936,7 +1198,7 @@ describe("OpenTasksTaskToolProvider", () => {
         { mode: "native" }
       );
 
-      expect(provider.getTools()).toHaveLength(7);
+      expect(provider.getTools()).toHaveLength(8);
     });
 
     it("should have 10 mapped tools", () => {
@@ -950,7 +1212,7 @@ describe("OpenTasksTaskToolProvider", () => {
       expect(provider.getTools()).toHaveLength(10);
     });
 
-    it("should have 17 tools in both mode", () => {
+    it("should have 18 tools in both mode", () => {
       const provider = new OpenTasksTaskToolProvider(
         backend,
         client,
@@ -958,7 +1220,7 @@ describe("OpenTasksTaskToolProvider", () => {
         { mode: "both" }
       );
 
-      expect(provider.getTools()).toHaveLength(17);
+      expect(provider.getTools()).toHaveLength(18);
     });
   });
 });

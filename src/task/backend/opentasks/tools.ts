@@ -72,6 +72,7 @@ const NATIVE_TOOL_NAMES = [
   "opentasks_query",
   "opentasks_link",
   "opentasks_annotate",
+  "opentasks_task",
 ];
 
 const MAPPED_TOOL_NAMES = [
@@ -147,6 +148,7 @@ export class OpenTasksTaskToolProvider implements TaskToolProvider {
       this.queryTool(),
       this.linkTool(),
       this.annotateTool(),
+      this.taskTool(),
     ];
   }
 
@@ -513,12 +515,16 @@ export class OpenTasksTaskToolProvider implements TaskToolProvider {
         // Determine which query type was specified
         if (args.ready !== undefined) {
           const ready = (args.ready ?? {}) as Record<string, unknown>;
-          const results = await this.client.getReadyIssues({
+          // Delegate to tools.task ready for federated provider support
+          const result = await this.client.taskReady({
             tags: ready.tags as string[] | undefined,
             assignee: ready.assignee as string | undefined,
             limit: (ready.limit ?? args.limit) as number | undefined,
           });
-          return { items: results, total: results.length, type: "ready" };
+          if (result.success && result.data && result.data.type === "ready") {
+            return { items: result.data.items, total: result.data.total, type: "ready" };
+          }
+          return { items: [], total: 0, type: "ready" };
         }
 
         if (args.blockers !== undefined) {
@@ -778,6 +784,144 @@ export class OpenTasksTaskToolProvider implements TaskToolProvider {
 
         throw new Error(
           "Must provide content (new feedback), resolve, dismiss, or reopen"
+        );
+      },
+    };
+  }
+
+  private taskTool(): MCPToolDefinition {
+    return {
+      name: "opentasks_task",
+      description:
+        "Provider-agnostic task lifecycle operations. Routes to the correct " +
+        "provider (native, sudocode, etc.) based on task ID or URI. " +
+        "Supports: transition (start/complete/block/reopen/close), " +
+        "ready (federated across providers), assign, validActions. " +
+        "Specify exactly one operation.",
+      schema: {
+        type: "object",
+        properties: {
+          transition: {
+            type: "object",
+            description: "Transition a task's status using a semantic action",
+            properties: {
+              id: {
+                type: "string",
+                description: "Task ID (e.g. i-abc1) or provider URI (e.g. sudocode://proj/i-456)",
+              },
+              action: {
+                type: "string",
+                enum: ["start", "complete", "block", "reopen", "close"],
+                description: "Semantic action to apply",
+              },
+            },
+            required: ["id", "action"],
+          },
+          ready: {
+            type: "object",
+            description: "Get tasks ready to work on (no active blockers), federated across providers",
+            properties: {
+              providers: {
+                type: "array",
+                items: { type: "string" },
+                description: "Only query these providers (e.g. ['native', 'sudocode']). Omit for all.",
+              },
+              limit: { type: "number", description: "Max results" },
+              tags: {
+                type: "array",
+                items: { type: "string" },
+                description: "Filter by tags",
+              },
+              priority: {
+                type: "number",
+                description: "Filter by minimum priority",
+              },
+              assignee: {
+                type: "string",
+                description: "Filter by assignee",
+              },
+            },
+          },
+          assign: {
+            type: "object",
+            description: "Assign a task to an owner",
+            properties: {
+              id: {
+                type: "string",
+                description: "Task ID or provider URI",
+              },
+              assignee: {
+                type: "string",
+                description: "Assignee identifier (defaults to calling agent)",
+              },
+            },
+            required: ["id"],
+          },
+          validActions: {
+            type: "object",
+            description: "Get valid next actions for a task's current state",
+            properties: {
+              id: {
+                type: "string",
+                description: "Task ID or provider URI",
+              },
+            },
+            required: ["id"],
+          },
+        },
+      },
+      handler: async (params: unknown) => {
+        const args = params as {
+          transition?: { id: string; action: string };
+          ready?: {
+            providers?: string[];
+            limit?: number;
+            tags?: string[];
+            priority?: number;
+            assignee?: string;
+          };
+          assign?: { id: string; assignee?: string };
+          validActions?: { id: string };
+        };
+
+        if (args.transition) {
+          const result = await this.client.taskTransition(
+            args.transition.id,
+            args.transition.action as "start" | "complete" | "block" | "reopen" | "close"
+          );
+          if (!result.success) {
+            throw new Error(result.error ?? "Transition failed");
+          }
+          return result.data;
+        }
+
+        if (args.ready !== undefined) {
+          const result = await this.client.taskReady(args.ready);
+          if (!result.success) {
+            throw new Error(result.error ?? "Ready query failed");
+          }
+          return result.data;
+        }
+
+        if (args.assign) {
+          const assignee = args.assign.assignee ?? this.getContext().agent_id;
+          const result = await this.client.taskAssign(args.assign.id, assignee);
+          if (!result.success) {
+            throw new Error(result.error ?? "Assignment failed");
+          }
+          return result.data;
+        }
+
+        if (args.validActions) {
+          const result = await this.client.taskValidActions(args.validActions.id);
+          if (!result.success) {
+            throw new Error(result.error ?? "Valid actions query failed");
+          }
+          return result.data;
+        }
+
+        throw new Error(
+          "Specify exactly one operation: transition, ready, assign, or validActions"
         );
       },
     };

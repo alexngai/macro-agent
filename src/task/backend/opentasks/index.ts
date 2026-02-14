@@ -37,6 +37,16 @@ export type {
   IssueChangeEvent,
   IssueChangeCallback,
   ClientUnsubscribe,
+  // Task lifecycle types (tools.task)
+  TaskAction,
+  TaskParams,
+  TaskResult,
+  TaskTransitionData,
+  TaskReadyData,
+  TaskAssignData,
+  TaskValidActionsData,
+  TaskNodeSummary,
+  ProviderSummary,
 } from "./client.js";
 
 // Mapping
