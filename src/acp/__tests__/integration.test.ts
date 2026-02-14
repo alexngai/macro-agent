@@ -286,8 +286,8 @@ describe("ACP Mode Integration", () => {
         cwd: "/test/project",
       });
 
-      // loadSession returns empty object on success
-      expect(loadResponse).toEqual({});
+      // loadSession returns model state (null when no models available)
+      expect(loadResponse).toEqual({ models: null });
     });
 
     it("should load session by agentId via _meta", async () => {
@@ -314,7 +314,7 @@ describe("ACP Mode Integration", () => {
         _meta: { agentId: originalAgentId },
       } as any);
 
-      expect(loadResponse).toEqual({});
+      expect(loadResponse).toEqual({ models: null });
     });
 
     it("should throw when _meta.agentId references non-existent agent", async () => {

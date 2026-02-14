@@ -20,6 +20,7 @@ import type {
   PromptResponse,
   CancelNotification,
   SessionNotification,
+  SessionModelState,
 } from "@agentclientprotocol/sdk";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { EventStore } from "../store/event-store.js";
@@ -145,6 +146,22 @@ export interface MacroAgentConfig {
 
   /** Default working directory for new sessions */
   defaultCwd?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Build a SessionModelState from the acp-factory Session.models (string[]).
+ * Returns null if the models array is empty or missing.
+ */
+function buildModelState(models: string[]): SessionModelState | null {
+  if (!models || models.length === 0) return null;
+  return {
+    currentModelId: models[0],
+    availableModels: models.map((id) => ({ modelId: id, name: id })),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -274,6 +291,7 @@ export class MacroAgent implements Agent {
 
     return {
       sessionId: acpSessionId,
+      models: buildModelState(spawned.session.models),
     };
   }
 
@@ -318,7 +336,10 @@ export class MacroAgent implements Agent {
         }
         this.ensureConversation(acpSessionId, existing.id);
         await this.emitSessionInfo(acpSessionId);
-        return {};
+        const activeSession = this.agentManager.getSession(existing.id);
+        return {
+          models: activeSession ? buildModelState(activeSession.models) : null,
+        };
       }
 
       // Agent exists but no active session - resume it
@@ -334,7 +355,9 @@ export class MacroAgent implements Agent {
       this.ensureConversation(acpSessionId, spawned.id);
       await this.emitSessionInfo(acpSessionId);
 
-      return {};
+      return {
+        models: buildModelState(spawned.session.models),
+      };
     }
 
     // No existing agent found - try to get or create with the specific session ID
@@ -354,7 +377,9 @@ export class MacroAgent implements Agent {
     this.ensureConversation(acpSessionId, spawned.id);
     await this.emitSessionInfo(acpSessionId);
 
-    return {};
+    return {
+      models: buildModelState(spawned.session.models),
+    };
   }
 
   /**
