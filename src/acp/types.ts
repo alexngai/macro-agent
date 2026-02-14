@@ -291,6 +291,12 @@ export interface ForkAgentRequest {
 
   /** Optional name for the forked agent */
   name?: string;
+
+  /** Optional initial prompt to send after fork */
+  prompt?: string;
+
+  /** Optional working directory override */
+  cwd?: string;
 }
 
 /**
@@ -305,6 +311,9 @@ export interface ForkAgentResponse {
 
   /** Original agent ID (for reference) */
   originalAgentId: AgentId;
+
+  /** Provider session ID (Claude Code UUID) for stream connection */
+  providerSessionId?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────

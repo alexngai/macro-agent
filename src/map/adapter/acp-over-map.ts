@@ -12,6 +12,7 @@ import type { AgentManager } from "../../agent/agent-manager.js";
 import type { EventStore } from "../../store/event-store.js";
 import type { TaskManager } from "../../task/task-manager.js";
 import type { AgentId } from "../../store/types/index.js";
+import type { AgentConfig } from "../../agent/types.js";
 import { SessionMapper } from "../../acp/session-mapper.js";
 import type { ACPSessionId } from "../../acp/types.js";
 
@@ -590,7 +591,7 @@ export class ACPOverMAPHandler {
           task: string;
           cwd?: string;
           topics?: string[];
-          config?: Record<string, unknown>;
+          config?: AgentConfig;
           parentId?: string;
         };
 
@@ -614,6 +615,8 @@ export class ACPOverMAPHandler {
           task,
           cwd: cwd ?? this.defaultCwd,
           role: "worker",
+          topics,
+          config,
         });
 
         return {
@@ -765,6 +768,49 @@ export class ACPOverMAPHandler {
           return { success: true, previousMode: previousMode ?? undefined };
         }
         return { success: false, error: `No active session found for agent ${targetAgentId}` };
+      }
+
+      case "_macro/forkAgent": {
+        const { agentId, name, prompt, cwd } = methodParams as {
+          agentId: string;
+          name?: string;
+          prompt?: string;
+          cwd?: string;
+        };
+        if (!agentId) {
+          throw new Error("agentId is required");
+        }
+
+        const sourceAgent = this.eventStore.getAgent(agentId as AgentId);
+        if (!sourceAgent) {
+          throw new Error(`Agent not found: ${agentId}`);
+        }
+
+        const forked = await this.agentManager.forkAgent(agentId as AgentId, {
+          name,
+          prompt,
+          cwd: cwd ?? sourceAgent.cwd ?? this.defaultCwd,
+        });
+
+        // Fire-and-forget initial prompt if provided
+        if (prompt) {
+          (async () => {
+            try {
+              for await (const _update of this.agentManager.prompt(forked.id, prompt)) {
+                // drain iterator
+              }
+            } catch {
+              // best-effort
+            }
+          })();
+        }
+
+        return {
+          newAgentId: forked.id,
+          newSessionId: forked.session_id,
+          originalAgentId: agentId,
+          providerSessionId: forked.session?.id,
+        };
       }
 
       case "_macro/agents/update": {

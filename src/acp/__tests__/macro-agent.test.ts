@@ -98,6 +98,12 @@ function createMockAgentManager(): AgentManager {
     close: vi.fn().mockResolvedValue(undefined),
     respondToPermission: vi.fn().mockReturnValue(true),
     cancelPermission: vi.fn().mockReturnValue(true),
+    forkAgent: vi.fn().mockResolvedValue({
+      id: "agent-forked",
+      session_id: "session-forked",
+      agent: createMockAgent({ id: "agent-forked", session_id: "session-forked" }),
+      session: { id: "provider-session-forked" },
+    }),
   } as unknown as AgentManager;
 }
 
@@ -612,21 +618,23 @@ describe("MacroAgent", () => {
         agentId: "agent-1",
       });
 
-      expect(response).toHaveProperty("newAgentId");
-      expect(response).toHaveProperty("newSessionId");
+      expect(response).toHaveProperty("newAgentId", "agent-forked");
+      expect(response).toHaveProperty("newSessionId", "session-forked");
       expect(response).toHaveProperty("originalAgentId", "agent-1");
-      expect(mockAgentManager.spawn).toHaveBeenCalled();
+      expect(response).toHaveProperty("providerSessionId", "provider-session-forked");
+      expect(mockAgentManager.forkAgent).toHaveBeenCalledWith("agent-1", expect.any(Object));
     });
 
-    it("should use custom name in task description", async () => {
+    it("should pass custom name to forkAgent", async () => {
       await macroAgent.extMethod("macro/forkAgent", {
         agentId: "agent-1",
         name: "Custom fork name",
       });
 
-      expect(mockAgentManager.spawn).toHaveBeenCalledWith(
+      expect(mockAgentManager.forkAgent).toHaveBeenCalledWith(
+        "agent-1",
         expect.objectContaining({
-          task: expect.stringContaining("Custom fork name"),
+          name: "Custom fork name",
         })
       );
     });
@@ -641,8 +649,9 @@ describe("MacroAgent", () => {
       ).rejects.toThrow(ACPError);
     });
 
-    it("should throw if agent has no active session", async () => {
+    it("should throw if agent has no active session and no provider_session_id", async () => {
       vi.mocked(mockAgentManager.hasActiveSession).mockReturnValue(false);
+      // Default mock agent has no provider_session_id
 
       await expect(
         macroAgent.extMethod("macro/forkAgent", {

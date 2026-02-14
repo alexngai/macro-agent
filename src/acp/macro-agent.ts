@@ -835,9 +835,9 @@ export class MacroAgent implements Agent {
   private async handleForkAgent(
     params: ForkAgentRequest,
   ): Promise<ForkAgentResponse> {
-    const { agentId, name } = params;
+    const { agentId, name, prompt, cwd } = params;
 
-    // Get the original agent
+    // Validate source agent exists
     const originalAgent = this.agentManager.get(agentId);
     if (!originalAgent) {
       throw new ACPError(`Agent not found: ${agentId}`, "AGENT_NOT_FOUND", {
@@ -845,41 +845,48 @@ export class MacroAgent implements Agent {
       });
     }
 
-    // Check if the agent has an active session we can fork from
-    const hasSession = this.agentManager.hasActiveSession(agentId);
-    if (!hasSession) {
+    // Check forkable: needs active session or persisted provider_session_id
+    if (
+      !this.agentManager.hasActiveSession(agentId) &&
+      !originalAgent.provider_session_id
+    ) {
       throw new ACPError(
-        `Agent has no active session to fork: ${agentId}`,
+        `Agent has no session to fork: ${agentId}`,
         "FORK_NOT_SUPPORTED",
         { agentId },
       );
     }
 
-    // For now, create a new agent with the same task as a "fork"
-    // In a full implementation, we would:
-    // 1. Check if acp-factory supports native fork
-    // 2. Use loadSession to clone the conversation state
-    // Since acp-factory doesn't expose these yet, we create a new agent
-    // with the same task description as a simplified fork
-
-    const taskDescription = name
-      ? `[Fork of ${agentId}] ${name}`
-      : `[Fork of ${agentId}] ${originalAgent.task ?? "Forked task"}`;
-
-    const spawned = await this.agentManager.spawn({
-      task: taskDescription,
-      parent: originalAgent.parent ?? null,
-      cwd: this.defaultCwd,
-      subscribeParent: false,
+    // Fork via AgentManager (handles forkWithFlush + new process + loadSession)
+    const forked = await this.agentManager.forkAgent(agentId, {
+      name,
+      cwd: cwd ?? originalAgent.cwd ?? this.defaultCwd,
     });
 
-    // Emit a fork event for tracking (the EventStore records this via spawn)
-    // In a more complete implementation, we'd add a dedicated "fork" event type
+    // Fire-and-forget initial prompt if provided
+    if (prompt) {
+      (async () => {
+        try {
+          for await (const _update of this.agentManager.prompt(
+            forked.id,
+            prompt,
+          )) {
+            // Drain the async iterable
+          }
+        } catch (err) {
+          console.warn(
+            `[MacroAgent] Failed to send initial prompt to forked agent ${forked.id}:`,
+            err,
+          );
+        }
+      })();
+    }
 
     return {
-      newAgentId: spawned.id,
-      newSessionId: spawned.session_id,
+      newAgentId: forked.id,
+      newSessionId: forked.session_id,
       originalAgentId: agentId,
+      providerSessionId: forked.session.id,
     };
   }
 

@@ -161,6 +161,28 @@ function createMockAgentManager(): AgentManager {
     getSession: vi.fn().mockReturnValue(null),
     onLifecycleEvent: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue(undefined),
+    forkAgent: vi.fn().mockImplementation((sourceId) => {
+      const agentId = `agent-${++agentCounter}`;
+      const sessionId = `session-${++sessionCounter}`;
+      const agent: Agent = {
+        id: agentId,
+        session_id: sessionId,
+        state: "running",
+        task: `[Fork of ${sourceId}]`,
+        task_id: `task-${++taskCounter}`,
+        parent: null,
+        lineage: [],
+        created_at: Date.now(),
+        started_at: Date.now(),
+      };
+      agentStore.set(agent.id, agent);
+      return Promise.resolve({
+        id: agent.id,
+        session_id: agent.session_id,
+        agent,
+        session: { id: `provider-${sessionId}` },
+      });
+    }),
   } as unknown as AgentManager;
 }
 
@@ -238,7 +260,7 @@ describe("ACP Mode Integration", () => {
       expect(initResponse.agentCapabilities).toBeDefined();
       expect(initResponse.agentCapabilities?.loadSession).toBe(true);
       expect(initResponse.agentCapabilities?._meta?.extensions).toContain(
-        "_macro/spawnAgent"
+        "_macro/spawnAgent",
       );
 
       // Step 2: Create new session
@@ -323,7 +345,7 @@ describe("ACP Mode Integration", () => {
           sessionId: "_resume_",
           cwd: "/test/project",
           _meta: { agentId: "non-existent-agent" },
-        } as any)
+        } as any),
       ).rejects.toThrow("Agent not found: non-existent-agent");
     });
 
@@ -345,7 +367,7 @@ describe("ACP Mode Integration", () => {
       await expect(
         macroAgent.cancel({
           sessionId: sessionResponse.sessionId,
-        })
+        }),
       ).resolves.toBeUndefined();
     });
 
@@ -373,10 +395,11 @@ describe("ACP Mode Integration", () => {
       expect(extensions).toContain("_macro/cancelPermission");
       expect(extensions).toContain("_macro/resume");
       expect(extensions).toContain("_macro/getHistory");
-      expect(extensions?.length).toBe(18);
+      expect(extensions).toContain("_macro/forkAgent");
+      expect(extensions?.length).toBe(19);
 
       expect(initResponse.agentCapabilities?._meta?.agentType).toBe(
-        "macro-agent"
+        "macro-agent",
       );
     });
   });
@@ -474,7 +497,7 @@ describe("ACP Mode Integration", () => {
         expect.objectContaining({
           task: "Integration test task",
           cwd: "/test/spawn",
-        })
+        }),
       );
     });
 
@@ -497,7 +520,7 @@ describe("ACP Mode Integration", () => {
         expect.objectContaining({
           task: "Child agent task",
           parent: parentId,
-        })
+        }),
       );
     });
   });
@@ -545,7 +568,7 @@ describe("ACP Mode Integration", () => {
       await expect(
         macroAgent.extMethod("macro/getHierarchy", {
           rootAgentId: "non-existent-agent",
-        })
+        }),
       ).rejects.toThrow(ACPError);
     });
   });
@@ -576,7 +599,7 @@ describe("ACP Mode Integration", () => {
       await expect(
         macroAgent.extMethod("macro/getTask", {
           taskId: "non-existent-task",
-        })
+        }),
       ).rejects.toThrow(ACPError);
     });
   });
@@ -640,7 +663,7 @@ describe("ACP Mode Integration", () => {
         macroAgent.extMethod("macro/mountAgent", {
           sessionId: "non-existent-session",
           agentId: "some-agent",
-        })
+        }),
       ).rejects.toThrow(ACPError);
     });
 
@@ -653,7 +676,7 @@ describe("ACP Mode Integration", () => {
         macroAgent.extMethod("macro/mountAgent", {
           sessionId: sessionResponse.sessionId,
           agentId: "non-existent-agent",
-        })
+        }),
       ).rejects.toThrow(ACPError);
     });
   });
@@ -666,7 +689,7 @@ describe("ACP Mode Integration", () => {
       });
 
       const originalAgentId = macroAgent.getMappedAgentId(
-        sessionResponse.sessionId
+        sessionResponse.sessionId,
       );
 
       // Fork the agent
@@ -678,18 +701,20 @@ describe("ACP Mode Integration", () => {
       expect(forkResponse.newAgentId).toBeDefined();
       expect(forkResponse.newSessionId).toBeDefined();
       expect(forkResponse.originalAgentId).toBe(originalAgentId);
+      expect(forkResponse.providerSessionId).toBeDefined();
 
-      // Verify forked agent exists
-      const forkedAgent = agentStore.get(forkResponse.newAgentId as string);
-      expect(forkedAgent).not.toBeNull();
-      expect(forkedAgent?.task).toContain("Forked for testing");
+      // Verify forkAgent was called with correct args
+      expect(mockAgentManager.forkAgent).toHaveBeenCalledWith(
+        originalAgentId,
+        expect.objectContaining({ name: "Forked for testing" }),
+      );
     });
 
     it("should throw for non-existent agent", async () => {
       await expect(
         macroAgent.extMethod("macro/forkAgent", {
           agentId: "non-existent-agent",
-        })
+        }),
       ).rejects.toThrow(ACPError);
     });
   });
@@ -697,7 +722,7 @@ describe("ACP Mode Integration", () => {
   describe("Extension Error Handling", () => {
     it("should throw for unknown extension method", async () => {
       await expect(macroAgent.extMethod("unknown/method", {})).rejects.toThrow(
-        ACPError
+        ACPError,
       );
 
       try {
@@ -736,7 +761,7 @@ describe("ACP Mode Integration", () => {
 
       // Verify session2 is now controlling the child agent
       expect(macroAgent.getMappedAgentId(session2.sessionId)).toBe(
-        childSpawn.agentId
+        childSpawn.agentId,
       );
 
       // 5. Fork the child from session2's perspective
@@ -763,7 +788,7 @@ describe("ACP Mode Integration", () => {
 
       // Get session2's original agent
       const session2AgentBefore = macroAgent.getMappedAgentId(
-        session2.sessionId
+        session2.sessionId,
       );
 
       // Mount session1 to new agent
@@ -774,10 +799,10 @@ describe("ACP Mode Integration", () => {
 
       // Session2 should still point to its original head manager
       expect(macroAgent.getMappedAgentId(session1.sessionId)).toBe(
-        spawn1.agentId
+        spawn1.agentId,
       );
       expect(macroAgent.getMappedAgentId(session2.sessionId)).toBe(
-        session2AgentBefore
+        session2AgentBefore,
       );
     });
   });
@@ -883,7 +908,7 @@ describe("ACP Protocol Compliance", () => {
     headManagers.length = 0;
     const hierarchyResponse = await macroAgent.extMethod(
       "macro/getHierarchy",
-      {}
+      {},
     );
     expect(hierarchyResponse).toBeDefined();
     expect(hierarchyResponse.totalAgents).toBe(0);
@@ -967,7 +992,7 @@ describe("ACP Protocol Compliance", () => {
       await expect(
         macroAgent.extMethod("_macro/resume", {
           agentId: childAgentId,
-        })
+        }),
       ).rejects.toThrow("only stopped or failed");
     });
 
@@ -975,14 +1000,14 @@ describe("ACP Protocol Compliance", () => {
       await expect(
         macroAgent.extMethod("_macro/resume", {
           agentId: "non-existent-agent",
-        })
+        }),
       ).rejects.toThrow("Agent not found");
     });
 
     it("should reject resume without agentId", async () => {
-      await expect(
-        macroAgent.extMethod("_macro/resume", {})
-      ).rejects.toThrow("agentId is required");
+      await expect(macroAgent.extMethod("_macro/resume", {})).rejects.toThrow(
+        "agentId is required",
+      );
     });
 
     it("full lifecycle: spawn → stop → resume", async () => {

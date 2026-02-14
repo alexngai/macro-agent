@@ -122,6 +122,19 @@ export interface AgentManager {
     options?: ContinueAgentOptions
   ): Promise<SpawnedAgent>;
 
+  /**
+   * Fork an agent's session, creating a new agent with the same
+   * conversation history. Uses forkWithFlush for active sessions
+   * or loadSession for stopped agents with persisted sessions.
+   *
+   * @param sourceAgentId - ID of the agent to fork from
+   * @param options - Fork options (name, prompt, cwd)
+   */
+  forkAgent(
+    sourceAgentId: AgentId,
+    options?: { name?: string; prompt?: string; cwd?: string }
+  ): Promise<SpawnedAgent>;
+
   // ── Queries ────────────────────────────────────────────────────
 
   /**
@@ -1050,6 +1063,168 @@ export function createAgentManager(
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Fork
+  // ─────────────────────────────────────────────────────────────────
+
+  async function forkAgent(
+    sourceAgentId: AgentId,
+    options?: { name?: string; prompt?: string; cwd?: string }
+  ): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot fork agent during shutdown",
+        "SHUTDOWN_IN_PROGRESS",
+        sourceAgentId
+      );
+    }
+
+    const sourceAgent = eventStore.getAgent(sourceAgentId);
+    if (!sourceAgent) {
+      throw new AgentManagerError(
+        `Agent not found: ${sourceAgentId}`,
+        "AGENT_NOT_FOUND",
+        sourceAgentId
+      );
+    }
+
+    // Need either an active session or a persisted provider_session_id
+    const activeSession = activeSessions.get(sourceAgentId);
+    if (!activeSession && !sourceAgent.provider_session_id) {
+      throw new AgentManagerError(
+        `Agent has no session to fork: ${sourceAgentId}`,
+        "FORK_NOT_SUPPORTED",
+        sourceAgentId
+      );
+    }
+
+    // Generate new IDs
+    const agentId = `agent_${nanoid(12)}`;
+    const taskId = `task_${nanoid(12)}`;
+    const sessionId = `session_${nanoid(12)}`;
+    const cwd = options?.cwd ?? sourceAgent.cwd ?? defaultCwd;
+
+    // Emit spawn event with fork metadata
+    eventStore.emit({
+      type: "spawn",
+      source: { agent_id: sourceAgentId },
+      payload: {
+        agent_id: agentId,
+        session_id: sessionId,
+        task: options?.name ?? `[Fork of ${sourceAgentId}]`,
+        task_id: taskId,
+        parent: sourceAgent.parent ?? null,
+        role: sourceAgent.role ?? undefined,
+        config: {},
+        cwd,
+        metadata: { fork_of: sourceAgentId },
+      },
+    });
+
+    // Generate a human-readable name
+    const generatedName = uniqueNamesGenerator({
+      dictionaries: [adjectives, animals],
+      separator: "-",
+      length: 2,
+    });
+    eventStore.updateAgentMetadata(agentId as AgentId, { name: generatedName });
+    await eventStore.persist();
+
+    // Get the provider session ID to fork from
+    let forkedProviderSessionId: string;
+    if (activeSession) {
+      // Active session: fork with flush to ensure data is persisted
+      const forkedSession = await activeSession.session.forkWithFlush();
+      forkedProviderSessionId = forkedSession.id;
+    } else {
+      // Stopped agent: use the persisted provider session ID directly
+      forkedProviderSessionId = sourceAgent.provider_session_id!;
+    }
+
+    // Spawn a new process
+    const handle = await AgentFactory.spawn(defaultAgentType, {
+      permissionMode: defaultPermissionMode,
+    });
+
+    try {
+      // Build MCP server config with the NEW agent's IDs
+      const macroAgentMcp = {
+        name: "macro-agent",
+        command: "npx",
+        args: ["multiagent-mcp"],
+        env: [
+          { name: "MACRO_AGENT_ID", value: agentId },
+          { name: "MACRO_PARENT_ID", value: sourceAgent.parent ?? "" },
+          { name: "MACRO_TASK_ID", value: taskId },
+          { name: "MACRO_AGENT_CWD", value: cwd },
+          { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+          { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
+          { name: "MACRO_PERMISSION_MODE", value: defaultPermissionMode },
+        ],
+      };
+
+      // Load the forked session on the new process with correct MCP config.
+      // Note: loadSession's TS type for mcpServers is { name, uri }[] but
+      // the underlying ACP protocol accepts full McpServerStdio. The JS
+      // implementation passes mcpServers through to the connection unchanged.
+      const session = await handle.loadSession(
+        forkedProviderSessionId,
+        cwd,
+        [macroAgentMcp] as any,
+      );
+
+      // Emit started status with provider session ID
+      eventStore.emit({
+        type: "status",
+        source: { agent_id: agentId },
+        payload: {
+          status_type: "started",
+          summary: "Agent session started (forked)",
+          provider_session_id: session.id,
+        },
+      });
+      await eventStore.persist();
+
+      // Set up message router subscriptions
+      messageRouter.setupDefaultSubscriptions({
+        agent_id: agentId,
+        parent_id: sourceAgent.parent ?? undefined,
+        task_id: taskId,
+        subscribe_parent: false,
+        additional_topics: [],
+        role: sourceAgent.role ?? undefined,
+      });
+
+      // Track active session
+      const newActiveSession: ActiveSession = {
+        agentId,
+        handle,
+        session,
+        createdAt: Date.now(),
+        isPrompting: false,
+      };
+      activeSessions.set(agentId, newActiveSession);
+
+      const agent = eventStore.getAgent(agentId)!;
+      notifyLifecycle({ type: "spawned", agent });
+      notifyLifecycle({ type: "started", agent });
+
+      return {
+        id: agentId,
+        session_id: sessionId,
+        agent,
+        session,
+      };
+    } catch (handleError) {
+      try {
+        await handle.close();
+      } catch {
+        // Ignore errors during cleanup
+      }
+      throw handleError;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Queries
   // ─────────────────────────────────────────────────────────────────
 
@@ -1615,6 +1790,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     terminate,
     resume,
     continueAgent,
+    forkAgent,
     get,
     list,
     getChildren,
