@@ -881,6 +881,39 @@ export class ACPOverMAPHandler {
         };
       }
 
+      case "_macro/getModels": {
+        const { sessionId } = methodParams as { sessionId: string };
+        const agentId = this.sessionMapper.getAgentId(sessionId as ACPSessionId);
+        if (!agentId) {
+          return { currentModelId: null, availableModels: [] };
+        }
+        const session = this.agentManager.getSession(agentId);
+        if (!session) {
+          return { currentModelId: null, availableModels: [] };
+        }
+        // Try clientHandler's model info store first (from _model_state_update notification)
+        const clientHandler = (session as unknown as {
+          clientHandler?: {
+            getSessionModelInfo?: (id: string) => {
+              currentModelId: string | null;
+              availableModels: Array<{ modelId: string; name: string }>;
+            } | null;
+          };
+        }).clientHandler;
+        const modelInfo = clientHandler?.getSessionModelInfo?.(session.id);
+        if (modelInfo && modelInfo.availableModels.length > 0) {
+          return modelInfo;
+        }
+        // Fall back to Session.models (from initial session response — just IDs)
+        if (session.models && session.models.length > 0) {
+          return {
+            currentModelId: session.models[0],
+            availableModels: session.models.map((id: string) => ({ modelId: id, name: id })),
+          };
+        }
+        return { currentModelId: null, availableModels: [] };
+      }
+
       default:
         throw new Error(`Unknown extension method: ${method}`);
     }
