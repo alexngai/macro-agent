@@ -681,12 +681,10 @@ export class ACPOverMAPHandler {
         // explicit sessionId. This allows history to survive across server
         // restarts even when the ACP session ID changes (e.g., resume()
         // fails → TUI creates new session with different ID).
+        const agent = historyAgentId ? this.eventStore.getAgent(historyAgentId as AgentId) : undefined;
         let conversationId: string | undefined;
-        if (historyAgentId) {
-          const agent = this.eventStore.getAgent(historyAgentId as AgentId);
-          if (agent) {
-            conversationId = agent.session_id;
-          }
+        if (agent) {
+          conversationId = agent.session_id;
         }
         if (!conversationId) {
           conversationId = sessionId;
@@ -695,14 +693,37 @@ export class ACPOverMAPHandler {
           return { turns: [] };
         }
 
-        const turns = this.eventStore.listTurns({
-          conversationId,
-          order: "asc",
-          limit: limit ?? 200,
-        });
+        // For forked agents, include the source agent's conversation history
+        // (pre-fork turns) followed by this agent's own turns.
+        // Only include source turns from before the fork to avoid leaking
+        // turns that the source recorded after the fork point.
+        const sourceAgentId = agent?.metadata?.fork_of as string | undefined;
+        let turns;
+        if (sourceAgentId) {
+          const sourceAgent = this.eventStore.getAgent(sourceAgentId as AgentId);
+          const sourceConversationId = sourceAgent?.session_id;
+          const forkTimestamp = agent!.created_at;
+          const sourceTurns = sourceConversationId
+            ? this.eventStore.listTurns({
+                conversationId: sourceConversationId,
+                order: "asc",
+                limit: limit ?? 200,
+              }).filter((t) => t.timestamp <= forkTimestamp)
+            : [];
+          const ownTurns = this.eventStore.listTurns({
+            conversationId,
+            order: "asc",
+            limit: limit ?? 200,
+          });
+          turns = [...sourceTurns, ...ownTurns];
+        } else {
+          turns = this.eventStore.listTurns({
+            conversationId,
+            order: "asc",
+            limit: limit ?? 200,
+          });
+        }
 
-        // Include persisted plan and agent cwd if available
-        const agent = historyAgentId ? this.eventStore.getAgent(historyAgentId as AgentId) : undefined;
         const plan = agent?.plan ?? [];
 
         return {

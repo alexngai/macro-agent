@@ -1078,6 +1078,269 @@ describe("ACP-over-MAP history persistence", () => {
     expect(result.plan[0].content).toBe("Persistent task");
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // Fork history tests
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Register a forked agent with fork_of metadata */
+  function registerForkedAgent(
+    agentId: string,
+    sessionId: string,
+    sourceAgentId: string,
+    createdAt?: number,
+  ): void {
+    eventStore.emit({
+      type: "spawn",
+      source: { agent_id: sourceAgentId },
+      payload: {
+        agent_id: agentId,
+        session_id: sessionId,
+        task: `[Fork of ${sourceAgentId}]`,
+        task_id: "task-fork",
+        cwd: "/test/cwd",
+      },
+    });
+    // Set fork_of metadata (mirrors what agent-manager.ts does)
+    eventStore.updateAgentMetadata(agentId as AgentId, {
+      metadata: { fork_of: sourceAgentId },
+    });
+    // Backdate created_at if specified (for timestamp filtering tests)
+    if (createdAt !== undefined) {
+      // Overwrite the agent row's created_at by re-emitting a lifecycle event
+      // at the desired time — but since we can't change created_at directly,
+      // we rely on the spawn event timestamp. For testing, we'll emit the
+      // spawn before recording turns to ensure correct ordering.
+    }
+    // Mark as running
+    eventStore.emit({
+      type: "lifecycle",
+      source: { agent_id: agentId },
+      payload: {
+        agent_id: agentId,
+        action: "started",
+      },
+    });
+  }
+
+  /** Record a turn directly in the event store (bypasses prompt flow) */
+  function recordTurn(
+    agentId: string,
+    conversationId: string,
+    role: "user" | "assistant",
+    content: unknown,
+  ): void {
+    const now = Date.now();
+    eventStore.emit({
+      type: "turn",
+      source: { agent_id: agentId },
+      payload: {
+        action: "recorded",
+        turn_id: `turn_${role}_${now}_${Math.random().toString(36).slice(2, 8)}`,
+        conversation_id: conversationId,
+        participant: role,
+        timestamp: now,
+        content_type: role === "user" ? "user_prompt" : "assistant_response",
+        content,
+        source_type: "acp",
+      },
+    });
+  }
+
+  it("should include source agent history for forked agents", async () => {
+    await setup();
+
+    const sourceAgentId = "agent-source" as AgentId;
+    const sourceSessionId = "session-source";
+    const forkedAgentId = "agent-forked" as AgentId;
+    const forkedSessionId = "session-forked";
+
+    // Register source agent and record turns
+    registerAgent(sourceAgentId, sourceSessionId);
+    recordTurn(sourceAgentId, sourceSessionId, "user", "Hello source");
+    recordTurn(sourceAgentId, sourceSessionId, "assistant", { parts: [{ type: "text", text: "Hi from source" }] });
+
+    // Register forked agent with fork_of metadata
+    registerForkedAgent(forkedAgentId, forkedSessionId, sourceAgentId);
+
+    // Initialize stream for forked agent
+    const streamId = "fork-history-stream";
+    await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "initialize", {
+        protocolVersion: 1,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      }),
+    );
+
+    // Query history for forked agent
+    const historyResult = await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "_macro/getHistory", { agentId: forkedAgentId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+
+    // Should include source agent's 2 turns
+    expect(turns).toHaveLength(2);
+    expect(turns[0].role).toBe("user");
+    expect(turns[0].content).toBe("Hello source");
+    expect(turns[1].role).toBe("assistant");
+  });
+
+  it("should combine source and forked agent turns in order", async () => {
+    await setup();
+
+    const sourceAgentId = "agent-src" as AgentId;
+    const sourceSessionId = "session-src";
+    const forkedAgentId = "agent-fork" as AgentId;
+    const forkedSessionId = "session-fork";
+
+    // Source agent conversation
+    registerAgent(sourceAgentId, sourceSessionId);
+    recordTurn(sourceAgentId, sourceSessionId, "user", "Question 1");
+    recordTurn(sourceAgentId, sourceSessionId, "assistant", { parts: [{ type: "text", text: "Answer 1" }] });
+
+    // Fork the agent
+    registerForkedAgent(forkedAgentId, forkedSessionId, sourceAgentId);
+
+    // Forked agent has its own turns
+    recordTurn(forkedAgentId, forkedSessionId, "user", "Question 2 (forked)");
+    recordTurn(forkedAgentId, forkedSessionId, "assistant", { parts: [{ type: "text", text: "Answer 2 (forked)" }] });
+
+    const streamId = "fork-combined-stream";
+    await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "initialize", {
+        protocolVersion: 1,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      }),
+    );
+
+    const historyResult = await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "_macro/getHistory", { agentId: forkedAgentId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+
+    // Source turns (2) + forked turns (2) = 4
+    expect(turns).toHaveLength(4);
+    expect(turns[0].content).toBe("Question 1");
+    expect(turns[2].content).toBe("Question 2 (forked)");
+  });
+
+  it("should not include source turns recorded after the fork", async () => {
+    await setup();
+
+    const sourceAgentId = "agent-pre" as AgentId;
+    const sourceSessionId = "session-pre";
+    const forkedAgentId = "agent-post" as AgentId;
+    const forkedSessionId = "session-post";
+
+    // Source agent: record a turn before the fork
+    registerAgent(sourceAgentId, sourceSessionId);
+    recordTurn(sourceAgentId, sourceSessionId, "user", "Before fork");
+    recordTurn(sourceAgentId, sourceSessionId, "assistant", { parts: [{ type: "text", text: "Pre-fork reply" }] });
+
+    // Small delay to ensure fork timestamp is after source turns
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Fork the agent
+    registerForkedAgent(forkedAgentId, forkedSessionId, sourceAgentId);
+
+    // Small delay to ensure post-fork turn timestamp is after fork
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Source agent continues after fork — these should NOT appear in forked history
+    recordTurn(sourceAgentId, sourceSessionId, "user", "After fork on source");
+    recordTurn(sourceAgentId, sourceSessionId, "assistant", { parts: [{ type: "text", text: "Post-fork source reply" }] });
+
+    const streamId = "fork-filter-stream";
+    await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "initialize", {
+        protocolVersion: 1,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      }),
+    );
+
+    const historyResult = await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "_macro/getHistory", { agentId: forkedAgentId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+
+    // Should only include the 2 pre-fork turns, not the 2 post-fork ones
+    expect(turns).toHaveLength(2);
+    expect(turns[0].content).toBe("Before fork");
+    expect(turns.find((t: { content: unknown }) => t.content === "After fork on source")).toBeUndefined();
+  });
+
+  it("should return empty history for forked agent when source has no turns", async () => {
+    await setup();
+
+    const sourceAgentId = "agent-empty-src" as AgentId;
+    const sourceSessionId = "session-empty-src";
+    const forkedAgentId = "agent-empty-fork" as AgentId;
+    const forkedSessionId = "session-empty-fork";
+
+    // Source agent exists but has no conversation turns
+    registerAgent(sourceAgentId, sourceSessionId);
+    registerForkedAgent(forkedAgentId, forkedSessionId, sourceAgentId);
+
+    const streamId = "fork-empty-stream";
+    await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "initialize", {
+        protocolVersion: 1,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      }),
+    );
+
+    const historyResult = await handler.processRequest(
+      forkedAgentId,
+      envelope(streamId, "_macro/getHistory", { agentId: forkedAgentId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: unknown[] }).turns;
+    expect(turns).toEqual([]);
+  });
+
+  it("should not affect non-forked agent history queries", async () => {
+    await setup();
+
+    const agentId = "agent-normal" as AgentId;
+    const sessionId = "session-normal";
+
+    registerAgent(agentId, sessionId);
+    recordTurn(agentId, sessionId, "user", "Normal question");
+    recordTurn(agentId, sessionId, "assistant", { parts: [{ type: "text", text: "Normal reply" }] });
+
+    const streamId = "normal-history-stream";
+    await handler.processRequest(
+      agentId,
+      envelope(streamId, "initialize", {
+        protocolVersion: 1,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      }),
+    );
+
+    const historyResult = await handler.processRequest(
+      agentId,
+      envelope(streamId, "_macro/getHistory", { agentId }),
+    );
+
+    const turns = (historyResult.acp.result as { turns: { role: string; content: unknown }[] }).turns;
+    expect(turns).toHaveLength(2);
+    expect(turns[0].content).toBe("Normal question");
+  });
+
   it("should include both plan and cwd together in getHistory response", async () => {
     await setup([
       {
