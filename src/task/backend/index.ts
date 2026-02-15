@@ -4,7 +4,6 @@
  * Exports task backend interface types and implementations.
  *
  * @module task/backend
- * @see s-8472 Pluggable Task Backend Integration with Sudocode
  */
 
 // =============================================================================
@@ -35,18 +34,14 @@ export type {
 
   // Tool provider
   MCPToolDefinition,
-  TaskToolMode,
   TaskToolProvider,
 
   // Configuration
   InMemoryBackendConfig,
-  ExecutionTrackingConfig,
-  ExecutionFilter,
-  SudocodeBackendConfig,
+  OpenTasksBackendConfig,
   TaskBackendConfig,
   TaskConfig,
 } from "./types.js";
-
 
 // Re-export base types for convenience
 export type {
@@ -67,55 +62,52 @@ export {
 } from "./memory.js";
 
 export {
-  InMemoryTaskToolProvider,
-  createTaskToolProvider,
-} from "./tool-provider.js";
+  UnifiedTaskToolProvider,
+  createUnifiedToolProvider,
+} from "./unified-tool-provider.js";
 
-export type { TaskToolContext, GetToolContext } from "./tool-provider.js";
+export type { ToolContext, GetToolContext } from "./unified-tool-provider.js";
 
 // =============================================================================
-// Sudocode Backend (re-export)
+// OpenTasks Backend (re-export)
 // =============================================================================
 
 export {
-  SudocodeTaskBackend,
-  SudocodeTaskBackendError,
-  createSudocodeTaskBackend,
-  createSudocodeClient,
-  SudocodeTaskToolProvider,
-  createSudocodeTaskToolProvider,
-} from "./sudocode/index.js";
+  OpenTasksTaskBackend,
+  OpenTasksBackendError,
+  createOpenTasksTaskBackend,
+  IPCOpenTasksClient,
+  OpenTasksClientError,
+  createOpenTasksClient,
+} from "./opentasks/index.js";
 
 export type {
-  SudocodeClient,
-  SudocodeClientConfig,
-  SudocodeClientMode,
-  SudocodeToolContext,
-  GetSudocodeToolContext,
-} from "./sudocode/index.js";
+  OpenTasksClient,
+  OpenTasksClientConfig,
+  OpenTasksIssue,
+  OpenTasksEdge,
+  OpenTasksNodeSummary,
+} from "./opentasks/index.js";
 
 // =============================================================================
 // Backend Factory
 // =============================================================================
 
 import type { EventStore } from "../../store/event-store.js";
-import type { TaskBackend, TaskConfig, TaskBackendConfig, TaskToolMode, TaskToolProvider } from "./types.js";
-import { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG } from "./types.js";
+import type { TaskBackend, TaskConfig, TaskBackendConfig } from "./types.js";
+import type { OpenTasksClient } from "./opentasks/client.js";
+import { DEFAULT_TASK_CONFIG, DEFAULT_OPENTASKS_CONFIG } from "./types.js";
 import { InMemoryTaskBackend } from "./memory.js";
-import { InMemoryTaskToolProvider } from "./tool-provider.js";
 
 /**
- * Result of creating a task backend with its tool provider
+ * Result of creating a task backend
  */
 export interface TaskBackendResult {
   /** The task backend instance */
   backend: TaskBackend;
 
-  /** The tool provider for this backend (if any) */
-  toolProvider?: TaskToolProvider;
-
-  /** The effective tool mode */
-  toolMode: TaskToolMode;
+  /** OpenTasks client (if opentasks backend is used) */
+  openTasksClient?: OpenTasksClient;
 }
 
 /**
@@ -123,25 +115,19 @@ export interface TaskBackendResult {
  *
  * @param config - Task configuration
  * @param eventStore - Event store for state management
- * @returns Backend result with backend instance and tool provider
+ * @returns Backend result with backend instance and optional OpenTasks client
  *
  * @example
  * ```typescript
  * // Create in-memory backend (default)
- * const { backend, toolProvider } = await createTaskBackend(
+ * const { backend } = await createTaskBackend(
  *   { backend: { type: 'memory' } },
  *   eventStore
  * );
  *
- * // Create sudocode backend
- * const { backend, toolProvider } = await createTaskBackend(
- *   {
- *     backend: {
- *       type: 'sudocode',
- *       projectPath: '/path/to/project',
- *     },
- *     toolMode: 'native',
- *   },
+ * // Create opentasks backend
+ * const { backend, openTasksClient } = await createTaskBackend(
+ *   { backend: { type: 'opentasks' } },
  *   eventStore
  * );
  * ```
@@ -150,111 +136,73 @@ export async function createTaskBackend(
   config: TaskConfig,
   eventStore: EventStore
 ): Promise<TaskBackendResult> {
-  const { backend: backendConfig, toolMode = "auto" } = config;
+  const { backend: backendConfig } = config;
 
   if (backendConfig.type === "memory") {
     const backend = new InMemoryTaskBackend(eventStore);
-    const effectiveMode = toolMode === "auto" ? "abstract" : toolMode;
-
-    // For in-memory backend, we use the abstract tool provider
-    // Note: Tool provider is created separately in MCP server with context
-    return {
-      backend,
-      toolMode: effectiveMode,
-    };
+    return { backend };
   }
 
-  if (backendConfig.type === "sudocode") {
-    // Dynamic import to avoid loading sudocode dependencies if not needed
-    const { createSudocodeClient } = await import("./sudocode/client.js");
-    const { SudocodeTaskBackend } = await import("./sudocode/backend.js");
-    const { SudocodeTaskToolProvider } = await import("./sudocode/tools.js");
+  if (backendConfig.type === "opentasks") {
+    // Dynamic import to avoid loading opentasks dependencies if not needed
+    const { createOpenTasksClient } = await import("./opentasks/client.js");
+    const { OpenTasksTaskBackend } = await import("./opentasks/backend.js");
 
     // Merge with defaults
-    const sudocodeConfig = {
-      ...DEFAULT_SUDOCODE_CONFIG,
+    const openTasksConfig = {
+      ...DEFAULT_OPENTASKS_CONFIG,
       ...backendConfig,
     };
 
-    // Create sudocode client
-    const client = await createSudocodeClient({
-      mode: "auto",
-      projectPath: sudocodeConfig.projectPath,
+    // Create OpenTasks client
+    const openTasksClient = await createOpenTasksClient({
+      socketPath: openTasksConfig.socketPath,
     });
 
     // Create backend
-    const backend = new SudocodeTaskBackend(eventStore, client, sudocodeConfig);
+    const backend = new OpenTasksTaskBackend(eventStore, openTasksClient, {
+      socketPath: openTasksConfig.socketPath,
+      syncStatus: openTasksConfig.syncStatus,
+      sourceLabel: openTasksConfig.sourceLabel,
+    });
 
-    // Determine effective tool mode
-    // Sudocode uses 'mapped' internally but we expose it as 'abstract' in TaskToolMode
-    const backendToolMode = sudocodeConfig.toolMode ?? "mapped";
-
-    // Map sudocode tool modes to TaskToolMode
-    const mapSudocodeMode = (mode: "native" | "mapped" | "both"): TaskToolMode => {
-      if (mode === "mapped") return "abstract";
-      return mode; // 'native' and 'both' are same in both systems
-    };
-
-    // Determine the effective TaskToolMode
-    let effectiveMode: TaskToolMode;
-    if (toolMode === "auto") {
-      effectiveMode = mapSudocodeMode(backendToolMode);
-    } else if (toolMode === "abstract" || toolMode === "native" || toolMode === "both") {
-      effectiveMode = toolMode;
-    } else {
-      // 'auto' falls back to backend default
-      effectiveMode = mapSudocodeMode(backendToolMode);
-    }
-
-    return {
-      backend,
-      toolMode: effectiveMode,
-    };
+    return { backend, openTasksClient };
   }
 
-  throw new Error(`Unknown backend type: ${(backendConfig as TaskBackendConfig).type}`);
+  throw new Error(
+    `Unknown backend type: ${(backendConfig as TaskBackendConfig).type}`
+  );
 }
 
 /**
  * Load task configuration from environment variables
  *
  * Environment variables:
- * - MACRO_TASK_BACKEND: 'memory' | 'sudocode' (default: 'memory')
- * - MACRO_TASK_TOOL_MODE: 'abstract' | 'native' | 'both' | 'auto' (default: 'auto')
- * - SUDOCODE_PROJECT_PATH: Path to sudocode project (default: cwd)
- * - SUDOCODE_TOOL_MODE: 'native' | 'mapped' | 'both' (default: 'mapped')
+ * - MACRO_TASK_BACKEND: 'memory' | 'opentasks' (default: 'memory')
+ * - OPENTASKS_SOCKET_PATH: Path to OpenTasks daemon socket (auto-discovered if not set)
  *
  * @returns Task configuration
  */
 export function loadTaskConfigFromEnv(): TaskConfig {
   const backendType = process.env.MACRO_TASK_BACKEND ?? "memory";
-  const toolMode = (process.env.MACRO_TASK_TOOL_MODE ?? "auto") as TaskToolMode;
 
-  if (backendType === "sudocode") {
-    const projectPath = process.env.SUDOCODE_PROJECT_PATH ?? process.cwd();
-    const sudocodeToolMode = process.env.SUDOCODE_TOOL_MODE as
-      | "native"
-      | "mapped"
-      | "both"
-      | undefined;
+  if (backendType === "opentasks") {
+    const socketPath = process.env.OPENTASKS_SOCKET_PATH;
 
     return {
       backend: {
-        type: "sudocode",
-        projectPath,
-        toolMode: sudocodeToolMode ?? "mapped",
+        type: "opentasks",
+        socketPath,
       },
-      toolMode,
     };
   }
 
   return {
     backend: { type: "memory" },
-    toolMode,
   };
 }
 
 /**
  * Default task configuration (in-memory backend)
  */
-export { DEFAULT_TASK_CONFIG, DEFAULT_SUDOCODE_CONFIG };
+export { DEFAULT_TASK_CONFIG, DEFAULT_OPENTASKS_CONFIG };

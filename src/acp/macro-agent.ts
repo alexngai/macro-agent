@@ -1400,7 +1400,7 @@ export class MacroAgent implements Agent {
 
       case "permission_request": {
         // Handle permission_request specially - ACP SDK doesn't recognize it as a session update
-        // We need to call requestPermission on the connection to forward to sudocode
+        // We need to call requestPermission on the connection to forward to the client
 
         // Extract permission request data
         const permReq = sessionUpdate as {
@@ -1431,8 +1431,8 @@ export class MacroAgent implements Agent {
           return;
         }
 
-        // Forward to sudocode via requestPermission RPC
-        // This will trigger sudocode's WebSocketClientHandler which will show the prompt
+        // Forward via requestPermission RPC
+        // This will trigger the client's handler which will show the prompt
         try {
           const response = await this.connection.requestPermission({
             sessionId: acpSessionId,

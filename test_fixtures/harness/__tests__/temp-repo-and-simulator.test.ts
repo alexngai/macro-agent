@@ -111,39 +111,6 @@ describe("TempRepoFactory and AgentSimulator", () => {
       expect(tables.length).toBeGreaterThan(0);
     });
 
-    it("should create repo with sudocode schema and fixtures", async () => {
-      repo = await createTempRepo({
-        withDataplane: true,
-        withSudocode: true,
-        sudocodeSpecs: [
-          { id: "s-test", title: "Test Spec", description: "Test description" },
-        ],
-        sudocodeIssues: [
-          { id: "i-test", title: "Test Issue", implements: "s-test" },
-        ],
-      });
-
-      // Verify spec was created
-      const spec = repo.db!
-        .prepare("SELECT * FROM sudocode_specs WHERE id = ?")
-        .get("s-test") as { title: string } | undefined;
-      expect(spec).toBeDefined();
-      expect(spec!.title).toBe("Test Spec");
-
-      // Verify issue was created
-      const issue = repo.db!
-        .prepare("SELECT * FROM sudocode_issues WHERE id = ?")
-        .get("i-test") as { title: string } | undefined;
-      expect(issue).toBeDefined();
-      expect(issue!.title).toBe("Test Issue");
-
-      // Verify link was created
-      const link = repo.db!
-        .prepare("SELECT * FROM sudocode_links WHERE from_id = ? AND to_id = ?")
-        .get("i-test", "s-test") as { type: string } | undefined;
-      expect(link).toBeDefined();
-      expect(link!.type).toBe("implements");
-    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────

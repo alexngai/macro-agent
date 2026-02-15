@@ -1,7 +1,5 @@
 /**
  * Types for TempRepoFactory
- *
- * @see s-1zcx Multi-Agent Orchestration Testing Strategy
  */
 
 import type Database from "better-sqlite3";
@@ -24,15 +22,6 @@ export interface TempRepoOptions {
 
   /** Initialize dataplane schema (creates SQLite database) */
   withDataplane?: boolean;
-
-  /** Initialize sudocode (requires withDataplane) */
-  withSudocode?: boolean;
-
-  /** Sudocode specs to create */
-  sudocodeSpecs?: PartialSpec[];
-
-  /** Sudocode issues to create */
-  sudocodeIssues?: PartialIssue[];
 
   /** Additional branches to create */
   branches?: BranchConfig[];

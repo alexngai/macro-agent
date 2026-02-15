@@ -59,6 +59,7 @@
     "git-cascade": "0.0.1",
     "js-yaml": "^4.1.1",
     "nanoid": "^5.0.0",
+    "opentasks": "^0.0.3",
     "tinybase": "^5.0.0",
     "ulid": "^3.0.2",
     "unique-names-generator": "^4.7.1",

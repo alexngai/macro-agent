@@ -107,11 +107,11 @@ Common issues and solutions when using macro-agent.
    - Check for A blocks B, B blocks A situations
    - Use `getBlocking()` to trace dependency chains
 
-3. **Stale blocker state (Sudocode)**
-   - Sudocode issues may be closed but task not updated
+3. **Stale blocker state**
+   - External issues may be closed but task not updated
    - Refresh task state: `await backend.get(taskId)`
 
-### Task-issue binding issues (Sudocode)
+### Task-issue binding issues (OpenTasks)
 
 **Symptoms:**
 - Tasks created without `external_id`
@@ -129,21 +129,20 @@ Common issues and solutions when using macro-agent.
    });
    ```
 
-2. **Sync policy configuration**
+2. **Backend configuration**
    ```typescript
-   // Check sync policy in backend config
+   // Check backend config
    const config = {
      backend: {
-       type: 'sudocode',
-       projectPath: '/path/to/project',
-       // Sync policy affects status propagation
+       type: 'opentasks',
+       socketPath: '/path/to/socket',
      },
    };
    ```
 
-3. **Sudocode connectivity**
-   - Check sudocode server is running
-   - Verify `SUDOCODE_PROJECT_PATH` is correct
+3. **OpenTasks connectivity**
+   - Check OpenTasks server is running
+   - Verify `OPENTASKS_SOCKET_PATH` is correct
 
 ## Workspace Issues
 
