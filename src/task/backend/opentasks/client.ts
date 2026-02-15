@@ -19,7 +19,7 @@
 export interface OpenTasksIssue {
   id: string;
   uuid: string;
-  type: "issue";
+  type: "task";
   title: string;
   content?: string;
   status: string;
@@ -443,7 +443,7 @@ export class IPCOpenTasksClient implements OpenTasksClient {
   async createIssue(input: CreateIssueInput): Promise<OpenTasksIssue> {
     await this.ensureConnected();
     return this.client.createNode({
-      type: "issue",
+      type: "task",
       title: input.title,
       content: input.content,
       status: input.status ?? "open",
@@ -459,7 +459,7 @@ export class IPCOpenTasksClient implements OpenTasksClient {
     await this.ensureConnected();
     try {
       const node = await this.client.getNode(id);
-      if (!node || (node as any).type !== "issue") return null;
+      if (!node || (node as any).type !== "task") return null;
       return node as OpenTasksIssue;
     } catch {
       return null;
@@ -490,7 +490,7 @@ export class IPCOpenTasksClient implements OpenTasksClient {
     await this.ensureConnected();
     const result = await this.client.query({
       nodes: {
-        type: "issue",
+        type: "task",
         status: filter?.status,
         assignee: filter?.assignee,
         tags: filter?.tags,
