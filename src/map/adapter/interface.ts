@@ -147,6 +147,8 @@ export interface AdapterLimits {
   maxMessageSize?: number;
   /** Request timeout in milliseconds */
   requestTimeoutMs?: number;
+  /** Maximum events stored in replay buffer (default: 10000) */
+  maxReplayBufferSize?: number;
 }
 
 /**

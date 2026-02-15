@@ -94,6 +94,18 @@ export {
   type EventStreamAdapterOptions,
 } from "./event-translator.js";
 
+// Event log (replay support)
+export {
+  EventLog,
+  underscoreToDot,
+  dotToUnderscore,
+  type EventLogConfig,
+  type LoggedEvent,
+  type EventLogQueryParams,
+  type EventLogFilter,
+  type EventLogQueryResult,
+} from "./event-log.js";
+
 // WebSocket integration
 export {
   createMAPWebSocketHandler,

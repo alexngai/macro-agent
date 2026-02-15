@@ -1657,6 +1657,7 @@ function applyTaskEvent(
         description: string;
         parent_task?: TaskId;
         inputs?: Record<string, unknown>;
+        tags?: string[];
         retryPolicy?: unknown;
       };
       store.setRow('tasks', taskId, {
@@ -1667,6 +1668,7 @@ function applyTaskEvent(
         parent_task: details.parent_task ?? '',
         subtasks: JSON.stringify([]),
         blockers: JSON.stringify([]),
+        tags: details.tags ? JSON.stringify(details.tags) : '',
         created_at: event.timestamp,
         started_at: 0,
         completed_at: 0,
@@ -1713,10 +1715,15 @@ function applyTaskEvent(
           break;
         }
       }
-      store.setPartialRow('tasks', taskId, {
+      const updates: Record<string, string | number | boolean> = {
         assigned_agent: '',
         agent_history: JSON.stringify(history),
-      });
+      };
+      // Reset to pending if task was only assigned (not yet started)
+      if (existing.status === 'assigned') {
+        updates.status = 'pending';
+      }
+      store.setPartialRow('tasks', taskId, updates);
       break;
     }
     case 'status_change': {
@@ -1880,6 +1887,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     outputs: row.outputs ? JSON.parse(row.outputs as string) : undefined,
     artifacts: row.artifacts ? JSON.parse(row.artifacts as string) : undefined,
     agent_history: row.agent_history ? JSON.parse(row.agent_history as string) : undefined,
+    tags: row.tags ? JSON.parse(row.tags as string) : undefined,
     retryPolicy: row.retry_policy ? JSON.parse(row.retry_policy as string) : undefined,
     retryState: row.retry_state ? JSON.parse(row.retry_state as string) : undefined,
   };

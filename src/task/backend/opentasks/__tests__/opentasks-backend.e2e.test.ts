@@ -638,6 +638,23 @@ describe("OpenTasksTaskBackend E2E", () => {
       expect(assigned[0].assigned_agent).toBe(WORKER_1);
     });
 
+    it("should filter by tags", async () => {
+      await backend.create({
+        description: "Frontend task",
+        created_by: TEST_AGENT,
+        tags: ["frontend"],
+      });
+      await backend.create({
+        description: "Backend task",
+        created_by: TEST_AGENT,
+        tags: ["backend"],
+      });
+
+      const frontendTasks = await backend.list({ tags: ["frontend"] });
+      expect(frontendTasks).toHaveLength(1);
+      expect(frontendTasks[0].description).toBe("Frontend task");
+    });
+
     it("should filter by created_by", async () => {
       await backend.create({
         description: "Creator 1 task",
@@ -872,7 +889,7 @@ describe("OpenTasksTaskBackend E2E", () => {
       expect(second).toBeNull();
     });
 
-    it("should unclaim a task and clear the assignment", async () => {
+    it("should unclaim a task and make it available again", async () => {
       await backend.create({
         description: "Unclaim test",
         created_by: TEST_AGENT,
@@ -883,6 +900,12 @@ describe("OpenTasksTaskBackend E2E", () => {
 
       const updated = await backend.get(claimed!.id);
       expect(updated!.assigned_agent).toBeUndefined();
+      expect(updated!.status).toBe("pending");
+
+      // Should be claimable again after unclaim resets to pending
+      const reClaimed = await backend.claim(WORKER_2);
+      expect(reClaimed).not.toBeNull();
+      expect(reClaimed!.assigned_agent).toBe(WORKER_2);
     });
 
     it("should throw when unclaiming a non-assigned task", async () => {
@@ -896,21 +919,23 @@ describe("OpenTasksTaskBackend E2E", () => {
       );
     });
 
-    it("should list claimable tasks with created_by filter", async () => {
+    it("should list claimable tasks with tag filter", async () => {
       await backend.create({
-        description: "Worker 1 created",
-        created_by: WORKER_1,
+        description: "Frontend work",
+        created_by: TEST_AGENT,
+        tags: ["frontend"],
       });
       await backend.create({
-        description: "Worker 2 created",
-        created_by: WORKER_2,
+        description: "Backend work",
+        created_by: TEST_AGENT,
+        tags: ["backend"],
       });
 
-      const worker1Claimable = await backend.listClaimable({
-        created_by: WORKER_1,
+      const frontendClaimable = await backend.listClaimable({
+        tags: ["frontend"],
       });
-      expect(worker1Claimable).toHaveLength(1);
-      expect(worker1Claimable[0].description).toBe("Worker 1 created");
+      expect(frontendClaimable).toHaveLength(1);
+      expect(frontendClaimable[0].description).toBe("Frontend work");
     });
 
     it("should list claimable tasks with rootTasksOnly filter", async () => {

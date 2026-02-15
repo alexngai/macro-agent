@@ -93,6 +93,7 @@ import type {
 } from "../federation/types.js";
 import { ACPOverMAPHandler, type ACPEnvelope } from "./acp-over-map.js";
 import { createMailHandlers } from "./mail-handler-adapter.js";
+import { EventLog, dotToUnderscore } from "./event-log.js";
 
 // =============================================================================
 // Connection Session
@@ -228,6 +229,8 @@ export class MAPAdapterImpl implements MAPAdapter {
   /** Sequence numbers per subscription for proper event ordering */
   private readonly subscriptionSequences: Map<SubscriptionId, number> =
     new Map();
+  /** In-memory event log for map/replay support */
+  private readonly eventLog: EventLog;
 
   private running = false;
 
@@ -266,6 +269,11 @@ export class MAPAdapterImpl implements MAPAdapter {
       limits: config.limits,
       getAncestors: services.getAncestors,
       getDescendants: services.getDescendants,
+    });
+
+    // Initialize event log for replay support
+    this.eventLog = new EventLog({
+      maxSize: config.limits?.maxReplayBufferSize ?? 10_000,
     });
 
     // Forward connection events
@@ -542,6 +550,17 @@ export class MAPAdapterImpl implements MAPAdapter {
   // ===========================================================================
 
   emitEvent(event: EventNotification): void {
+    // Log event for replay support
+    this.eventLog.append({
+      eventId: event.eventId,
+      timestamp: event.timestamp,
+      type: event.type,
+      data: event.data,
+      causedBy: event.causedBy,
+      agentId: event.agentId,
+      scopeId: event.scopeId,
+    });
+
     // Match event against subscriptions
     const { subscriptions: matchingSubs } = this.subscriptions.match(event);
 
@@ -703,6 +722,10 @@ export class MAPAdapterImpl implements MAPAdapter {
       "map/unsubscribe": async (params) =>
         this.handleUnsubscribe(participantId, params),
 
+      // Replay
+      "map/replay": async (params) =>
+        this.handleReplay(participantId, params),
+
       // Messaging
       "map/send": async (params, ctx) =>
         this.handleSend(participantId, params, ctx),
@@ -766,6 +789,7 @@ export class MAPAdapterImpl implements MAPAdapter {
       keyof ConnectedParticipant["capabilities"]
     > = {
       "map/subscribe": "canSubscribe",
+      "map/replay": "canSubscribe",
       "map/send": "canMessage",
       "map/agents/list": "canQuery",
       "map/agents/get": "canQuery",
@@ -1030,6 +1054,74 @@ export class MAPAdapterImpl implements MAPAdapter {
     }
     await this.removeSubscription(subscriptionId);
     return { success: true };
+  }
+
+  private async handleReplay(
+    _participantId: ParticipantId,
+    params: unknown,
+  ): Promise<{
+    events: Array<{
+      eventId: string;
+      timestamp: number;
+      causedBy?: string[];
+      event: { id: string; type: string; timestamp: number; data: unknown };
+    }>;
+    hasMore: boolean;
+  }> {
+    const {
+      afterEventId,
+      fromTimestamp,
+      toTimestamp,
+      filter,
+      limit,
+    } = (params ?? {}) as {
+      afterEventId?: string;
+      fromTimestamp?: number;
+      toTimestamp?: number;
+      filter?: {
+        eventTypes?: string[];
+        fromAgents?: string[];
+        agents?: string[];
+        scopes?: string[];
+      };
+      limit?: number;
+    };
+
+    // Translate SDK filter field names to internal format
+    // SDK uses 'fromAgents', macro-agent uses 'agents'
+    const internalFilter = filter
+      ? {
+          eventTypes: filter.eventTypes,
+          agents: (filter.fromAgents ?? filter.agents) as string[] | undefined,
+          scopes: filter.scopes,
+        }
+      : undefined;
+
+    const result = this.eventLog.query({
+      afterEventId,
+      fromTimestamp,
+      toTimestamp,
+      filter: internalFilter,
+      limit,
+    });
+
+    // Transform events to SDK response format
+    const events = result.events.map((e) => ({
+      eventId: e.eventId,
+      timestamp: e.timestamp,
+      ...(e.causedBy && { causedBy: e.causedBy }),
+      event: {
+        id: e.eventId,
+        type: dotToUnderscore(e.type),
+        timestamp: e.timestamp,
+        data: e.data,
+      },
+    }));
+
+    return {
+      events,
+      hasMore: result.hasMore,
+    };
   }
 
   private async handleSend(
