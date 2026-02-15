@@ -1,9 +1,7 @@
 /**
  * Fixtures Library Tests
  *
- * Tests for project fixtures, behavior fixtures, and sudocode fixtures.
- *
- * @see s-1zcx Multi-Agent Orchestration Testing Strategy
+ * Tests for project fixtures and behavior fixtures.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -29,12 +27,6 @@ import {
   SIMPLE_INTEGRATOR,
   SIMPLE_MONITOR,
   createWorker,
-  // Sudocode fixtures
-  SIMPLE_FEATURE_SPEC,
-  AUTH_SPEC,
-  AUTH_ISSUES,
-  createSpec,
-  createIssue,
 } from "../../fixtures/index.js";
 
 describe("Fixtures Library", () => {
@@ -97,23 +89,19 @@ describe("Fixtures Library", () => {
       expect(repo.readFile("index.ts")).toContain("version");
     });
 
-    it("should create project with specs", async () => {
+    it("should create project with dataplane", async () => {
       harness = await createTestHarness();
       const repo = await harness.createTempRepo(PROJECT_WITH_SPECS);
 
       expect(repo.db).toBeDefined();
 
-      // Verify specs were created
-      const specs = repo.db!
-        .prepare("SELECT * FROM sudocode_specs")
-        .all() as Array<{ id: string }>;
-      expect(specs.length).toBeGreaterThan(0);
-
-      // Verify issues were created
-      const issues = repo.db!
-        .prepare("SELECT * FROM sudocode_issues")
-        .all() as Array<{ id: string }>;
-      expect(issues.length).toBeGreaterThan(0);
+      // Verify dataplane tables exist
+      const tables = repo.db!
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dataplane_%'"
+        )
+        .all() as Array<{ name: string }>;
+      expect(tables.length).toBeGreaterThan(0);
     });
 
     it("should create custom TypeScript project options", async () => {
@@ -309,77 +297,6 @@ describe("Fixtures Library", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Sudocode Fixtures
-  // ─────────────────────────────────────────────────────────────────────────
-
-  describe("Sudocode Fixtures", () => {
-    let harness: TestHarness;
-
-    afterEach(async () => {
-      if (harness) {
-        await harness.cleanup();
-      }
-    });
-
-    it("should create project with predefined specs", async () => {
-      harness = await createTestHarness();
-      const repo = await harness.createTempRepo({
-        initialFiles: MINIMAL_PROJECT,
-        withDataplane: true,
-        withSudocode: true,
-        sudocodeSpecs: [SIMPLE_FEATURE_SPEC, AUTH_SPEC],
-      });
-
-      const specs = repo.db!
-        .prepare("SELECT * FROM sudocode_specs")
-        .all() as Array<{ id: string; title: string }>;
-
-      expect(specs.length).toBe(2);
-      expect(specs.some((s) => s.title === "Simple Feature")).toBe(true);
-      expect(specs.some((s) => s.title === "User Authentication")).toBe(true);
-    });
-
-    it("should create project with predefined issues", async () => {
-      harness = await createTestHarness();
-      const repo = await harness.createTempRepo({
-        initialFiles: MINIMAL_PROJECT,
-        withDataplane: true,
-        withSudocode: true,
-        sudocodeSpecs: [AUTH_SPEC],
-        sudocodeIssues: AUTH_ISSUES,
-      });
-
-      const issues = repo.db!
-        .prepare("SELECT * FROM sudocode_issues")
-        .all() as Array<{ id: string; title: string }>;
-
-      expect(issues.length).toBe(4); // 4 auth issues
-    });
-
-    it("should create custom spec", () => {
-      const spec = createSpec("s-custom", "Custom Spec", "Custom description", {
-        priority: 1,
-        tags: ["custom"],
-      });
-
-      expect(spec.id).toBe("s-custom");
-      expect(spec.title).toBe("Custom Spec");
-      expect(spec.priority).toBe(1);
-    });
-
-    it("should create custom issue", () => {
-      const issue = createIssue("i-custom", "Custom Issue", {
-        implements: "s-custom",
-        status: "in_progress",
-      });
-
-      expect(issue.id).toBe("i-custom");
-      expect(issue.title).toBe("Custom Issue");
-      expect(issue.implements).toBe("s-custom");
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
   // Integration Tests
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -395,19 +312,10 @@ describe("Fixtures Library", () => {
     it("should run complete workflow with fixtures", async () => {
       harness = await createTestHarness();
 
-      // Create project with specs
+      // Create project
       await harness.createTempRepo({
         initialFiles: TYPESCRIPT_PROJECT,
         withDataplane: true,
-        withSudocode: true,
-        sudocodeSpecs: [SIMPLE_FEATURE_SPEC],
-        sudocodeIssues: [
-          {
-            id: "i-impl",
-            title: "Implement feature",
-            implements: "s-simple",
-          },
-        ],
       });
 
       // Spawn coordinator that spawns worker

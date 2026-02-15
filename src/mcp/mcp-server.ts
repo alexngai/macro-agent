@@ -224,16 +224,6 @@ const StopAgentSchema = {
     .describe("Reason for stopping"),
 };
 
-const CreateTaskSchema = {
-  description: z.string().describe("Task description"),
-  parent_task: z.string().optional().describe("Parent task ID for subtasks"),
-  inputs: z.record(z.string(), z.unknown()).optional().describe("Initial inputs for the task"),
-};
-
-const GetTaskSchema = {
-  task_id: z.string().describe("Task ID to look up"),
-};
-
 // ─────────────────────────────────────────────────────────────────
 // Peer Communication Schemas
 // ─────────────────────────────────────────────────────────────────
@@ -847,85 +837,6 @@ export function createMCPServer(
         },
       ],
     };
-    });
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // Tool: create_task (requires task.create capability)
-  // ─────────────────────────────────────────────────────────────────
-
-  if (shouldRegisterTool("create_task")) {
-    server.registerTool("create_task", {
-      description: "Create a new task",
-      inputSchema: CreateTaskSchema,
-    }, async (args) => {
-      try {
-        const task = taskManager.create({
-          description: args.description,
-          created_by: context.agent_id,
-          parent_task: args.parent_task,
-          inputs: args.inputs,
-        });
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                task_id: task.id,
-              }),
-            },
-          ],
-        };
-      } catch (error) {
-        throw new MCPToolError(
-          `Failed to create task: ${error}`,
-          "INVALID_INPUT"
-        );
-      }
-    });
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // Tool: get_task (always allowed - observability)
-  // ─────────────────────────────────────────────────────────────────
-
-  if (shouldRegisterTool("get_task")) {
-    server.registerTool("get_task", {
-      description: "Get details of a specific task",
-      inputSchema: GetTaskSchema,
-    }, async (args) => {
-      const task = taskManager.get(args.task_id);
-      if (!task) {
-        throw new MCPToolError(
-          `Task not found: ${args.task_id}`,
-          "TASK_NOT_FOUND"
-        );
-      }
-
-      // Use completed_at, started_at, or created_at as last update
-      const updatedAt = task.completed_at ?? task.started_at ?? task.created_at;
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              id: task.id,
-              description: task.description,
-              status: task.status,
-              assigned_agent: task.assigned_agent,
-              parent_task: task.parent_task,
-              subtasks: task.subtasks ?? [],
-              inputs: task.inputs,
-              outputs: task.outputs,
-              artifacts: task.artifacts,
-              created_at: task.created_at,
-              updated_at: updatedAt,
-            }),
-          },
-        ],
-      };
     });
   }
 

@@ -5,7 +5,6 @@
  * internal task system to be backed by external task management systems.
  *
  * @module task/backend
- * @see s-8472 Pluggable Task Backend Integration with Sudocode
  */
 
 import type {
@@ -33,7 +32,7 @@ export interface ExtendedTask extends Task {
   /** True if blocked by dependencies (computed, not stored) */
   isBlocked?: boolean;
 
-  /** Binding to external system (e.g., sudocode issue ID "i-xxxx") */
+  /** Binding to external system (e.g., OpenTasks issue ID "i-xxxx") */
   external_id?: string;
 }
 
@@ -54,7 +53,7 @@ export interface CreateTaskOptions {
   /** Optional parent task for subtask hierarchy */
   parent_task?: TaskId;
 
-  /** Optional binding to external system (e.g., sudocode issue ID) */
+  /** Optional binding to external system (e.g., OpenTasks issue ID) */
   external_id?: string;
 
   /** Optional tags for classification and filtering (pull model) */
@@ -243,8 +242,7 @@ export type Unsubscribe = () => void;
  *
  * Abstraction over task storage allowing different implementations:
  * - InMemoryTaskBackend - Current behavior (default)
- * - SudocodeTaskBackend - Backed by sudocode issues
- * - Future: LinearTaskBackend, JiraTaskBackend, etc.
+ * - OpenTasksTaskBackend - Backed by OpenTasks graph
  */
 export interface TaskBackend {
   // ─── Lifecycle ───────────────────────────────────────────────
@@ -361,15 +359,6 @@ export interface MCPToolDefinition {
 }
 
 /**
- * Task tool mode
- */
-export type TaskToolMode =
-  | "abstract" // Always use generic task tools (create_task, etc.)
-  | "native" // Use backend-native tools (upsert_issue for sudocode)
-  | "both" // Expose both tool sets
-  | "auto"; // Backend decides (default)
-
-/**
  * Task Tool Provider Interface
  *
  * Allows backends to define which MCP tools are exposed for task operations.
@@ -394,54 +383,6 @@ export interface InMemoryBackendConfig {
 }
 
 /**
- * Execution tracking configuration
- */
-export type ExecutionTrackingConfig =
-  | { mode: "none" } // No execution records
-  | { mode: "bound-only" } // Only tasks with external binding (default)
-  | { mode: "all" } // All agent runs
-  | { mode: "filter"; filter: ExecutionFilter }; // Custom filter
-
-/**
- * Execution filter options
- */
-export interface ExecutionFilter {
-  /** Only create executions for these agent roles */
-  roles?: string[];
-
-  /** Only when task has external binding */
-  requireExternalBinding?: boolean;
-
-  /** Exclude coordination-only agents (no code changes) */
-  excludeCoordinationOnly?: boolean;
-}
-
-/**
- * Sudocode backend configuration
- */
-export interface SudocodeBackendConfig {
-  type: "sudocode";
-
-  /** Path to sudocode project root (contains .sudocode/) */
-  projectPath: string;
-
-  /** ID strategy (default: 'dual') */
-  idStrategy?: "dual";
-
-  /** Sync mode for event subscriptions */
-  syncMode?: "realtime" | "batch";
-
-  /** Execution tracking configuration */
-  executionTracking?: ExecutionTrackingConfig;
-
-  /** Auto-link tasks to specs when created from spec context */
-  autoLinkSpecs?: boolean;
-
-  /** Tool mode for this backend (overrides global if set) */
-  toolMode?: "native" | "mapped" | "both";
-}
-
-/**
  * OpenTasks backend configuration
  */
 export interface OpenTasksBackendConfig {
@@ -455,18 +396,12 @@ export interface OpenTasksBackendConfig {
 
   /** Source label for issues created by this backend (default: "macro-agent") */
   sourceLabel?: string;
-
-  /** Tool mode for this backend (overrides global if set) */
-  toolMode?: "native" | "mapped" | "both";
 }
 
 /**
  * Task backend configuration
  */
-export type TaskBackendConfig =
-  | InMemoryBackendConfig
-  | SudocodeBackendConfig
-  | OpenTasksBackendConfig;
+export type TaskBackendConfig = InMemoryBackendConfig | OpenTasksBackendConfig;
 
 /**
  * Macro-agent task configuration
@@ -474,9 +409,6 @@ export type TaskBackendConfig =
 export interface TaskConfig {
   /** Task backend configuration */
   backend: TaskBackendConfig;
-
-  /** Task tool mode (default: 'auto') */
-  toolMode?: TaskToolMode;
 }
 
 // =============================================================================
@@ -488,19 +420,6 @@ export interface TaskConfig {
  */
 export const DEFAULT_TASK_CONFIG: TaskConfig = {
   backend: { type: "memory" },
-  toolMode: "auto",
-};
-
-/**
- * Default sudocode backend configuration
- */
-export const DEFAULT_SUDOCODE_CONFIG: Omit<SudocodeBackendConfig, "type"> = {
-  projectPath: process.cwd(),
-  idStrategy: "dual",
-  syncMode: "realtime",
-  executionTracking: { mode: "bound-only" },
-  autoLinkSpecs: true,
-  toolMode: "mapped",
 };
 
 /**
@@ -509,5 +428,4 @@ export const DEFAULT_SUDOCODE_CONFIG: Omit<SudocodeBackendConfig, "type"> = {
 export const DEFAULT_OPENTASKS_CONFIG: Omit<OpenTasksBackendConfig, "type"> = {
   syncStatus: true,
   sourceLabel: "macro-agent",
-  toolMode: "native",
 };

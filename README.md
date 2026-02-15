@@ -19,28 +19,7 @@ A multi-agent orchestration system for spawning and managing hierarchical Claude
 - **Context Injection** - Push context into running agents without waiting for message checks
 - **Session Continuations** - Auto-resume long-running agents across process restarts
 - **Observability** - Throughput, utilization, and error metrics via REST API
-- **Sudocode Integration** - Optional issue tracking with dependency management
-
-## Sudocode Integration
-
-macro-agent can integrate with [sudocode](https://github.com/sudocode-ai/sudocode) for external issue tracking:
-
-```bash
-# Enable sudocode backend
-export MACRO_TASK_BACKEND=sudocode
-export SUDOCODE_PROJECT_PATH=/path/to/project
-
-# Start macro-agent server (full mode with ACP + MAP + REST)
-npx multiagent
-```
-
-With sudocode enabled:
-- Tasks are bound to sudocode issues via `external_id`
-- Blocking relationships come from sudocode's issue links
-- `listReady()` returns only tasks with no incomplete blockers
-- Task status can sync with issue status
-
-See [docs/sudocode-integration.md](docs/sudocode-integration.md) for full documentation.
+- **OpenTasks Integration** - Optional issue tracking with dependency management
 
 ## Team Templates
 
@@ -295,7 +274,11 @@ Fallback chain: `inject()` → `interruptWith()` → high-priority message
 | `stop_agent` | Terminate an agent |
 | `create_task` | Create a new task |
 | `get_task` | Get task details |
-| `list_ready_tasks` | List tasks with no blockers |
+| `list_tasks` | List tasks with optional filters |
+| `assign_task` | Assign task to agent |
+| `task` | Upsert task (OpenTasks only) |
+| `link` | Link tasks (OpenTasks only) |
+| `annotate` | Add annotations (OpenTasks only) |
 | `claim_task` | Claim next available task (pull mode) |
 | `unclaim_task` | Return claimed task to pool (pull mode) |
 | `list_claimable_tasks` | List claimable tasks (pull mode) |
@@ -454,7 +437,6 @@ RUN_E2E_TESTS=true ANTHROPIC_API_KEY=xxx npm run test:e2e
 - [Configuration Reference](docs/configuration.md) - Environment variables and config options
 - [Team Templates](docs/team-templates.md) - Team template format and examples
 - [Team Schema Reference](docs/teams.md) - Full YAML schema reference
-- [Sudocode Integration](docs/sudocode-integration.md) - External issue tracking
 - [Troubleshooting Guide](docs/troubleshooting.md) - Common issues and solutions
 
 ## License

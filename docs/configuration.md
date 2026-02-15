@@ -8,15 +8,8 @@ Complete reference for configuring macro-agent.
 
 | Variable | Description | Values | Default |
 |----------|-------------|--------|---------|
-| `MACRO_TASK_BACKEND` | Task backend type | `memory`, `sudocode` | `memory` |
-| `MACRO_TASK_TOOL_MODE` | MCP tool exposure mode | `abstract`, `native`, `both`, `auto` | `auto` |
-
-### Sudocode Integration
-
-| Variable | Description | Values | Default |
-|----------|-------------|--------|---------|
-| `SUDOCODE_PROJECT_PATH` | Path to sudocode project root | Directory path | `cwd` |
-| `SUDOCODE_TOOL_MODE` | Sudocode-specific tool mode | `native`, `mapped`, `both` | `mapped` |
+| `MACRO_TASK_BACKEND` | Task backend type | `memory`, `opentasks` | `memory` |
+| `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | Socket path | — |
 
 ### Agent Subprocess
 
@@ -54,10 +47,9 @@ const config = {
   backend: {
     type: 'memory',
   },
-  toolMode: 'abstract',
 };
 
-const { backend, toolProvider, toolMode } = await createTaskBackend(config, eventStore);
+const { backend, openTasksClient } = await createTaskBackend(config, eventStore);
 ```
 
 ### InMemory Backend Config
@@ -68,40 +60,15 @@ interface InMemoryBackendConfig {
 }
 ```
 
-### Sudocode Backend Config
+### OpenTasks Backend Config
 
 ```typescript
-interface SudocodeBackendConfig {
-  type: 'sudocode';
+interface OpenTasksBackendConfig {
+  type: 'opentasks';
 
-  /** Path to sudocode project root (contains .sudocode/) */
-  projectPath: string;
-
-  /** ID strategy (default: 'dual') */
-  idStrategy?: 'dual';
-
-  /** Sync mode for event subscriptions */
-  syncMode?: 'realtime' | 'batch';
-
-  /** Execution tracking configuration */
-  executionTracking?: ExecutionTrackingConfig;
-
-  /** Auto-link tasks to specs when created from spec context */
-  autoLinkSpecs?: boolean;
-
-  /** Tool mode for this backend */
-  toolMode?: 'native' | 'mapped' | 'both';
+  /** Path to OpenTasks socket */
+  socketPath?: string;
 }
-```
-
-### Execution Tracking Options
-
-```typescript
-type ExecutionTrackingConfig =
-  | { mode: 'none' }        // No execution records
-  | { mode: 'bound-only' }  // Only tasks with external binding (default)
-  | { mode: 'all' }         // All agent runs
-  | { mode: 'filter'; filter: ExecutionFilter };
 ```
 
 ## Workspace Configuration
@@ -262,24 +229,22 @@ const messageRouter = createMessageRouter(eventStore, {
 | `normal` | Standard priority (default) |
 | `low` | Background messages |
 
-## Tool Mode Reference
+## Task Tool Provider
 
-### TaskToolMode
+The unified task tool provider exposes 7 MCP tools to agents:
 
-| Mode | Description |
-|------|-------------|
-| `abstract` | Generic task tools (`create_task`, `complete_task`, etc.) |
-| `native` | Backend-specific tools (sudocode: `upsert_issue`, `link`, etc.) |
-| `both` | Both abstract and native tools available |
-| `auto` | Automatic selection based on backend |
-
-### Sudocode Tool Mode
-
-| Mode | Description |
-|------|-------------|
-| `mapped` | Map to abstract task tools (default) |
-| `native` | Expose sudocode's native tools |
-| `both` | Expose both tool sets |
+| Tool | Always Available | OpenTasks Only | Pull Mode Only |
+|------|------------------|----------------|----------------|
+| `create_task` | ✓ | | |
+| `get_task` | ✓ | | |
+| `list_tasks` | ✓ | | |
+| `assign_task` | ✓ | | |
+| `task` (upsert) | | ✓ | |
+| `link` | | ✓ | |
+| `annotate` | | ✓ | |
+| `claim_task` | | | ✓ |
+| `unclaim_task` | | | ✓ |
+| `list_claimable_tasks` | | | ✓ |
 
 ## Example Configurations
 
@@ -290,12 +255,11 @@ const messageRouter = createMessageRouter(eventStore, {
 npx multiagent
 ```
 
-### Production with Sudocode
+### Production with OpenTasks
 
 ```bash
-export MACRO_TASK_BACKEND=sudocode
-export SUDOCODE_PROJECT_PATH=/path/to/project
-export MACRO_TASK_TOOL_MODE=abstract
+export MACRO_TASK_BACKEND=opentasks
+export OPENTASKS_SOCKET_PATH=/path/to/socket
 
 npx multiagent --port 3001
 ```
@@ -338,7 +302,7 @@ const eventStore = await createEventStore({ dbPath: './data/events.db' });
 // Initialize services
 const messageRouter = createMessageRouter(eventStore);
 const taskConfig = loadTaskConfigFromEnv();
-const { backend: taskBackend, toolMode } = await createTaskBackend(taskConfig, eventStore);
+const { backend: taskBackend, openTasksClient } = await createTaskBackend(taskConfig, eventStore);
 
 // Initialize agent manager
 const agentManager = createAgentManager(eventStore, messageRouter, {

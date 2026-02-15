@@ -10,7 +10,7 @@ macro-agent enables coordinated work across multiple AI agents with:
 - **Pluggable integration strategies** (queue, trunk, optimistic)
 - **Workspace isolation** via git worktrees
 - **Merge queue** for serialized integration
-- **Task backend** abstraction (memory or sudocode) with push and pull modes
+- **Task backend** abstraction (memory or opentasks) with push and pull modes
 - **In-flight steering** via context injection
 - **Signal filtering and emission enforcement** for communication topology
 - **Session continuations** for long-running daemon agents
@@ -46,7 +46,7 @@ macro-agent enables coordinated work across multiple AI agents with:
 │    Roles     │   │   Workspace  │   │    Tasks     │
 │  Built-in +  │   │  Bare Repo   │   │  Backend     │
 │  Team-defined│   │  Worktrees   │   │  (memory/    │
-│  (via YAML)  │   │  Strategies  │   │   sudocode)  │
+│  (via YAML)  │   │  Strategies  │   │  opentasks)  │
 │              │   │  (queue/     │   │  Push/Pull   │
 │              │   │   trunk/opt) │   │   modes      │
 └──────────────┘   └──────────────┘   └──────────────┘
@@ -152,8 +152,8 @@ src/
 │   └── backend/            # Pluggable task backends
 │       ├── types.ts        # TaskBackend interface (+ claim/unclaim/listClaimable)
 │       ├── memory.ts       # InMemoryTaskBackend (push + pull)
-│       ├── tool-provider.ts # Task MCP tools
-│       └── sudocode/       # Sudocode integration
+│       ├── unified-tool-provider.ts # Unified task MCP tool provider (7 tools)
+│       └── opentasks/      # OpenTasks integration
 │
 ├── teams/               # Team template system
 │   ├── types.ts            # TeamManifest, TeamTopology, TeamCommunication
@@ -219,9 +219,12 @@ Each worker gets an isolated git worktree:
 
 Two backends available:
 - **memory**: In-memory tasks with EventStore persistence (supports push + pull modes)
-- **sudocode**: External issue tracking with dependency management (push mode only)
+- **opentasks**: External issue tracking with dependency management (supports push + pull modes)
 
-Pull mode adds `claim_task`, `unclaim_task`, `list_claimable_tasks` MCP tools (gated by `task.claim` capability).
+The unified task tool provider exposes 7 MCP tools:
+- Always available: `create_task`, `get_task`, `list_tasks`, `assign_task`
+- When OpenTasks client available: `task` (upsert), `link`, `annotate`
+- Pull mode adds: `claim_task`, `unclaim_task`, `list_claimable_tasks` (gated by `task.claim` capability)
 
 ### Communication Topology
 
@@ -309,15 +312,15 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 ### Modifying Task Backend
 
 1. Update interface in `src/task/backend/types.ts`
-2. Implement in both `memory.ts` and `sudocode/`
-3. Update tool provider if adding new operations
+2. Implement in both `memory.ts` and `opentasks/`
+3. Update unified tool provider if adding new operations
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MACRO_TASK_BACKEND` | Task backend: `memory` or `sudocode` | `memory` |
-| `SUDOCODE_PROJECT_PATH` | Path to sudocode project | `cwd` |
+| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `memory` |
+| `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | — |
 | `MACRO_WORKSPACE_POOL_SIZE` | Max concurrent workspaces | `10` |
 | `MACRO_MERGE_QUEUE_DB` | Merge queue SQLite path | `:memory:` |
 | `MACRO_TEAM_NAME` | Team name (injected into agent env by team runtime) | — |
@@ -333,4 +336,3 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 - [docs/configuration.md](docs/configuration.md) - Configuration reference
 - [docs/teams.md](docs/teams.md) - Team template schema reference
 - [docs/team-templates.md](docs/team-templates.md) - Team template format and examples
-- [docs/sudocode-integration.md](docs/sudocode-integration.md) - Sudocode backend details

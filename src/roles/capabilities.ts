@@ -156,11 +156,11 @@ export const CAPABILITY_TOOL_MAP: CapabilityToolMap = {
   // Lifecycle operations
   [LIFECYCLE_CAPABILITIES.DONE]: ["done"],
 
-  // Task operations (via sudocode integration or TaskBackend)
-  [TASK_CAPABILITIES.CREATE]: ["sudocode_upsert_issue", "create_task"],
-  [TASK_CAPABILITIES.ASSIGN]: ["sudocode_upsert_issue", "assign_task"],
-  [TASK_CAPABILITIES.UPDATE]: ["sudocode_upsert_issue", "update_task"],
-  [TASK_CAPABILITIES.CLOSE]: ["sudocode_upsert_issue", "close_task"],
+  // Task operations (via TaskBackend + OpenTasks tools)
+  [TASK_CAPABILITIES.CREATE]: ["create_task"],
+  [TASK_CAPABILITIES.ASSIGN]: ["assign_task", "task"],
+  [TASK_CAPABILITIES.UPDATE]: ["update_task", "task", "link", "annotate"],
+  [TASK_CAPABILITIES.CLOSE]: ["close_task", "task"],
   [TASK_CAPABILITIES.CLAIM]: ["claim_task", "unclaim_task", "list_claimable_tasks"],
 
   // Execution operations

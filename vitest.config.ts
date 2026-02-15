@@ -22,7 +22,7 @@ export default defineConfig({
     },
     server: {
       deps: {
-        // Force inline the sudocode packages to avoid Node.js type stripping issues
+        // Force inline external packages to avoid Node.js type stripping issues
         inline: [/@sudocode-ai\/.*/],
       },
     },

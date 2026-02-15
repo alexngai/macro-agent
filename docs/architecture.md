@@ -42,7 +42,7 @@ This document describes the architecture of macro-agent, a multi-agent orchestra
 │  Role System  │        │   Workspace   │        │ Task Backend  │
 │               │        │   Manager     │        │               │
 │  Worker       │        │               │        │  memory       │
-│  Integrator   │        │  Bare Repo    │        │  sudocode     │
+│  Integrator   │        │  Bare Repo    │        │  opentasks    │
 │  Coordinator  │        │  Worktrees    │        │               │
 │  Monitor      │        │  Pool         │        │               │
 └───────────────┘        └───────────────┘        └───────────────┘
@@ -198,16 +198,17 @@ Pluggable task management with two backends:
 │                                                                              │
 │  create() | get() | update() | assign() | start() | complete() | fail()     │
 │  list() | listReady() | getBlockers() | getBlocking() | onTaskChange()      │
+│  claim() | unclaim() | listClaimable()                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                     │                                     │
                     ▼                                     ▼
 ┌─────────────────────────────────┐    ┌─────────────────────────────────────┐
-│      InMemoryTaskBackend        │    │       SudocodeTaskBackend           │
+│      InMemoryTaskBackend        │    │      OpenTasksBackend               │
 │                                 │    │                                     │
-│  - Tasks stored in EventStore   │    │  - Tasks bound to sudocode issues   │
-│  - Blockers via task events     │    │  - Blockers from issue links        │
-│  - Fast, no external deps       │    │  - Bidirectional status sync        │
-│                                 │    │  - External dependency management   │
+│  - Tasks stored in EventStore   │    │  - Tasks bound to OpenTasks issues  │
+│  - Blockers via task events     │    │  - Bidirectional status sync        │
+│  - Fast, no external deps       │    │  - External dependency management   │
+│  - Supports push + pull modes   │    │  - Supports push + pull modes       │
 └─────────────────────────────────┘    └─────────────────────────────────────┘
 ```
 

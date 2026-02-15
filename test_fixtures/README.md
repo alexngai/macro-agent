@@ -2,7 +2,7 @@
 
 Testing infrastructure for multi-agent orchestration scenarios.
 
-> See spec [s-1zcx](../.sudocode/specs/s-1zcx.md) Multi-Agent Orchestration Testing Strategy
+> Multi-Agent Orchestration Testing Strategy
 
 ## Overview
 
@@ -26,8 +26,7 @@ test_fixtures/
 │   │   └── typescript-project.ts
 │   ├── repos/          # Repository utilities
 │   │   └── temp-repo-factory.ts
-│   └── sudocode/       # Sudocode fixtures
-│       ├── specs.ts
+│   └── opentasks/      # OpenTasks fixtures
 │       └── issues.ts
 │
 ├── harness/            # Test harness implementation

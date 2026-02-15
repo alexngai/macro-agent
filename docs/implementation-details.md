@@ -313,7 +313,7 @@ This is not true CAS, but it works because:
 - The window between read and write is small (same process, synchronous event emit)
 - Under contention, the failure mode is "try again" not "corrupt state"
 
-For the InMemory backend this is sufficient. If a higher-concurrency backend is needed later (e.g., Sudocode), it can implement true CAS.
+For the InMemory backend this is sufficient. If a higher-concurrency backend is needed later, it can implement true CAS.
 
 ### A7: How does the system prompt change for team-loaded roles?
 

@@ -57,15 +57,3 @@ export {
   isIssueBlocked,
 } from "./mapping.js";
 export type { OpenTasksIssueStatus } from "./mapping.js";
-
-// Tool Provider
-export {
-  OpenTasksTaskToolProvider,
-  createOpenTasksToolProvider,
-} from "./tools.js";
-export type {
-  OpenTasksToolMode,
-  OpenTasksToolContext,
-  GetOpenTasksToolContext,
-  OpenTasksToolProviderConfig,
-} from "./tools.js";

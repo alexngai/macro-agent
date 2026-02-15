@@ -1,7 +1,5 @@
 /**
  * TempRepoFactory - Creates temporary git repositories for testing
- *
- * @see s-1zcx Multi-Agent Orchestration Testing Strategy
  */
 
 import * as fs from "fs";
@@ -29,9 +27,6 @@ export async function createTempRepo(
     bare = false,
     remoteOrigin,
     withDataplane = false,
-    withSudocode = false,
-    sudocodeSpecs = [],
-    sudocodeIssues = [],
     branches = [],
   } = options;
 
@@ -123,17 +118,6 @@ export async function createTempRepo(
     // Initialize dataplane schema (minimal for testing)
     initializeDataplaneSchema(db);
 
-    if (withSudocode) {
-      initializeSudocodeSchema(db);
-
-      // Create specs and issues
-      for (const spec of sudocodeSpecs) {
-        createSpec(db, spec);
-      }
-      for (const issue of sudocodeIssues) {
-        createIssue(db, issue);
-      }
-    }
   }
 
   // Build TempRepo object
@@ -313,103 +297,3 @@ function initializeDataplaneSchema(db: Database.Database): void {
   `);
 }
 
-/**
- * Initialize sudocode schema for testing
- */
-function initializeSudocodeSchema(db: Database.Database): void {
-  db.exec(`
-    -- Specs table
-    CREATE TABLE IF NOT EXISTS sudocode_specs (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      description TEXT,
-      priority INTEGER DEFAULT 2,
-      tags TEXT,
-      created_at INTEGER DEFAULT (unixepoch() * 1000),
-      updated_at INTEGER DEFAULT (unixepoch() * 1000)
-    );
-
-    -- Issues table
-    CREATE TABLE IF NOT EXISTS sudocode_issues (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      description TEXT,
-      status TEXT DEFAULT 'open',
-      priority INTEGER DEFAULT 2,
-      tags TEXT,
-      created_at INTEGER DEFAULT (unixepoch() * 1000),
-      updated_at INTEGER DEFAULT (unixepoch() * 1000)
-    );
-
-    -- Links table
-    CREATE TABLE IF NOT EXISTS sudocode_links (
-      from_id TEXT NOT NULL,
-      to_id TEXT NOT NULL,
-      type TEXT NOT NULL,
-      created_at INTEGER DEFAULT (unixepoch() * 1000),
-      PRIMARY KEY (from_id, to_id, type)
-    );
-  `);
-}
-
-/**
- * Create a spec in the database
- */
-function createSpec(
-  db: Database.Database,
-  spec: { id?: string; title: string; description?: string; priority?: number; tags?: string[] }
-): string {
-  const id = spec.id || `s-${Date.now().toString(36)}`;
-  db.prepare(`
-    INSERT INTO sudocode_specs (id, title, description, priority, tags)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    id,
-    spec.title,
-    spec.description || "",
-    spec.priority || 2,
-    JSON.stringify(spec.tags || [])
-  );
-  return id;
-}
-
-/**
- * Create an issue in the database
- */
-function createIssue(
-  db: Database.Database,
-  issue: {
-    id?: string;
-    title: string;
-    description?: string;
-    status?: string;
-    priority?: number;
-    implements?: string;
-    tags?: string[];
-  }
-): string {
-  const id = issue.id || `i-${Date.now().toString(36)}`;
-  db.prepare(`
-    INSERT INTO sudocode_issues (id, title, description, status, priority, tags)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    issue.title,
-    issue.description || "",
-    issue.status || "open",
-    issue.priority || 2,
-    JSON.stringify(issue.tags || [])
-  );
-
-  // Create implements link if specified
-  if (issue.implements) {
-    db.prepare(`
-      INSERT INTO sudocode_links (from_id, to_id, type)
-      VALUES (?, ?, 'implements')
-    `).run(id, issue.implements);
-  }
-
-  return id;
-}
-
-export { createSpec, createIssue };
