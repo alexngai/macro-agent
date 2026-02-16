@@ -24,10 +24,14 @@ import type { ACPSessionId } from "../../acp/types.js";
 function extractToolOutput(rawOutput: unknown): string | undefined {
   if (typeof rawOutput === "string") return rawOutput;
   if (Array.isArray(rawOutput)) {
-    return rawOutput
-      .filter((item: any) => item.type === "text" && typeof item.text === "string")
-      .map((item: any) => item.text as string)
-      .join("\n") || undefined;
+    return (
+      rawOutput
+        .filter(
+          (item: any) => item.type === "text" && typeof item.text === "string",
+        )
+        .map((item: any) => item.text as string)
+        .join("\n") || undefined
+    );
   }
   return undefined;
 }
@@ -115,7 +119,9 @@ export class ACPOverMAPHandler {
     this.sessionMapper = new SessionMapper(this.eventStore);
     const recovered = this.sessionMapper.recoverFromStore();
     if (recovered > 0) {
-      console.error(`[ACP-over-MAP] Recovered ${recovered} session(s) from store`);
+      console.error(
+        `[ACP-over-MAP] Recovered ${recovered} session(s) from store`,
+      );
     }
   }
 
@@ -143,7 +149,9 @@ export class ACPOverMAPHandler {
   abortStreamsForAgent(agentId: AgentId): void {
     for (const [streamId, streamState] of this.streams) {
       if (streamState.agentId === agentId) {
-        console.error(`[ACP-over-MAP] Aborting stream ${streamId} for stopped agent ${agentId}`);
+        console.error(
+          `[ACP-over-MAP] Aborting stream ${streamId} for stopped agent ${agentId}`,
+        );
         streamState.abortController.abort();
       }
     }
@@ -164,7 +172,9 @@ export class ACPOverMAPHandler {
     const { streamId, sessionId } = acpContext;
     const method = acp.method;
 
-    console.error(`[ACP-over-MAP] Processing - streamId=${streamId} method=${method}`);
+    console.error(
+      `[ACP-over-MAP] Processing - streamId=${streamId} method=${method}`,
+    );
 
     // Get or create stream state
     let streamState = this.streams.get(streamId);
@@ -187,11 +197,19 @@ export class ACPOverMAPHandler {
           break;
 
         case "session/new":
-          result = await this.handleNewSession(streamState, acp.params, emitNotification);
+          result = await this.handleNewSession(
+            streamState,
+            acp.params,
+            emitNotification,
+          );
           break;
 
         case "session/load":
-          result = await this.handleLoadSession(streamState, acp.params, emitNotification);
+          result = await this.handleLoadSession(
+            streamState,
+            acp.params,
+            emitNotification,
+          );
           break;
 
         case "authenticate":
@@ -199,7 +217,12 @@ export class ACPOverMAPHandler {
           break;
 
         case "session/prompt":
-          result = await this.handlePrompt(streamState, acp.params, sessionId, emitNotification);
+          result = await this.handlePrompt(
+            streamState,
+            acp.params,
+            sessionId,
+            emitNotification,
+          );
           break;
 
         case "session/cancel":
@@ -209,7 +232,11 @@ export class ACPOverMAPHandler {
         default:
           // Check for extension methods
           if (method?.startsWith("_")) {
-            result = await this.handleExtension(streamState, method, acp.params);
+            result = await this.handleExtension(
+              streamState,
+              method,
+              acp.params,
+            );
           } else {
             throw new Error(`Unknown ACP method: ${method}`);
           }
@@ -252,11 +279,18 @@ export class ACPOverMAPHandler {
     streamState.initialized = true;
 
     // Extract permission mode from _meta.macroConfig if provided
-    const meta = (params as Record<string, unknown> | undefined)?._meta as Record<string, unknown> | undefined;
-    const macroConfig = meta?.macroConfig as Record<string, unknown> | undefined;
-    const defaultSubAgentConfig = macroConfig?.defaultSubAgentConfig as Record<string, unknown> | undefined;
+    const meta = (params as Record<string, unknown> | undefined)?._meta as
+      | Record<string, unknown>
+      | undefined;
+    const macroConfig = meta?.macroConfig as
+      | Record<string, unknown>
+      | undefined;
+    const defaultSubAgentConfig = macroConfig?.defaultSubAgentConfig as
+      | Record<string, unknown>
+      | undefined;
     if (defaultSubAgentConfig?.permissionMode) {
-      streamState.permissionMode = defaultSubAgentConfig.permissionMode as StreamState["permissionMode"];
+      streamState.permissionMode =
+        defaultSubAgentConfig.permissionMode as StreamState["permissionMode"];
     }
 
     return {
@@ -285,7 +319,8 @@ export class ACPOverMAPHandler {
       throw new Error("Must call initialize before newSession");
     }
 
-    const { cwd, mcpServers } = (params as { cwd?: string; mcpServers?: unknown[] }) ?? {};
+    const { cwd, mcpServers } =
+      (params as { cwd?: string; mcpServers?: unknown[] }) ?? {};
     const workingDir = cwd ?? this.defaultCwd;
 
     // Spawn a new head manager for this session
@@ -302,7 +337,9 @@ export class ACPOverMAPHandler {
     // Create session mapping
     this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
 
-    console.error(`[ACP-over-MAP] Created session ${sessionId} -> agent ${spawned.id}`);
+    console.error(
+      `[ACP-over-MAP] Created session ${sessionId} -> agent ${spawned.id}`,
+    );
 
     // Notify subscribers that a new agent was registered
     this.notifyAgentRegistered(spawned.id);
@@ -322,7 +359,11 @@ export class ACPOverMAPHandler {
       throw new Error("Must call initialize before loadSession");
     }
 
-    const { sessionId: rawSessionId, cwd, _meta } = (params as {
+    const {
+      sessionId: rawSessionId,
+      cwd,
+      _meta,
+    } = (params as {
       sessionId: string;
       cwd?: string;
       _meta?: Record<string, unknown>;
@@ -341,7 +382,7 @@ export class ACPOverMAPHandler {
       }
       sessionId = agent.session_id;
       console.error(
-        `[ACP-over-MAP] loadSession: Resolved agentId ${metaAgentId} to session ${sessionId}`
+        `[ACP-over-MAP] loadSession: Resolved agentId ${metaAgentId} to session ${sessionId}`,
       );
     }
 
@@ -354,17 +395,27 @@ export class ACPOverMAPHandler {
     if (existing) {
       // Check if the agent already has an active session
       if (this.agentManager.hasActiveSession(existing.id)) {
-        console.error(`[ACP-over-MAP] loadSession: Reusing existing session for agent ${existing.id}`);
+        console.error(
+          `[ACP-over-MAP] loadSession: Reusing existing session for agent ${existing.id}`,
+        );
         streamState.sessionId = sessionId;
         streamState.agentId = existing.id;
-        this.sessionMapper.createMapping(sessionId as ACPSessionId, existing.id);
+        this.sessionMapper.createMapping(
+          sessionId as ACPSessionId,
+          existing.id,
+        );
         this.emitSessionInfo(streamState, sessionId, emitNotification);
         return { sessionId };
       }
 
       // Agent exists but no active session - resume it
-      console.error(`[ACP-over-MAP] loadSession: Resuming stopped agent ${existing.id}`);
-      const spawned = await this.agentManager.resume(existing.id, streamState.permissionMode);
+      console.error(
+        `[ACP-over-MAP] loadSession: Resuming stopped agent ${existing.id}`,
+      );
+      const spawned = await this.agentManager.resume(
+        existing.id,
+        streamState.permissionMode,
+      );
       streamState.sessionId = sessionId;
       streamState.agentId = spawned.id;
       this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
@@ -373,7 +424,9 @@ export class ACPOverMAPHandler {
     }
 
     // No existing agent found - create new with the specified session ID
-    console.error(`[ACP-over-MAP] loadSession: Creating new agent for session ${sessionId}`);
+    console.error(
+      `[ACP-over-MAP] loadSession: Creating new agent for session ${sessionId}`,
+    );
     const spawned = await this.agentManager.getOrCreateHeadManager({
       cwd: workingDir,
       sessionId,
@@ -403,15 +456,17 @@ export class ACPOverMAPHandler {
     sessionIdFromContext?: string,
     emitNotification?: ACPNotificationEmitter,
   ): Promise<unknown> {
-    const { prompt, sessionId: paramSessionId } = (params as {
-      prompt?: Array<{ type: string; text?: string }>;
-      sessionId?: string;
-      messages?: Array<{ role: string; content: string }>;
-    }) ?? {};
+    const { prompt, sessionId: paramSessionId } =
+      (params as {
+        prompt?: Array<{ type: string; text?: string }>;
+        sessionId?: string;
+        messages?: Array<{ role: string; content: string }>;
+      }) ?? {};
 
     // Prefer the server's resolved session ID (set during loadSession) over the
     // client's acpContext.sessionId which may be stale (e.g., "_resolve_" sentinel)
-    const sessionId = streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
+    const sessionId =
+      streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
     if (!sessionId) {
       throw new Error("No session - call newSession or loadSession first");
     }
@@ -434,15 +489,21 @@ export class ACPOverMAPHandler {
         .filter((block) => block.type === "text" && block.text)
         .map((block) => block.text)
         .join("\n");
-    } else if ((params as { messages?: Array<{ content: string }> })?.messages) {
+    } else if (
+      (params as { messages?: Array<{ content: string }> })?.messages
+    ) {
       // Handle messages format (role/content array)
-      const messages = (params as { messages: Array<{ role: string; content: string }> }).messages;
+      const messages = (
+        params as { messages: Array<{ role: string; content: string }> }
+      ).messages;
       messageContent = messages.map((m) => m.content).join("\n");
     } else {
       messageContent = JSON.stringify(params);
     }
 
-    console.error(`[ACP-over-MAP] Prompting agent ${agentId} with: ${messageContent.slice(0, 100)}...`);
+    console.error(
+      `[ACP-over-MAP] Prompting agent ${agentId} with: ${messageContent.slice(0, 100)}...`,
+    );
 
     // Mark session as processing
     this.sessionMapper.setProcessing(sessionId as ACPSessionId, true);
@@ -473,21 +534,36 @@ export class ACPOverMAPHandler {
     this.ensureConversation(sessionId as ACPSessionId, agentId);
 
     // Accumulate response content for history recording
-    const buffer: { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> } = {
+    const buffer: {
+      parts: Array<
+        | { type: "text"; text: string }
+        | ({ type: "tool" } & Record<string, unknown>)
+      >;
+    } = {
       parts: [],
     };
 
     // Track latest plan for persistence
-    let latestPlan: Array<{ content: string; priority: string; status: string }> | null = null;
+    let latestPlan: Array<{
+      content: string;
+      priority: string;
+      status: string;
+    }> | null = null;
 
     // Track tool info from initial tool_call events (title, name, input)
     // so we can merge them when tool_call_update arrives with status "completed"
-    const toolInfoCache = new Map<string, { title?: string; name?: string; input?: unknown }>();
+    const toolInfoCache = new Map<
+      string,
+      { title?: string; name?: string; input?: unknown }
+    >();
 
     try {
       // Stream responses from the agent
       let updateCount = 0;
-      for await (const update of this.agentManager.prompt(agentId, messageContent)) {
+      for await (const update of this.agentManager.prompt(
+        agentId,
+        messageContent,
+      )) {
         // Check for cancellation
         if (streamState.abortController.signal.aborted) {
           return { stopReason: "cancelled" };
@@ -495,14 +571,16 @@ export class ACPOverMAPHandler {
 
         // Accumulate content for history persistence (preserving text/tool interleaving order)
         const u = update as Record<string, unknown>;
-        const updateType = u.sessionUpdate as string ?? u.type as string;
+        const updateType = (u.sessionUpdate as string) ?? (u.type as string);
 
         // Annotate permission_request updates with agentId so clients can respond
         if (updateType === "permission_request") {
           u._agentId = agentId;
         }
         if (updateType === "agent_message_chunk") {
-          const content = u.content as { type?: string; text?: string } | undefined;
+          const content = u.content as
+            | { type?: string; text?: string }
+            | undefined;
           if (content?.text) {
             const last = buffer.parts[buffer.parts.length - 1];
             if (last && last.type === "text") {
@@ -512,14 +590,27 @@ export class ACPOverMAPHandler {
             }
           }
         } else if (updateType === "plan") {
-          const entries = (u as { entries?: Array<{ content: string; priority: string; status: string }> }).entries;
+          const entries = (
+            u as {
+              entries?: Array<{
+                content: string;
+                priority: string;
+                status: string;
+              }>;
+            }
+          ).entries;
           if (entries) {
             latestPlan = entries;
           }
-        } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+        } else if (
+          updateType === "tool_call" ||
+          updateType === "tool_call_update"
+        ) {
           const toolCallId = u.toolCallId as string | undefined;
           const status = u.status as string | undefined;
-          const meta = u._meta as { claudeCode?: { toolName?: string } } | undefined;
+          const meta = u._meta as
+            | { claudeCode?: { toolName?: string } }
+            | undefined;
 
           // Cache tool info from initial tool_call events
           if (updateType === "tool_call" && toolCallId) {
@@ -532,7 +623,9 @@ export class ACPOverMAPHandler {
 
           if (status === "completed" || status === "failed") {
             // Merge cached info for tool_call_update events that lack title/input
-            const cached = toolCallId ? toolInfoCache.get(toolCallId) : undefined;
+            const cached = toolCallId
+              ? toolInfoCache.get(toolCallId)
+              : undefined;
             buffer.parts.push({
               type: "tool",
               toolCallId,
@@ -554,10 +647,17 @@ export class ACPOverMAPHandler {
       const wasCancelled = streamState.abortController.signal.aborted;
       const stopReason = wasCancelled ? "cancelled" : "end_turn";
 
-      console.error(`[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates, stopReason=${stopReason}`);
+      console.error(
+        `[ACP-over-MAP] Prompt completed for agent ${agentId}, ${updateCount} updates, stopReason=${stopReason}`,
+      );
 
       // Persist conversation turns for history
-      this.recordPromptTurns(sessionId as ACPSessionId, agentId, messageContent, buffer);
+      this.recordPromptTurns(
+        sessionId as ACPSessionId,
+        agentId,
+        messageContent,
+        buffer,
+      );
 
       // Persist latest plan in EventStore for history loading across restarts
       if (latestPlan) {
@@ -588,7 +688,10 @@ export class ACPOverMAPHandler {
           errorMessage = String(error);
         }
       }
-      console.error(`[ACP-over-MAP] Prompt error for agent ${agentId}:`, errorMessage);
+      console.error(
+        `[ACP-over-MAP] Prompt error for agent ${agentId}:`,
+        errorMessage,
+      );
       return {
         stopReason: "end_turn",
         error: errorMessage,
@@ -603,9 +706,11 @@ export class ACPOverMAPHandler {
     params: unknown,
     sessionIdFromContext?: string,
   ): Promise<unknown> {
-    const { sessionId: paramSessionId } = (params as { sessionId?: string }) ?? {};
+    const { sessionId: paramSessionId } =
+      (params as { sessionId?: string }) ?? {};
     // Prefer server's resolved session ID over client's potentially stale one
-    const sessionId = streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
+    const sessionId =
+      streamState.sessionId ?? paramSessionId ?? sessionIdFromContext;
 
     const agentId = sessionId
       ? this.sessionMapper.getAgentId(sessionId as ACPSessionId)
@@ -627,9 +732,14 @@ export class ACPOverMAPHandler {
       if (session) {
         try {
           await session.cancel();
-          console.error(`[ACP-over-MAP] Session cancelled for agent ${agentId}`);
+          console.error(
+            `[ACP-over-MAP] Session cancelled for agent ${agentId}`,
+          );
         } catch (error) {
-          console.warn(`[ACP-over-MAP] session.cancel() failed for ${agentId}:`, error);
+          console.warn(
+            `[ACP-over-MAP] session.cancel() failed for ${agentId}:`,
+            error,
+          );
         }
       }
     }
@@ -646,7 +756,7 @@ export class ACPOverMAPHandler {
     method: string,
     params: unknown,
   ): Promise<unknown> {
-    const methodParams = params as Record<string, unknown> ?? {};
+    const methodParams = (params as Record<string, unknown>) ?? {};
 
     switch (method) {
       case "_macro/spawnAgent": {
@@ -720,7 +830,7 @@ export class ACPOverMAPHandler {
 
         if (agent.state !== "stopped" && agent.state !== "failed") {
           throw new Error(
-            `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`
+            `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`,
           );
         }
 
@@ -733,7 +843,11 @@ export class ACPOverMAPHandler {
       }
 
       case "_macro/getHistory": {
-        const { sessionId, agentId: historyAgentId, limit } = methodParams as {
+        const {
+          sessionId,
+          agentId: historyAgentId,
+          limit,
+        } = methodParams as {
           sessionId?: string;
           agentId?: string;
           limit?: number;
@@ -744,7 +858,9 @@ export class ACPOverMAPHandler {
         // explicit sessionId. This allows history to survive across server
         // restarts even when the ACP session ID changes (e.g., resume()
         // fails → TUI creates new session with different ID).
-        const agent = historyAgentId ? this.eventStore.getAgent(historyAgentId as AgentId) : undefined;
+        const agent = historyAgentId
+          ? this.eventStore.getAgent(historyAgentId as AgentId)
+          : undefined;
         let conversationId: string | undefined;
         if (agent) {
           conversationId = agent.session_id;
@@ -763,15 +879,19 @@ export class ACPOverMAPHandler {
         const sourceAgentId = agent?.metadata?.fork_of as string | undefined;
         let turns;
         if (sourceAgentId) {
-          const sourceAgent = this.eventStore.getAgent(sourceAgentId as AgentId);
+          const sourceAgent = this.eventStore.getAgent(
+            sourceAgentId as AgentId,
+          );
           const sourceConversationId = sourceAgent?.session_id;
           const forkTimestamp = agent!.created_at;
           const sourceTurns = sourceConversationId
-            ? this.eventStore.listTurns({
-                conversationId: sourceConversationId,
-                order: "asc",
-                limit: limit ?? 200,
-              }).filter((t) => t.timestamp <= forkTimestamp)
+            ? this.eventStore
+                .listTurns({
+                  conversationId: sourceConversationId,
+                  order: "asc",
+                  limit: limit ?? 200,
+                })
+                .filter((t) => t.timestamp <= forkTimestamp)
             : [];
           const ownTurns = this.eventStore.listTurns({
             conversationId,
@@ -804,7 +924,11 @@ export class ACPOverMAPHandler {
       }
 
       case "_macro/respondToPermission": {
-        const { agentId: targetAgentId, requestId, optionId } = methodParams as {
+        const {
+          agentId: targetAgentId,
+          requestId,
+          optionId,
+        } = methodParams as {
           agentId: string;
           requestId: string;
           optionId: string;
@@ -843,15 +967,24 @@ export class ACPOverMAPHandler {
         if (!targetAgentId || !permissionMode) {
           throw new Error("agentId and permissionMode are required");
         }
-        const previousMode = this.agentManager.getPermissionMode(targetAgentId as AgentId);
+        const previousMode = this.agentManager.getPermissionMode(
+          targetAgentId as AgentId,
+        );
         const success = this.agentManager.setPermissionMode(
           targetAgentId as AgentId,
-          permissionMode as "auto-approve" | "auto-deny" | "callback" | "interactive",
+          permissionMode as
+            | "auto-approve"
+            | "auto-deny"
+            | "callback"
+            | "interactive",
         );
         if (success) {
           return { success: true, previousMode: previousMode ?? undefined };
         }
-        return { success: false, error: `No active session found for agent ${targetAgentId}` };
+        return {
+          success: false,
+          error: `No active session found for agent ${targetAgentId}`,
+        };
       }
 
       case "_macro/forkAgent": {
@@ -880,7 +1013,10 @@ export class ACPOverMAPHandler {
         if (prompt) {
           (async () => {
             try {
-              for await (const _update of this.agentManager.prompt(forked.id, prompt)) {
+              for await (const _update of this.agentManager.prompt(
+                forked.id,
+                prompt,
+              )) {
                 // drain iterator
               }
             } catch {
@@ -907,8 +1043,14 @@ export class ACPOverMAPHandler {
         if (!agentId) {
           throw new Error("agentId is required");
         }
-        if (name === undefined && plan === undefined && metadata === undefined) {
-          throw new Error("At least one field to update is required (name, plan, or metadata)");
+        if (
+          name === undefined &&
+          plan === undefined &&
+          metadata === undefined
+        ) {
+          throw new Error(
+            "At least one field to update is required (name, plan, or metadata)",
+          );
         }
         if (name !== undefined && !name.trim()) {
           throw new Error("name must not be empty");
@@ -946,7 +1088,9 @@ export class ACPOverMAPHandler {
 
       case "_macro/getModels": {
         const { sessionId } = methodParams as { sessionId: string };
-        const agentId = this.sessionMapper.getAgentId(sessionId as ACPSessionId);
+        const agentId = this.sessionMapper.getAgentId(
+          sessionId as ACPSessionId,
+        );
         if (!agentId) {
           return { currentModelId: null, availableModels: [] };
         }
@@ -955,14 +1099,16 @@ export class ACPOverMAPHandler {
           return { currentModelId: null, availableModels: [] };
         }
         // Try clientHandler's model info store first (from _model_state_update notification)
-        const clientHandler = (session as unknown as {
-          clientHandler?: {
-            getSessionModelInfo?: (id: string) => {
-              currentModelId: string | null;
-              availableModels: Array<{ modelId: string; name: string }>;
-            } | null;
-          };
-        }).clientHandler;
+        const clientHandler = (
+          session as unknown as {
+            clientHandler?: {
+              getSessionModelInfo?: (id: string) => {
+                currentModelId: string | null;
+                availableModels: Array<{ modelId: string; name: string }>;
+              } | null;
+            };
+          }
+        ).clientHandler;
         const modelInfo = clientHandler?.getSessionModelInfo?.(session.id);
         if (modelInfo && modelInfo.availableModels.length > 0) {
           return modelInfo;
@@ -971,10 +1117,20 @@ export class ACPOverMAPHandler {
         if (session.models && session.models.length > 0) {
           return {
             currentModelId: session.models[0],
-            availableModels: session.models.map((id: string) => ({ modelId: id, name: id })),
+            availableModels: session.models.map((id: string) => ({
+              modelId: id,
+              name: id,
+            })),
           };
         }
         return { currentModelId: null, availableModels: [] };
+      }
+
+      case "_session/setCompaction": {
+        // Compaction is handled internally by the agent process.
+        // Accept the request as a no-op so the client doesn't get an error.
+        // TODO: Make sure this overrides if needed.
+        return { success: true };
       }
 
       default:
@@ -1028,7 +1184,12 @@ export class ACPOverMAPHandler {
     acpSessionId: ACPSessionId,
     agentId: AgentId,
     userMessage: string,
-    buffer: { parts: Array<{ type: "text"; text: string } | ({ type: "tool" } & Record<string, unknown>)> },
+    buffer: {
+      parts: Array<
+        | { type: "text"; text: string }
+        | ({ type: "tool" } & Record<string, unknown>)
+      >;
+    },
   ): void {
     const now = Date.now();
 
