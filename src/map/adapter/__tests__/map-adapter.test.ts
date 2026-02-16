@@ -562,6 +562,105 @@ describe("MAPAdapter", () => {
       // This should not throw - event is emitted to matching subscribers
       adapter.emitEvent(event);
     });
+
+    it("emits agent_registered events to underscore-format subscriptions", async () => {
+      // SDK clients subscribe with underscore format (e.g., "agent_registered")
+      await adapter.createSubscription(participantId, {
+        eventTypes: ["agent_registered"],
+      });
+
+      const event: EventNotification = {
+        eventId: "evt-reg-1",
+        type: "agent_registered",
+        timestamp: Date.now(),
+        data: {
+          agentId: "agent-new",
+          name: "Spawned Worker",
+          role: "worker",
+          parent: "agent-parent",
+        },
+        agentId: "agent-new" as AgentId,
+      };
+
+      // Should not throw - underscore event matches underscore subscription
+      adapter.emitEvent(event);
+    });
+
+    it("emits agent_state_changed events with data payload", async () => {
+      await adapter.createSubscription(participantId, {
+        eventTypes: ["agent_state_changed"],
+      });
+
+      const event: EventNotification = {
+        eventId: "evt-state-1",
+        type: "agent_state_changed",
+        timestamp: Date.now(),
+        agentId: "agent-1" as AgentId,
+        data: {
+          agentId: "agent-1",
+          current: "stopped",
+          previous: "running",
+          reason: "cancelled",
+        },
+      };
+
+      adapter.emitEvent(event);
+    });
+
+    it("emits agent_unregistered events with data payload", async () => {
+      await adapter.createSubscription(participantId, {
+        eventTypes: ["agent_unregistered"],
+      });
+
+      const event: EventNotification = {
+        eventId: "evt-unreg-1",
+        type: "agent_unregistered",
+        timestamp: Date.now(),
+        agentId: "agent-1" as AgentId,
+        data: {
+          agentId: "agent-1",
+          reason: "cancelled",
+        },
+      };
+
+      adapter.emitEvent(event);
+    });
+
+    it("logs agent lifecycle events in event log for replay", async () => {
+      const impl = adapter as MAPAdapterImpl;
+
+      // Emit agent_registered
+      impl.emitEvent({
+        eventId: "evt-1",
+        type: "agent_registered",
+        timestamp: 1000,
+        agentId: "agent-1" as AgentId,
+        data: { agentId: "agent-1", name: "Worker" },
+      });
+
+      // Emit agent_state_changed
+      impl.emitEvent({
+        eventId: "evt-2",
+        type: "agent_state_changed",
+        timestamp: 2000,
+        agentId: "agent-1" as AgentId,
+        data: { agentId: "agent-1", current: "stopped", previous: "running" },
+      });
+
+      // Emit agent_unregistered
+      impl.emitEvent({
+        eventId: "evt-3",
+        type: "agent_unregistered",
+        timestamp: 3000,
+        agentId: "agent-1" as AgentId,
+        data: { agentId: "agent-1", reason: "cancelled" },
+      });
+
+      // Query the event log - all three events should be stored
+      const eventLog = (impl as unknown as { eventLog: { query: (p: unknown) => { events: unknown[]; hasMore: boolean } } }).eventLog;
+      const result = eventLog.query({ limit: 100 });
+      expect(result.events.length).toBeGreaterThanOrEqual(3);
+    });
   });
 
   describe("messaging", () => {

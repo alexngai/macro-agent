@@ -1382,6 +1382,18 @@ export class MAPAdapterImpl implements MAPAdapter {
       },
     });
 
+    // Emit agent unregistered event for subscribers
+    this.emitEvent({
+      eventId: `unreg-${Date.now()}`,
+      type: "agent_unregistered" as MAPEventType,
+      timestamp: Date.now(),
+      agentId,
+      data: {
+        agentId,
+        reason: reason ?? "cancelled",
+      },
+    });
+
     return { stopping: true };
   }
 

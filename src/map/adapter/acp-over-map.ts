@@ -792,6 +792,9 @@ export class ACPOverMAPHandler {
           config,
         });
 
+        // Notify subscribers that a new agent was registered
+        this.notifyAgentRegistered(spawned.id);
+
         return {
           agentId: spawned.id,
           sessionId: spawned.session_id,
