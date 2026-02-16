@@ -700,7 +700,9 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(mockHandle.loadSession).toHaveBeenCalledWith(
         expect.any(String), // session ID
         "/custom/project/path",
-        undefined,
+        expect.arrayContaining([
+          expect.objectContaining({ name: "macro-agent" }),
+        ]),
         undefined,
       );
     });
@@ -719,7 +721,9 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(mockHandle.loadSession).toHaveBeenCalledWith(
         agent!.provider_session_id,
         expect.any(String),
-        undefined,
+        expect.arrayContaining([
+          expect.objectContaining({ name: "macro-agent" }),
+        ]),
         undefined,
       );
     });
@@ -749,7 +753,11 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       await agentManager.resume(agentId);
 
       // Should create a new session instead of loading with invalid macro-agent session_id
-      expect(mockHandle.createSession).toHaveBeenCalledWith("/tmp", {});
+      expect(mockHandle.createSession).toHaveBeenCalledWith("/tmp", {
+        mcpServers: expect.arrayContaining([
+          expect.objectContaining({ name: "macro-agent" }),
+        ]),
+      });
       expect(mockHandle.loadSession).not.toHaveBeenCalled();
     });
   });

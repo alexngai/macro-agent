@@ -422,6 +422,40 @@ export function createAgentManager(
   let isShuttingDown = false;
 
   // ─────────────────────────────────────────────────────────────────
+  // MCP Server Config
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Build the macro-agent MCP server config for a Claude Code agent session.
+   * Used by spawn(), resume(), and forkAgent() to ensure every agent gets
+   * access to the macro-agent coordination tools.
+   */
+  function buildMacroAgentMcp(opts: {
+    agentId: string;
+    parentId: string;
+    taskId: string;
+    cwd: string;
+    permissionMode: string;
+  }) {
+    return {
+      name: "macro-agent",
+      command: "npx",
+      args: ["multiagent-mcp"],
+      env: [
+        { name: "MACRO_AGENT_ID", value: opts.agentId },
+        { name: "MACRO_PARENT_ID", value: opts.parentId },
+        { name: "MACRO_TASK_ID", value: opts.taskId },
+        { name: "MACRO_AGENT_CWD", value: opts.cwd },
+        { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+        { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
+        { name: "MACRO_PERMISSION_MODE", value: opts.permissionMode },
+        { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
+        { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
+      ],
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────
 
@@ -579,25 +613,13 @@ export function createAgentManager(
       });
 
       try {
-        // Build MCP server configuration for the macro-agent MCP server
-        // Note: McpServerStdio doesn't have a 'type' field - stdio is the implicit default
-        // when neither 'type: http' nor 'type: sse' is specified
-        const macroAgentMcp = {
-          name: "macro-agent",
-          command: "npx",
-          args: ["multiagent-mcp"],
-          env: [
-            { name: "MACRO_AGENT_ID", value: agentId },
-            { name: "MACRO_PARENT_ID", value: parent ?? "" },
-            { name: "MACRO_TASK_ID", value: taskId },
-            { name: "MACRO_AGENT_CWD", value: cwd },
-            { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
-            { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
-            { name: "MACRO_PERMISSION_MODE", value: permissionMode },
-            { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
-            { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
-          ],
-        };
+        const macroAgentMcp = buildMacroAgentMcp({
+          agentId,
+          parentId: parent ?? "",
+          taskId,
+          cwd,
+          permissionMode,
+        });
 
         // Combine with any user-provided MCP servers
         // Note: Like macroAgentMcp, user MCP servers use stdio (no 'type' field)
@@ -998,12 +1020,24 @@ export function createAgentManager(
         ? { claudeCode: { options: { settingSources: [] } } }
         : undefined;
 
+      const macroAgentMcp = buildMacroAgentMcp({
+        agentId,
+        parentId: agent.parent ?? "",
+        taskId: agent.task_id ?? "",
+        cwd: agentCwd,
+        permissionMode,
+      });
+      const mcpServers = [macroAgentMcp];
+
       if (agent.provider_session_id) {
         // Load existing session using the provider's session ID (e.g., Claude Code UUID)
+        // Note: loadSession's TS type for mcpServers is { name, uri }[] but
+        // the underlying ACP protocol accepts full McpServerStdio. The JS
+        // implementation passes mcpServers through to the connection unchanged.
         session = await handle.loadSession(
           agent.provider_session_id,
           agentCwd,
-          undefined,
+          mcpServers as any,
           resumeAgentMeta ? { agentMeta: resumeAgentMeta } : undefined
         );
       } else {
@@ -1011,6 +1045,7 @@ export function createAgentManager(
         // Create a new session instead of loading with the macro-agent session_id
         // which is not a valid provider session ID (e.g., Claude Code expects UUIDs).
         session = await handle.createSession(agentCwd, {
+          mcpServers,
           ...(resumeAgentMeta && { agentMeta: resumeAgentMeta }),
         });
 
@@ -1148,21 +1183,13 @@ export function createAgentManager(
     });
 
     try {
-      // Build MCP server config with the NEW agent's IDs
-      const macroAgentMcp = {
-        name: "macro-agent",
-        command: "npx",
-        args: ["multiagent-mcp"],
-        env: [
-          { name: "MACRO_AGENT_ID", value: agentId },
-          { name: "MACRO_PARENT_ID", value: sourceAgent.parent ?? "" },
-          { name: "MACRO_TASK_ID", value: taskId },
-          { name: "MACRO_AGENT_CWD", value: cwd },
-          { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
-          { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
-          { name: "MACRO_PERMISSION_MODE", value: defaultPermissionMode },
-        ],
-      };
+      const macroAgentMcp = buildMacroAgentMcp({
+        agentId,
+        parentId: sourceAgent.parent ?? "",
+        taskId,
+        cwd,
+        permissionMode: defaultPermissionMode,
+      });
 
       // Load the forked session on the new process with correct MCP config.
       // Note: loadSession's TS type for mcpServers is { name, uri }[] but
