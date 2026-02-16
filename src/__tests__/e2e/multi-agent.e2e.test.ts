@@ -542,10 +542,10 @@ describe("Part 1: Multi-Agent Lifecycle E2E", () => {
           `✓ Grandchild state: ${grandchildAgent?.state}, reason: ${grandchildAgent?.stop_reason}`,
         );
 
-        // Verify terminate events
-        const terminateEvents = eventStore.query({ type: "terminate" });
+        // Verify stop events
+        const terminateEvents = eventStore.query({ type: "stop" });
         expect(terminateEvents.length).toBeGreaterThanOrEqual(3);
-        log(`✓ Terminate events: ${terminateEvents.length}`);
+        log(`✓ Stop events: ${terminateEvents.length}`);
       },
       { timeout: TIMEOUT.HIERARCHY },
     );
@@ -961,8 +961,8 @@ describe("Part 3: Event Storage E2E", () => {
         // Terminate agent
         await agentManager.terminate(headId, "completed");
 
-        // Verify terminate event
-        const terminateEvents = eventStore.query({ type: "terminate" });
+        // Verify stop event
+        const terminateEvents = eventStore.query({ type: "stop" });
         expect(terminateEvents.length).toBeGreaterThanOrEqual(1);
         const termEvent = terminateEvents.find(
           (e) => e.payload.agent_id === headId,

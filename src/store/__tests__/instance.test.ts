@@ -467,10 +467,10 @@ describe('Peer Visibility', () => {
     it('should filter by whitelist when visibleEventTypes is specified', () => {
       const visibility: PeerVisibilityConfig = {
         exportEvents: true,
-        visibleEventTypes: ['spawn', 'terminate'],
+        visibleEventTypes: ['spawn', 'stop'],
       };
       expect(isEventTypeVisibleToPeers('spawn', visibility)).toBe(true);
-      expect(isEventTypeVisibleToPeers('terminate', visibility)).toBe(true);
+      expect(isEventTypeVisibleToPeers('stop', visibility)).toBe(true);
       expect(isEventTypeVisibleToPeers('message', visibility)).toBe(false);
     });
   });
@@ -503,7 +503,7 @@ describe('Peer Visibility', () => {
       { type: 'spawn', source: { agent_id: 'agent-1' }, payload: {} },
       { type: 'message', source: { agent_id: 'agent-1' }, payload: {} },
       { type: 'spawn', source: { agent_id: 'agent-2' }, payload: {} },
-      { type: 'terminate', source: { agent_id: 'agent-2' }, payload: {} },
+      { type: 'stop', source: { agent_id: 'agent-2' }, payload: {} },
     ];
 
     it('should return empty array when export is disabled', () => {

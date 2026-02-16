@@ -662,7 +662,7 @@ describe("Metrics ↔ EventStore Integration", () => {
       payload: { agent_id: "grinder-1" },
     } as unknown as Event);
     events.push({
-      id: "e3", type: "terminate", timestamp: now - 1000,
+      id: "e3", type: "stop", timestamp: now - 1000,
       source: { agent_id: "grinder-1" },
       payload: { reason: "completed" },
     } as unknown as Event);

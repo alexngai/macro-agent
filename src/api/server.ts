@@ -438,7 +438,7 @@ export function createAPIServer(
       case "spawn":
         summary = `Agent ${event.payload.agent_id} spawned`;
         break;
-      case "terminate":
+      case "stop":
         summary = `Agent terminated: ${event.payload.reason}`;
         break;
       case "status":
@@ -1326,7 +1326,7 @@ export function createAPIApp(
       case "spawn":
         summary = `Agent ${event.payload.agent_id} spawned`;
         break;
-      case "terminate":
+      case "stop":
         summary = `Agent terminated: ${event.payload.reason}`;
         break;
       case "status":

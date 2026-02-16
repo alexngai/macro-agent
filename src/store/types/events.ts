@@ -11,7 +11,7 @@ export const CURRENT_EVENT_VERSION = 1;
 // Event types
 export type EventType =
   | "spawn"
-  | "terminate"
+  | "stop"
   | "status"
   | "message"
   | "task"

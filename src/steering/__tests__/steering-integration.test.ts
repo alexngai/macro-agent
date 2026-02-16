@@ -671,7 +671,7 @@ describe("Steering Integration", () => {
         payload: { status_type: "started" },
       });
       eventStore.emit({
-        type: "terminate",
+        type: "stop",
         source: { agent_id: "stopped-agent" },
         payload: { agent_id: "stopped-agent", reason: "completed" },
       });

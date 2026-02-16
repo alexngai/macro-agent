@@ -788,7 +788,7 @@ export function createAgentManager(
     } catch (error) {
       // Clean up the spawn event we already emitted
       eventStore.emit({
-        type: "terminate",
+        type: "stop",
         source: { agent_id: agentId },
         payload: {
           reason: "failed",
@@ -880,9 +880,9 @@ export function createAgentManager(
       }
     }
 
-    // Emit terminate event
+    // Emit stop event
     eventStore.emit({
-      type: "terminate",
+      type: "stop",
       source: { agent_id: agentId },
       payload: {
         agent_id: agentId,

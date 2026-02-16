@@ -74,7 +74,7 @@ function createCascadeAdapter(harness: TestHarness): CascadeAgentManager {
       }
       // Update agent state in EventStore
       harness.eventStore.emit({
-        type: "terminate",
+        type: "stop",
         source: { agent_id: agentId },
         payload: { agent_id: agentId, reason },
       });

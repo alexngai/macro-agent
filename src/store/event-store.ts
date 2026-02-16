@@ -132,8 +132,8 @@ function createTabularBetterSqlite3Persister(
     undefined,
     // onIgnoredError
     (error: any) => console.warn('[EventStore] Persister error:', error),
-    // destroy
-    () => db.close(),
+    // destroy — do NOT close DB here; close() handles it after the persister drains
+    () => {},
     // persist mode (1 = StoreOnly)
     1 as any,
     // thing (the db instance)
@@ -979,11 +979,14 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       // auto-save callbacks and the explicit save/destroy sequence.
       await persister.stopAutoSave();
       await persister.save();
-      // TinyBase's save() resolves before all internal async SQL operations
-      // complete. Flush the microtask queue to let pending writes finish
-      // before we close the database connection.
-      await new Promise(resolve => setTimeout(resolve, 0));
+      // Destroy the persister (removes store listeners) BEFORE closing the DB.
+      // The destroy callback is a no-op — we close the DB ourselves below
+      // after giving TinyBase's internal async queues time to drain.
       persister.destroy();
+      // Allow any in-flight TinyBase microtasks to settle before closing
+      // the database connection. Without this, pending writes from store
+      // change listeners can race against db.close().
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
     if (db) {
       db.close();
@@ -1427,8 +1430,8 @@ function applyEventToViews(
     case 'spawn':
       applySpawnEvent(store, event, notifyAgentChange);
       break;
-    case 'terminate':
-      applyTerminateEvent(store, event, notifyAgentChange);
+    case 'stop':
+      applyStopEvent(store, event, notifyAgentChange);
       break;
     case 'status':
       applyStatusEvent(store, event, notifyAgentChange);
@@ -1520,9 +1523,9 @@ function applySpawnEvent(
 }
 
 /**
- * Apply terminate event to agents view
+ * Apply stop event to agents view
  */
-function applyTerminateEvent(
+function applyStopEvent(
   store: Store,
   event: Event,
   notify: (agentId: AgentId, agent: Agent | null) => void,

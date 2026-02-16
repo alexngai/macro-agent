@@ -170,7 +170,7 @@ describe('EventStore', () => {
       });
 
       store.emit({
-        type: 'terminate',
+        type: 'stop',
         source: { agent_id: 'agent_1' },
         payload: { reason: 'completed' },
       });

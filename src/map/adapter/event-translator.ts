@@ -47,7 +47,7 @@ export interface TranslationContext {
  */
 const EVENT_TYPE_MAP: Record<EventType, MAPEventType | MAPEventType[] | null> = {
   spawn: "agent.registered",
-  terminate: "agent.unregistered",
+  stop: "agent.unregistered",
   status: "agent.state.changed",
   message: ["message.sent", "message.delivered"], // Two events for message
   task: null, // Handled specially based on payload
@@ -105,8 +105,8 @@ export function translateEvent(
     case "spawn":
       return translateSpawnEvent(event, generateEventId);
 
-    case "terminate":
-      return translateTerminateEvent(event, generateEventId);
+    case "stop":
+      return translateStopEvent(event, generateEventId);
 
     case "status":
       return translateStatusEvent(event, generateEventId);
@@ -157,15 +157,15 @@ function translateSpawnEvent(
 }
 
 /**
- * Translate terminate event to agent.unregistered.
+ * Translate stop event to agent.unregistered.
  */
-function translateTerminateEvent(
+function translateStopEvent(
   event: Event,
   generateEventId: () => string
 ): TranslationResult {
   const agentId = event.source.agent_id;
   if (!agentId) {
-    return { translated: false, reason: "Terminate event missing agent_id" };
+    return { translated: false, reason: "Stop event missing agent_id" };
   }
 
   const notification: EventNotification = {

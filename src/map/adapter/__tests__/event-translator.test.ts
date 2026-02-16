@@ -77,9 +77,9 @@ describe("translateEvent", () => {
     });
   });
 
-  describe("terminate event", () => {
+  describe("stop event", () => {
     it("translates to agent.unregistered", () => {
-      const event = createTestEvent("terminate", {
+      const event = createTestEvent("stop", {
         payload: {
           reason: "completed",
           exit_code: 0,
@@ -380,7 +380,7 @@ describe("translateEvents", () => {
     const events = [
       createTestEvent("spawn"),
       createTestEvent("subscription"), // Not exposed
-      createTestEvent("terminate"),
+      createTestEvent("stop"),
     ];
 
     const results = translateEvents(events);

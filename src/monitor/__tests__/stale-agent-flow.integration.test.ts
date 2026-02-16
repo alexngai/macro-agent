@@ -262,7 +262,7 @@ describe("STALE_AGENT Flow Integration", () => {
 
       // Terminate the worker
       eventStore.emit({
-        type: "terminate",
+        type: "stop",
         source: { agent_id: workerId },
         payload: {
           agent_id: workerId,

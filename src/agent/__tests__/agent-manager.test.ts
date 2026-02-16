@@ -97,7 +97,7 @@ describe("AgentManager", () => {
 
         // Terminate one
         eventStore.emit({
-          type: "terminate",
+          type: "stop",
           source: { agent_id: "agent_2" },
           payload: { reason: "completed" },
         });

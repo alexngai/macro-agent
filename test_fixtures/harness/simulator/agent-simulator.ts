@@ -155,9 +155,9 @@ class DefaultAgentSimulator implements AgentSimulator {
   async stop(): Promise<void> {
     if (!this.running) return;
 
-    // Emit terminate event
+    // Emit stop event
     this.services.eventStore.emit({
-      type: "terminate",
+      type: "stop",
       source: { agent_id: this.agentId },
       payload: {
         agent_id: this.agentId,
@@ -753,9 +753,9 @@ class DefaultAgentSimulator implements AgentSimulator {
       });
     }
 
-    // Emit terminate event
+    // Emit stop event
     this.services.eventStore.emit({
-      type: "terminate",
+      type: "stop",
       source: { agent_id: this.agentId },
       payload: {
         agent_id: this.agentId,

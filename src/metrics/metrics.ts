@@ -186,7 +186,7 @@ export function getUtilizationMetrics(
     after: windowStart,
   });
   const terminateEvents = eventStore.query({
-    type: "terminate",
+    type: "stop",
     after: windowStart,
   });
 

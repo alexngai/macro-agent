@@ -687,8 +687,8 @@ Commit "Resolve conflict".
         // The agents are terminated manually because they don't autonomously call done()
         const allEvents = eventStore.query({});
         const spawnCount = allEvents.filter((e) => e.type === "spawn").length;
-        const terminateCount = allEvents.filter((e) => e.type === "terminate").length;
-        log(`✓ Events: ${spawnCount} spawns, ${terminateCount} terminates`);
+        const terminateCount = allEvents.filter((e) => e.type === "stop").length;
+        log(`✓ Events: ${spawnCount} spawns, ${terminateCount} stops`);
 
         expect(spawnCount).toBeGreaterThanOrEqual(3); // w1, w2, resolver
         expect(terminateCount).toBeGreaterThanOrEqual(3); // w1, w2, resolver
