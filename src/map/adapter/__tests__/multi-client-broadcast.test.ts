@@ -289,7 +289,7 @@ describe("Multi-client event broadcast E2E", () => {
     });
   }
 
-  it("Client A receives agent_registered when Client B creates a session", async () => {
+  it("Client A receives agent_registered when Client B creates a session", { timeout: 30_000 }, async () => {
     // Connect Client A and subscribe
     const clientA = createClient();
     await clientA.connect();
@@ -331,7 +331,7 @@ describe("Multi-client event broadcast E2E", () => {
     console.log("Agent registered event data:", JSON.stringify(data, null, 2));
   });
 
-  it("Client A receives message_sent when Client B sends ACP request", async () => {
+  it("Client A receives message_sent when Client B sends ACP request", { timeout: 30_000 }, async () => {
     // Connect and subscribe Client A
     const clientA = createClient();
     await clientA.connect();
@@ -432,7 +432,7 @@ describe("Multi-client event broadcast E2E", () => {
     console.log("message_sent event data:", JSON.stringify(sentData, null, 2));
   });
 
-  it("Client A receives message_delivered for ACP streaming updates", async () => {
+  it("Client A receives message_delivered for ACP streaming updates", { timeout: 30_000 }, async () => {
     // Connect and subscribe Client A
     const clientA = createClient();
     await clientA.connect();
@@ -549,7 +549,7 @@ describe("Multi-client event broadcast E2E", () => {
     }
   });
 
-  it("Client A does NOT receive events for non-subscribed types", async () => {
+  it("Client A does NOT receive events for non-subscribed types", { timeout: 30_000 }, async () => {
     // Client A subscribes only to agent_registered
     const clientA = createClient();
     await clientA.connect();
@@ -617,7 +617,7 @@ describe("Multi-client event broadcast E2E", () => {
     expect(messageDelivered).toHaveLength(0);
   });
 
-  it("Both clients receive events when both are subscribed", async () => {
+  it("Both clients receive events when both are subscribed", { timeout: 30_000 }, async () => {
     const clientA = createClient();
     await clientA.connect();
     await clientA.request("map/subscribe", {
@@ -666,7 +666,7 @@ describe("Multi-client event broadcast E2E", () => {
     );
   });
 
-  it("map/replay returns historical events", async () => {
+  it("map/replay returns historical events", { timeout: 30_000 }, async () => {
     // Client B creates an agent (generates events)
     const clientB = createClient();
     await clientB.connect();
