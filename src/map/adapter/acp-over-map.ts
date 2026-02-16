@@ -57,6 +57,18 @@ export interface ACPOverMAPConfig {
   eventStore: EventStore;
   taskManager: TaskManager;
   defaultCwd?: string;
+
+  /**
+   * Callback when a new agent is created via session/new or session/loadSession.
+   * Used by MAPAdapter to emit agent.registered events to all subscribers.
+   */
+  onAgentRegistered?: (agent: {
+    id: string;
+    name?: string;
+    role?: string;
+    parent?: string;
+    metadata?: Record<string, unknown>;
+  }) => void;
 }
 
 /**
@@ -84,18 +96,43 @@ export class ACPOverMAPHandler {
   private eventStore: EventStore;
   private taskManager: TaskManager;
   private defaultCwd: string;
+  private onAgentRegistered?: ACPOverMAPConfig["onAgentRegistered"];
 
   /** Stream states by streamId */
   private streams: Map<string, StreamState> = new Map();
 
   /** Session mapper for ACP session -> Agent mapping */
-  private sessionMapper: SessionMapper = new SessionMapper();
+  private sessionMapper: SessionMapper;
 
   constructor(config: ACPOverMAPConfig) {
     this.agentManager = config.agentManager;
     this.eventStore = config.eventStore;
     this.taskManager = config.taskManager;
     this.defaultCwd = config.defaultCwd ?? process.cwd();
+    this.onAgentRegistered = config.onAgentRegistered;
+
+    // Initialize session mapper with EventStore for persistence and recovery
+    this.sessionMapper = new SessionMapper(this.eventStore);
+    const recovered = this.sessionMapper.recoverFromStore();
+    if (recovered > 0) {
+      console.error(`[ACP-over-MAP] Recovered ${recovered} session(s) from store`);
+    }
+  }
+
+  /**
+   * Notify subscribers that a new agent was registered.
+   * Looks up agent details from EventStore and calls the onAgentRegistered callback.
+   */
+  private notifyAgentRegistered(agentId: string): void {
+    if (!this.onAgentRegistered) return;
+    const agent = this.eventStore.getAgent(agentId as AgentId);
+    this.onAgentRegistered({
+      id: agentId,
+      name: agent?.name,
+      role: agent?.role,
+      parent: agent?.parent ?? undefined,
+      metadata: agent?.metadata,
+    });
   }
 
   /**
@@ -267,6 +304,9 @@ export class ACPOverMAPHandler {
 
     console.error(`[ACP-over-MAP] Created session ${sessionId} -> agent ${spawned.id}`);
 
+    // Notify subscribers that a new agent was registered
+    this.notifyAgentRegistered(spawned.id);
+
     // Emit session_info_update so client has title/timestamps
     this.emitSessionInfo(streamState, sessionId, emitNotification);
 
@@ -343,6 +383,10 @@ export class ACPOverMAPHandler {
     streamState.sessionId = sessionId;
     streamState.agentId = spawned.id;
     this.sessionMapper.createMapping(sessionId as ACPSessionId, spawned.id);
+
+    // Notify subscribers that a new agent was registered
+    this.notifyAgentRegistered(spawned.id);
+
     this.emitSessionInfo(streamState, sessionId, emitNotification);
 
     return { sessionId };
@@ -525,10 +569,29 @@ export class ACPOverMAPHandler {
 
       return { stopReason };
     } catch (error) {
-      console.error(`[ACP-over-MAP] Prompt error:`, error);
+      // Extract a meaningful error message — errors from the ACP SDK may be
+      // plain objects ({code, message}) rather than Error instances.
+      let errorMessage: string;
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (
+        typeof error === "object" &&
+        error !== null &&
+        "message" in error &&
+        typeof (error as { message: unknown }).message === "string"
+      ) {
+        errorMessage = (error as { message: string }).message;
+      } else {
+        try {
+          errorMessage = JSON.stringify(error);
+        } catch {
+          errorMessage = String(error);
+        }
+      }
+      console.error(`[ACP-over-MAP] Prompt error for agent ${agentId}:`, errorMessage);
       return {
         stopReason: "end_turn",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
       };
     } finally {
       this.sessionMapper.setProcessing(sessionId as ACPSessionId, false);

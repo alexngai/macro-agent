@@ -208,7 +208,7 @@ describe("ACP-over-MAP history persistence (E2E with file-backed store)", () => 
           title: "ListFiles",
           status: "completed",
           rawInput: { path: "/src" },
-          output: "index.ts\napp.ts",
+          rawOutput: "index.ts\napp.ts",
         },
       ]),
       eventStore: eventStore1,

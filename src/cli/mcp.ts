@@ -14,6 +14,10 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { createMCPServer } from "../mcp/mcp-server.js";
+import { createTaskBackend, loadTaskConfigFromEnv } from "../task/backend/index.js";
+import { UnifiedTaskToolProvider } from "../task/backend/unified-tool-provider.js";
+import type { TaskBackend } from "../task/backend/types.js";
+import type { OpenTasksClient } from "../task/backend/opentasks/client.js";
 import {
   createActivityWatcher,
   subscribeAgentToEvents,
@@ -63,6 +67,28 @@ async function main() {
     const messageRouter = createMessageRouter(eventStore);
     const agentManager = createAgentManager(eventStore, messageRouter);
     const taskManager = createTaskManager(eventStore);
+
+    // Create task backend from env config (MACRO_TASK_BACKEND, OPENTASKS_SOCKET_PATH)
+    const taskConfig = loadTaskConfigFromEnv();
+    let taskBackend: TaskBackend | undefined;
+    let taskToolProvider: UnifiedTaskToolProvider | undefined;
+    let openTasksClient: OpenTasksClient | undefined;
+
+    try {
+      const result = await createTaskBackend(taskConfig, eventStore);
+      taskBackend = result.backend;
+      openTasksClient = result.openTasksClient;
+
+      // Create unified tool provider
+      taskToolProvider = new UnifiedTaskToolProvider(
+        taskBackend,
+        () => ({ agent_id: agentId! }),
+        openTasksClient
+      );
+      debugLog(`[MCP] Task backend created: ${taskConfig.backend.type}`);
+    } catch (err) {
+      debugLog(`[MCP] Failed to create task backend: ${err}. Falling back to legacy TaskManager only.`);
+    }
 
     // Get agent lineage for authorization checks
     // Note: The agent may not be in the store yet if the MCP server starts before
@@ -238,6 +264,8 @@ async function main() {
         taskMode: teamTaskMode as "push" | "pull" | undefined,
         roleRegistry,
         integrationStrategy,
+        taskBackend,
+        taskToolProvider,
       }
     );
 
@@ -247,6 +275,7 @@ async function main() {
     // Handle graceful shutdown
     process.on("SIGINT", async () => {
       activityWatcher.stop();
+      try { openTasksClient?.disconnect(); } catch { /* ignore */ }
       await mcpServer.close();
       await eventStore.close();
       process.exit(0);
@@ -254,6 +283,7 @@ async function main() {
 
     process.on("SIGTERM", async () => {
       activityWatcher.stop();
+      try { openTasksClient?.disconnect(); } catch { /* ignore */ }
       await mcpServer.close();
       await eventStore.close();
       process.exit(0);

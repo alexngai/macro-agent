@@ -18,6 +18,7 @@ import { createMessageRouter } from "../router/message-router.js";
 import { createAPIServer } from "../api/server.js";
 import { loadProjectConfig } from "../config/project-config.js";
 import { loadTeam, TeamRuntime } from "../teams/index.js";
+import { createTaskBackend, loadTaskConfigFromEnv } from "../task/backend/index.js";
 import type { Agent, Task } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -133,6 +134,17 @@ program
       const agentManager = createAgentManager(eventStore, messageRouter);
       const taskManager = createTaskManager(eventStore);
 
+      // Create task backend from env config
+      const taskConfig = loadTaskConfigFromEnv();
+      let openTasksClient: { disconnect(): void } | undefined;
+      try {
+        const result = await createTaskBackend(taskConfig, eventStore);
+        openTasksClient = result.openTasksClient;
+        console.log(chalk.blue(`Task backend: ${taskConfig.backend.type}`));
+      } catch (err) {
+        console.log(chalk.yellow(`Task backend creation failed: ${err}. Using legacy TaskManager.`));
+      }
+
       // Determine team name: CLI flag > project config > none
       const projectConfig = loadProjectConfig(options.cwd);
       const teamName = options.team ?? projectConfig.team;
@@ -193,6 +205,7 @@ program
         if (teamRuntime) await teamRuntime.teardown();
         await server.stop();
         await agentManager.close();
+        try { openTasksClient?.disconnect(); } catch { /* ignore */ }
         await eventStore.close();
         process.exit(0);
       });
@@ -734,6 +747,14 @@ program
       agentManager = createAgentManager(eventStore, messageRouter);
       const taskManager = createTaskManager(eventStore);
 
+      // Create task backend from env config
+      const taskConfig = loadTaskConfigFromEnv();
+      let openTasksClient: { disconnect(): void } | undefined;
+      try {
+        const result = await createTaskBackend(taskConfig, eventStore);
+        openTasksClient = result.openTasksClient;
+      } catch { /* non-critical for acp command */ }
+
       // Create stdio streams for ACP communication
       const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
       const output = new WritableStream<Uint8Array>({
@@ -769,6 +790,7 @@ program
         if (agentManager) {
           await agentManager.close();
         }
+        try { openTasksClient?.disconnect(); } catch { /* ignore */ }
         if (eventStore) {
           await eventStore.close();
         }

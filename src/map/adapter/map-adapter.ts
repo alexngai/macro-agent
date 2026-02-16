@@ -252,6 +252,23 @@ export class MAPAdapterImpl implements MAPAdapter {
         eventStore: services.eventStore,
         taskManager: services.taskManager,
         defaultCwd: services.defaultCwd,
+        // Emit agent_registered MAP events so all subscribers see new agents.
+        // Must use underscore format to match SDK EVENT_TYPES (exact string match).
+        onAgentRegistered: (agent) => {
+          this.emitEvent({
+            eventId: ulid(),
+            type: "agent_registered" as MAPEventType,
+            timestamp: Date.now(),
+            agentId: agent.id as AgentId,
+            data: {
+              agentId: agent.id,
+              name: agent.name,
+              role: agent.role,
+              parent: agent.parent,
+              metadata: agent.metadata,
+            },
+          });
+        },
       });
       console.error("[MAPAdapter] ACP-over-MAP handler initialized");
     }
@@ -1213,6 +1230,27 @@ export class MAPAdapterImpl implements MAPAdapter {
       );
     }
 
+    // Emit client→agent ACP request as a message_sent event so other
+    // TUI clients can observe user prompts and other ACP operations.
+    // Include from/to at top level of data for extractACPFromMessageEvent()
+    // which reads data.from/data.to for targetAgent resolution.
+    this.emitEvent({
+      eventId: ulid(),
+      type: "message_sent" as MAPEventType,
+      timestamp: Date.now(),
+      agentId: targetAgentId,
+      data: {
+        from: participantId,
+        to: targetAgentId,
+        message: {
+          id: `acp-req-${Date.now()}`,
+          from: participantId,
+          to: targetAgentId,
+          payload: envelope,
+        },
+      },
+    });
+
     // Create notification emitter to stream session updates
     const emitNotification = (notification: ACPEnvelope) => {
       this.emitEvent({
@@ -1221,6 +1259,8 @@ export class MAPAdapterImpl implements MAPAdapter {
         timestamp: Date.now(),
         agentId: targetAgentId,
         data: {
+          from: targetAgentId,
+          to: participantId,
           message: {
             id: `acp-notif-${Date.now()}`,
             from: targetAgentId,
@@ -1254,6 +1294,8 @@ export class MAPAdapterImpl implements MAPAdapter {
         timestamp: Date.now(),
         agentId: targetAgentId, // Must be at top level for subscription matching
         data: {
+          from: targetAgentId,
+          to: participantId,
           message: {
             id: `acp-resp-${Date.now()}`,
             from: targetAgentId,
@@ -1329,7 +1371,7 @@ export class MAPAdapterImpl implements MAPAdapter {
     // Emit agent state changed event for subscribers
     this.emitEvent({
       eventId: `stop-${Date.now()}`,
-      type: "agent.state.changed" as MAPEventType,
+      type: "agent_state_changed" as MAPEventType,
       timestamp: Date.now(),
       agentId,
       data: {

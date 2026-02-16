@@ -764,7 +764,7 @@ describe("MAPAdapter handleStopAgent (map/agents/stop)", () => {
     // Verify emitEvent was called with the right event shape
     expect(emitSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "agent.state.changed",
+        type: "agent_state_changed",
         agentId: "agent-1",
         data: expect.objectContaining({
           agentId: "agent-1",

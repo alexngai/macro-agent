@@ -594,6 +594,8 @@ export function createAgentManager(
             { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
             { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
             { name: "MACRO_PERMISSION_MODE", value: permissionMode },
+            { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
+            { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
           ],
         };
 

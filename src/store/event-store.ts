@@ -975,7 +975,14 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
    */
   async function close(): Promise<void> {
     if (persister) {
+      // Stop auto-save first to prevent race conditions between
+      // auto-save callbacks and the explicit save/destroy sequence.
+      await persister.stopAutoSave();
       await persister.save();
+      // TinyBase's save() resolves before all internal async SQL operations
+      // complete. Flush the microtask queue to let pending writes finish
+      // before we close the database connection.
+      await new Promise(resolve => setTimeout(resolve, 0));
       persister.destroy();
     }
     if (db) {

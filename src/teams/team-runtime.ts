@@ -362,6 +362,13 @@ export class TeamRuntime {
       if (strategyName) {
         teamEnv.MACRO_INTEGRATION_STRATEGY = strategyName;
       }
+      // Propagate task backend config from parent process
+      if (process.env.MACRO_TASK_BACKEND) {
+        teamEnv.MACRO_TASK_BACKEND = process.env.MACRO_TASK_BACKEND;
+      }
+      if (process.env.OPENTASKS_SOCKET_PATH) {
+        teamEnv.OPENTASKS_SOCKET_PATH = process.env.OPENTASKS_SOCKET_PATH;
+      }
 
       return {
         ...options,
