@@ -270,10 +270,11 @@ export class MAPAdapterImpl implements MAPAdapter {
             agentId,
             data: {
               agentId: event.agent.id,
-              name: event.agent.name,
-              role: event.agent.role,
+              name: event.agent.name ?? "",
+              role: event.agent.role ?? "worker",
+              state: event.agent.state ?? "spawning",
               parent: event.agent.parent ?? undefined,
-              metadata: event.agent.metadata,
+              metadata: event.agent.metadata ?? {},
             },
           });
         } else if (event.type === "stopped" && event.agent) {
