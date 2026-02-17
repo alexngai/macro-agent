@@ -804,8 +804,7 @@ export class MAPAdapterImpl implements MAPAdapter {
         this.handleUnsubscribe(participantId, params),
 
       // Replay
-      "map/replay": async (params) =>
-        this.handleReplay(participantId, params),
+      "map/replay": async (params) => this.handleReplay(participantId, params),
 
       // Messaging
       "map/send": async (params, ctx) =>
@@ -993,12 +992,19 @@ export class MAPAdapterImpl implements MAPAdapter {
     const connectParams = params as
       | {
           type?: ParticipantType;
+          participantType?: ParticipantType;
           name?: string;
           credentials?: AuthCredentials;
+          capabilities?: {
+            observation?: { canObserve?: boolean; canQuery?: boolean };
+            messaging?: { canSend?: boolean; canReceive?: boolean; canBroadcast?: boolean };
+            lifecycle?: { canSpawn?: boolean; canRegister?: boolean; canUnregister?: boolean; canSteer?: boolean; canStop?: boolean };
+            scopes?: { canCreateScopes?: boolean; canManageScopes?: boolean };
+          };
         }
       | undefined;
 
-    const requestedType = connectParams?.type ?? participant.type;
+    const requestedType = connectParams?.type ?? connectParams?.participantType ?? participant.type;
     const credentials = connectParams?.credentials;
 
     // Handle authentication if handler is configured and credentials provided
@@ -1027,15 +1033,39 @@ export class MAPAdapterImpl implements MAPAdapter {
       };
     }
 
-    // No auth handler or no credentials - use default capabilities for the type
-    if (requestedType !== participant.type) {
-      const defaultCapabilities = this.getDefaultCapabilities(requestedType);
-      this.connections.updateCapabilities(participantId, defaultCapabilities);
+    // Start with default capabilities for the requested type
+    const baseCapabilities = this.getDefaultCapabilities(requestedType);
+
+    // Merge client-requested capabilities (SDK nested format → flat format).
+    // Clients can request additional capabilities; the server grants them
+    // by merging with the type defaults.
+    if (connectParams?.capabilities) {
+      const req = connectParams.capabilities;
+      const requested: Partial<ParticipantCapabilities> = {};
+      if (req.observation?.canQuery !== undefined) requested.canQuery = req.observation.canQuery;
+      if (req.observation?.canObserve !== undefined) requested.canSubscribe = req.observation.canObserve;
+      if (req.messaging?.canSend !== undefined) requested.canMessage = req.messaging.canSend;
+      if (req.lifecycle?.canSpawn !== undefined) requested.canSpawn = req.lifecycle.canSpawn;
+      if (req.lifecycle?.canStop !== undefined) requested.canStop = req.lifecycle.canStop;
+      if (req.scopes?.canManageScopes !== undefined) requested.canManageScopes = req.scopes.canManageScopes;
+      const mergedCapabilities = { ...baseCapabilities, ...requested };
+      this.connections.updateCapabilities(participantId, mergedCapabilities);
 
       const updatedParticipant = this.connections.getParticipant(participantId);
       return {
         participantId: participant.id,
-        capabilities: updatedParticipant?.capabilities ?? defaultCapabilities,
+        capabilities: updatedParticipant?.capabilities ?? mergedCapabilities,
+      };
+    }
+
+    // No client-requested capabilities — apply type defaults if type changed
+    if (requestedType !== participant.type) {
+      this.connections.updateCapabilities(participantId, baseCapabilities);
+
+      const updatedParticipant = this.connections.getParticipant(participantId);
+      return {
+        participantId: participant.id,
+        capabilities: updatedParticipant?.capabilities ?? baseCapabilities,
       };
     }
 
@@ -1149,24 +1179,19 @@ export class MAPAdapterImpl implements MAPAdapter {
     }>;
     hasMore: boolean;
   }> {
-    const {
-      afterEventId,
-      fromTimestamp,
-      toTimestamp,
-      filter,
-      limit,
-    } = (params ?? {}) as {
-      afterEventId?: string;
-      fromTimestamp?: number;
-      toTimestamp?: number;
-      filter?: {
-        eventTypes?: string[];
-        fromAgents?: string[];
-        agents?: string[];
-        scopes?: string[];
+    const { afterEventId, fromTimestamp, toTimestamp, filter, limit } =
+      (params ?? {}) as {
+        afterEventId?: string;
+        fromTimestamp?: number;
+        toTimestamp?: number;
+        filter?: {
+          eventTypes?: string[];
+          fromAgents?: string[];
+          agents?: string[];
+          scopes?: string[];
+        };
+        limit?: number;
       };
-      limit?: number;
-    };
 
     // Translate SDK filter field names to internal format
     // SDK uses 'fromAgents', macro-agent uses 'agents'
@@ -1339,34 +1364,77 @@ export class MAPAdapterImpl implements MAPAdapter {
       acp: acp as ACPEnvelope["acp"],
       acpContext: acpContext as ACPEnvelope["acpContext"],
     };
-    const responseEnvelope = await this.acpOverMapHandler.processRequest(
-      targetAgentId,
-      acpEnvelope,
-      emitNotification,
-    );
 
-    console.error(`[ACP-over-MAP] Request processed - method=${acp.method}`);
-
-    // Emit response event to the participant's subscriptions
-    // SDK's stream.ts checks for "message_delivered" (underscore) not "message.delivered" (dot)
-    // Use underscore format for ACP-over-MAP compatibility
-    const participant = this.connections.getParticipant(participantId);
-    if (participant) {
-      this.emitEvent({
-        eventId: ulid(),
-        type: "message_delivered" as MAPEventType, // Cast needed - SDK expects underscore format
-        timestamp: Date.now(),
-        agentId: targetAgentId, // Must be at top level for subscription matching
-        data: {
-          from: targetAgentId,
-          to: participantId,
-          message: {
-            id: `acp-resp-${Date.now()}`,
+    // Helper to emit the final ACP response to the participant via subscription
+    const emitResponse = (responseEnvelope: ACPEnvelope) => {
+      const participant = this.connections.getParticipant(participantId);
+      if (participant) {
+        this.emitEvent({
+          eventId: ulid(),
+          type: "message_delivered" as MAPEventType,
+          timestamp: Date.now(),
+          agentId: targetAgentId,
+          data: {
             from: targetAgentId,
-            payload: responseEnvelope,
+            to: participantId,
+            message: {
+              id: `acp-resp-${Date.now()}`,
+              from: targetAgentId,
+              payload: responseEnvelope,
+            },
           },
-        },
-      });
+        });
+      }
+    };
+
+    // session/prompt can run for minutes — process it asynchronously so the
+    // map/send RPC returns immediately.  The ACP response will arrive via
+    // subscription (message_delivered event) when the prompt finishes.
+    // Other ACP methods (initialize, session/new, session/load, etc.) are
+    // fast and can be awaited normally.
+    const isLongRunning = acp.method === "session/prompt";
+
+    if (isLongRunning) {
+      this.acpOverMapHandler
+        .processRequest(targetAgentId, acpEnvelope, emitNotification)
+        .then((responseEnvelope) => {
+          console.error(
+            `[ACP-over-MAP] Async prompt completed - method=${acp.method}`,
+          );
+          emitResponse(responseEnvelope);
+        })
+        .catch((error) => {
+          console.error(`[ACP-over-MAP] Async prompt error:`, error);
+          // Emit error response so the client's ACP pending request resolves
+          emitResponse({
+            acp: {
+              jsonrpc: "2.0",
+              id: acp.id,
+              error: {
+                code: -32603,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              },
+            },
+            acpContext: {
+              streamId: acpContext.streamId,
+              sessionId: acpContext.sessionId ?? null,
+              direction: "agent-to-client",
+            },
+          } as ACPEnvelope);
+        });
+    } else {
+      const responseEnvelope =
+        await this.acpOverMapHandler.processRequest(
+          targetAgentId,
+          acpEnvelope,
+          emitNotification,
+        );
+
+      console.error(
+        `[ACP-over-MAP] Request processed - method=${acp.method}`,
+      );
+      emitResponse(responseEnvelope);
     }
 
     return {
@@ -1400,11 +1468,12 @@ export class MAPAdapterImpl implements MAPAdapter {
     _participantId: ParticipantId,
     params: unknown,
   ): Promise<{ stopping: boolean; agent?: AgentInfo }> {
-    const { agentId, reason, force } = (params as {
-      agentId?: AgentId;
-      reason?: string;
-      force?: boolean;
-    }) ?? {};
+    const { agentId, reason, force } =
+      (params as {
+        agentId?: AgentId;
+        reason?: string;
+        force?: boolean;
+      }) ?? {};
 
     if (!agentId) {
       throw RPCError.invalidParams("agentId required");

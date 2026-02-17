@@ -831,10 +831,19 @@ export class ACPOverMAPHandler {
           throw new Error(`Agent not found: ${agentId}`);
         }
 
+        // If the agent is already running, return its current state
+        // instead of throwing. The caller likely just wants to ensure
+        // the agent is active, which it already is.
         if (agent.state !== "stopped" && agent.state !== "failed") {
-          throw new Error(
-            `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`,
+          console.error(
+            `[ACP-over-MAP] _macro/resume: Agent ${agentId} is already ${agent.state}, returning current state`,
           );
+          return {
+            success: true,
+            agentId: agent.id,
+            sessionId: agent.session_id,
+            alreadyRunning: true,
+          };
         }
 
         const spawned = await this.agentManager.resume(agentId as AgentId);
