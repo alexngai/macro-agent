@@ -384,6 +384,44 @@ export class ACPOverMAPHandler {
       console.error(
         `[ACP-over-MAP] loadSession: Resolved agentId ${metaAgentId} to session ${sessionId}`,
       );
+
+      // Handle the agent directly — works for both head managers and sub-agents.
+      // The previous code only searched listHeadManagers(), so sub-agents
+      // were never found and a new head manager was created instead.
+      if (this.agentManager.hasActiveSession(metaAgentId as AgentId)) {
+        console.error(
+          `[ACP-over-MAP] loadSession: Reusing active session for agent ${metaAgentId}`,
+        );
+      } else {
+        // Agent exists but no active session — resume it
+        console.error(
+          `[ACP-over-MAP] loadSession: Resuming agent ${metaAgentId}`,
+        );
+        try {
+          await this.agentManager.resume(
+            metaAgentId as AgentId,
+            streamState.permissionMode,
+          );
+        } catch (resumeErr) {
+          // ALREADY_RUNNING can happen in a race — safe to ignore
+          const code = (resumeErr as { code?: string }).code;
+          if (code !== "ALREADY_RUNNING") {
+            throw resumeErr;
+          }
+          console.error(
+            `[ACP-over-MAP] loadSession: Agent ${metaAgentId} already running (race), continuing`,
+          );
+        }
+      }
+
+      streamState.sessionId = sessionId;
+      streamState.agentId = metaAgentId as AgentId;
+      this.sessionMapper.createMapping(
+        sessionId as ACPSessionId,
+        metaAgentId as AgentId,
+      );
+      this.emitSessionInfo(streamState, sessionId, emitNotification);
+      return { sessionId };
     }
 
     const workingDir = cwd ?? this.defaultCwd;

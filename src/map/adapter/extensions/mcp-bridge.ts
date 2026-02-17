@@ -105,8 +105,9 @@ function createSpawnAgentBridge(services: MCPBridgeServices): ExtensionHandler {
   return async (_extCtx: ExtensionContext, params: unknown) => {
     const { context, args } = extractContext(params);
 
+    const task = args.task as string;
     const spawned = await services.agentManager.spawn({
-      task: args.task as string,
+      task,
       parent: context.agent_id,
       subscribeParent: (args.subscribe_parent as boolean) ?? true,
       topics: (args.topics as string[]) ?? [],
@@ -114,6 +115,26 @@ function createSpawnAgentBridge(services: MCPBridgeServices): ExtensionHandler {
       cwd: (args.cwd as string) ?? context.cwd,
       permissionMode: (args.permission_mode as string | undefined) as import("acp-factory").PermissionMode | undefined,
     });
+
+    // Fire-and-forget initial prompt so the agent starts working on its task.
+    // Without this, the agent process is running but idle — waiting for a message.
+    if (task) {
+      (async () => {
+        try {
+          for await (const _update of services.agentManager.prompt(
+            spawned.id,
+            task,
+          )) {
+            // drain iterator — updates flow via event subscriptions
+          }
+        } catch (err) {
+          console.error(
+            `[MCP Bridge] Failed to send initial prompt to spawned agent ${spawned.id}:`,
+            err,
+          );
+        }
+      })();
+    }
 
     return {
       agent_id: spawned.id,
