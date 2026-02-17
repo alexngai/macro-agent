@@ -400,8 +400,12 @@ export class SubscriptionManagerImpl implements SubscriptionManager {
     }
 
     // Event type filter (OR within array)
+    // Normalize between underscore format (SDK: "agent_registered") and
+    // dot format (internal: "agent.registered") so subscriptions match
+    // regardless of which convention the client uses.
     if (filter.eventTypes && filter.eventTypes.length > 0) {
-      if (!filter.eventTypes.includes(event.type as MAPEventType)) {
+      const normalizedEventType = event.type.replace(/\./g, "_");
+      if (!filter.eventTypes.some((ft) => ft.replace(/\./g, "_") === normalizedEventType)) {
         return false;
       }
     }

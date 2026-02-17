@@ -231,7 +231,6 @@ export class MAPAdapterImpl implements MAPAdapter {
     new Map();
   /** In-memory event log for map/replay support */
   private readonly eventLog: EventLog;
-
   private running = false;
 
   constructor(
@@ -252,25 +251,89 @@ export class MAPAdapterImpl implements MAPAdapter {
         eventStore: services.eventStore,
         taskManager: services.taskManager,
         defaultCwd: services.defaultCwd,
-        // Emit agent_registered MAP events so all subscribers see new agents.
-        // Must use underscore format to match SDK EVENT_TYPES (exact string match).
-        onAgentRegistered: (agent) => {
+        // Note: agent_registered events are now emitted by the lifecycle
+        // listener below, which covers ALL spawn paths (ACP, MCP, etc.)
+      });
+      console.error("[MAPAdapter] ACP-over-MAP handler initialized");
+    }
+
+    // Listen for agent lifecycle events so spawns/stops happening in THIS
+    // process (main server) emit MAP events to subscribers immediately.
+    if (services.agentManager) {
+      services.agentManager.onLifecycleEvent((event) => {
+        if (event.type === "spawned" && event.agent) {
+          const agentId = event.agent.id as AgentId;
           this.emitEvent({
             eventId: ulid(),
             type: "agent_registered" as MAPEventType,
             timestamp: Date.now(),
-            agentId: agent.id as AgentId,
+            agentId,
             data: {
-              agentId: agent.id,
-              name: agent.name,
-              role: agent.role,
-              parent: agent.parent,
-              metadata: agent.metadata,
+              agentId: event.agent.id,
+              name: event.agent.name,
+              role: event.agent.role,
+              parent: event.agent.parent ?? undefined,
+              metadata: event.agent.metadata,
             },
           });
-        },
+        } else if (event.type === "stopped" && event.agent) {
+          const agentId = event.agent.id as AgentId;
+          this.emitEvent({
+            eventId: ulid(),
+            type: "agent_state_changed" as MAPEventType,
+            timestamp: Date.now(),
+            agentId,
+            data: {
+              agentId: event.agent.id,
+              current: "stopped",
+              previous: "running",
+              reason: event.reason,
+            },
+          });
+          this.emitEvent({
+            eventId: ulid(),
+            type: "agent_unregistered" as MAPEventType,
+            timestamp: Date.now(),
+            agentId,
+            data: {
+              agentId: event.agent.id,
+              reason: event.reason,
+            },
+          });
+        }
       });
-      console.error("[MAPAdapter] ACP-over-MAP handler initialized");
+    }
+
+    // Listen for EventStore task changes to emit MAP task events.
+    // Task mutations from MCP bridge handlers run in-process, so
+    // onTaskChange fires immediately when tasks are created/updated.
+    if (services.eventStore) {
+      services.eventStore.onTaskChange((taskId, task) => {
+        if (!task) return;
+        // Map task status to MAP event type
+        const eventTypeMap: Record<string, string> = {
+          pending: "task_created",
+          assigned: "task_assigned",
+          in_progress: "task_assigned",
+          completed: "task_completed",
+          failed: "task_failed",
+        };
+        const mapEventType = eventTypeMap[task.status];
+        if (mapEventType) {
+          this.emitEvent({
+            eventId: ulid(),
+            type: mapEventType as MAPEventType,
+            timestamp: Date.now(),
+            agentId: (task.assigned_agent ?? undefined) as AgentId | undefined,
+            data: {
+              taskId,
+              description: task.description,
+              status: task.status,
+              assignee: task.assigned_agent,
+            },
+          });
+        }
+      });
     }
 
     // Initialize connection manager
@@ -1368,31 +1431,8 @@ export class MAPAdapterImpl implements MAPAdapter {
       );
     }
 
-    // Emit agent state changed event for subscribers
-    this.emitEvent({
-      eventId: `stop-${Date.now()}`,
-      type: "agent_state_changed" as MAPEventType,
-      timestamp: Date.now(),
-      agentId,
-      data: {
-        agentId,
-        current: "stopped",
-        previous: "running",
-        reason: reason ?? "cancelled",
-      },
-    });
-
-    // Emit agent unregistered event for subscribers
-    this.emitEvent({
-      eventId: `unreg-${Date.now()}`,
-      type: "agent_unregistered" as MAPEventType,
-      timestamp: Date.now(),
-      agentId,
-      data: {
-        agentId,
-        reason: reason ?? "cancelled",
-      },
-    });
+    // Note: agent_state_changed and agent_unregistered events are now
+    // emitted by the lifecycle listener (covers all stop paths).
 
     return { stopping: true };
   }

@@ -27,6 +27,7 @@ import {
   createMAPWebSocketHandler,
   registerWorkspaceFileExtensions,
   registerUpdateMetadataExtension,
+  registerMCPBridgeExtensions,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
@@ -257,6 +258,16 @@ export function createCombinedServer(
     registerUpdateMetadataExtension(mapAdapter, {
       getAgent: (id) => services.agentManager.get(id),
       updateAgentMetadata: (id, updates) => services.eventStore.updateAgentMetadata(id, updates),
+    });
+
+    // Register MCP bridge extensions for thin-client MCP subprocesses
+    registerMCPBridgeExtensions(mapAdapter, {
+      eventStore: services.eventStore,
+      agentManager: services.agentManager,
+      taskManager: services.taskManager,
+      messageRouter: services.messageRouter,
+      peerManager: services.peerManager,
+      activityWatcher: services.activityWatcher,
     });
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);

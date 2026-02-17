@@ -217,8 +217,13 @@ async function main() {
     wakeHandler: routerWakeHandler,
   });
 
+  // Compute server URL for thin-client MCP mode (only in server mode, not stdio ACP)
+  const serverUrl = options.acp
+    ? undefined
+    : `http://${options.host ?? "localhost"}:${options.port ?? 3001}`;
+
   // Now create the agentManager with the real router
-  agentManager = createAgentManager(eventStore, messageRouter);
+  agentManager = createAgentManager(eventStore, messageRouter, { serverUrl });
   const taskManager = createTaskManager(eventStore);
 
   // Create ActivityWatcher for event-driven agent waking

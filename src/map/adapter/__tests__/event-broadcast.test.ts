@@ -296,7 +296,7 @@ describe("Multi-client event broadcast", () => {
     expect(pairA.clientMessages).toHaveLength(0);
   });
 
-  it("dot format event types do NOT match underscore subscriptions", async () => {
+  it("dot format event types match underscore subscriptions via normalization", async () => {
     await adapter.start();
 
     const pairA = createMockStreamPair();
@@ -306,7 +306,7 @@ describe("Multi-client event broadcast", () => {
       eventTypes: ["agent_registered" as MAPEventType],
     });
 
-    // Emit with DOT format — should NOT match (exact string comparison)
+    // Emit with DOT format — SHOULD match after normalization
     adapter.emitEvent({
       eventId: ulid(),
       type: "agent.registered" as MAPEventType,
@@ -317,8 +317,10 @@ describe("Multi-client event broadcast", () => {
 
     await flushAsync();
 
-    // Should NOT receive — this verifies why the original bug existed
-    expect(pairA.clientMessages).toHaveLength(0);
+    // Should receive — normalization converts dots to underscores for matching
+    expect(pairA.clientMessages.length).toBeGreaterThan(0);
+    const notification = pairA.clientMessages[0] as { method: string };
+    expect(notification.method).toBe("map/event");
   });
 
   it("underscore format event types DO match underscore subscriptions", async () => {

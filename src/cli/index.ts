@@ -131,7 +131,8 @@ program
       // Initialize services
       const eventStore = await createEventStore({ inMemory: false });
       const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
+      const serverUrl = `http://${options.host}:${options.port}`;
+      const agentManager = createAgentManager(eventStore, messageRouter, { serverUrl });
       const taskManager = createTaskManager(eventStore);
 
       // Create task backend from env config

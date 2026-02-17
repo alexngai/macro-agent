@@ -33,6 +33,7 @@ describe("createCombinedServer with MAP", () => {
         get: vi.fn().mockReturnValue(null),
         list: vi.fn().mockReturnValue([]),
         getChildren: vi.fn().mockReturnValue([]),
+        onLifecycleEvent: vi.fn(),
       } as unknown as AgentManager,
       eventStore: {
         append: vi.fn(),

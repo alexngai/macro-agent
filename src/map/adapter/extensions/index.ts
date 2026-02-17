@@ -59,6 +59,14 @@ export {
   type UpdateMetadataExtensionServices,
 } from "./update-metadata.js";
 
+// MCP bridge extensions
+export {
+  registerMCPBridgeExtensions,
+  unregisterMCPBridgeExtensions,
+  MCP_BRIDGE_METHODS,
+  type MCPBridgeServices,
+} from "./mcp-bridge.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
@@ -67,6 +75,7 @@ import type { WorkspaceFileServices } from "./workspace-files.js";
 import type { ResumeExtensionServices } from "./resume.js";
 import type { AgentDetectionExtensionServices } from "./agent-detection.js";
 import type { UpdateMetadataExtensionServices } from "./update-metadata.js";
+import type { MCPBridgeServices } from "./mcp-bridge.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
@@ -74,6 +83,7 @@ import { registerWorkspaceFileExtensions } from "./workspace-files.js";
 import { registerResumeExtension } from "./resume.js";
 import { registerAgentDetectionExtensions } from "./agent-detection.js";
 import { registerUpdateMetadataExtension } from "./update-metadata.js";
+import { registerMCPBridgeExtensions, unregisterMCPBridgeExtensions, MCP_BRIDGE_METHODS } from "./mcp-bridge.js";
 
 // =============================================================================
 // Combined Registration
@@ -90,6 +100,7 @@ export interface MacroExtensionServices {
   resume?: ResumeExtensionServices;
   agentDetection?: AgentDetectionExtensionServices;
   updateMetadata?: UpdateMetadataExtensionServices;
+  mcpBridge?: MCPBridgeServices;
 }
 
 /**
@@ -154,6 +165,10 @@ export function registerMacroExtensions(
   if (services.updateMetadata) {
     registerUpdateMetadataExtension(adapter, services.updateMetadata);
   }
+
+  if (services.mcpBridge) {
+    registerMCPBridgeExtensions(adapter, services.mcpBridge);
+  }
 }
 
 /**
@@ -182,6 +197,8 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
   } catch {
     // Ignore errors from unregistering non-existent extensions
   }
+  // Also unregister MCP bridge extensions
+  unregisterMCPBridgeExtensions(adapter);
 }
 
 // =============================================================================
@@ -214,6 +231,8 @@ export const MACRO_EXTENSION_METHODS = [
   "_macro/agents/refresh",
   // Update metadata extension
   "_macro/agents/update",
+  // MCP bridge extensions
+  ...MCP_BRIDGE_METHODS,
 ] as const;
 
 /**

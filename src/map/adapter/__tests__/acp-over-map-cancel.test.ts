@@ -742,8 +742,26 @@ describe("MAPAdapter handleStopAgent (map/agents/stop)", () => {
     ).rejects.toThrow("Failed to stop agent: Agent not found");
   });
 
-  it("should emit agent.state.changed event via emitEvent", async () => {
-    await setupAdapter();
+  it("should emit agent.state.changed event via lifecycle listener", async () => {
+    // Capture lifecycle callback so we can fire it from the mock terminate
+    let lifecycleCallback: ((event: unknown) => void) | undefined;
+
+    await setupAdapter({
+      onLifecycleEvent: vi.fn().mockImplementation((cb: (event: unknown) => void) => {
+        lifecycleCallback = cb;
+        return () => {};
+      }),
+      terminate: vi.fn().mockImplementation(async () => {
+        // Simulate what real agentManager.terminate() does: fire lifecycle
+        if (lifecycleCallback) {
+          lifecycleCallback({
+            type: "stopped",
+            agent: { id: "agent-1", name: "test-agent", role: "worker", state: "stopped" },
+            reason: "user stopped",
+          });
+        }
+      }),
+    } as unknown as Partial<AgentManager>);
 
     const impl = adapter as unknown as {
       handleStopAgent: (
@@ -761,7 +779,7 @@ describe("MAPAdapter handleStopAgent (map/agents/stop)", () => {
       { agentId: "agent-1" as AgentId, reason: "user stopped" },
     );
 
-    // Verify emitEvent was called with the right event shape
+    // Verify emitEvent was called with the right event shape via lifecycle
     expect(emitSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "agent_state_changed",

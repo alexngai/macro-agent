@@ -1220,3 +1220,139 @@ export function createMCPServer(
     close,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Thin-Client Factory (MAP WebSocket mode)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Type for the mapCall function used in thin-client mode.
+ */
+export type MapCallFn = <T = unknown>(
+  method: string,
+  params?: unknown,
+  options?: { timeoutMs?: number }
+) => Promise<T>;
+
+/**
+ * Creates a thin-client MCP server where every tool handler calls
+ * the main server via MAP WebSocket RPC instead of using local services.
+ *
+ * Tool schemas, descriptions, and role filtering remain the same.
+ * Only the handler bodies change — they forward to `_macro/mcp/*` extensions.
+ */
+export function createMCPServerThinClient(
+  context: ToolContext,
+  mapCallFn: MapCallFn,
+  config: MCPServerConfig = {}
+): MCPServerInstance {
+  const { name = "macro-agent-mcp", version = "1.0.0" } = config;
+
+  const server = new McpServer(
+    { name, version },
+    { capabilities: { tools: {} } }
+  );
+
+  /**
+   * Helper: wrap args with agent context for the bridge handler.
+   */
+  function withContext(args: Record<string, unknown>): Record<string, unknown> {
+    return { ...args, context };
+  }
+
+  /**
+   * Helper: create a tool handler that forwards to a MAP bridge extension.
+   */
+  function bridgeTool(
+    toolName: string,
+    schema: Record<string, z.ZodTypeAny>,
+    description: string,
+    mapMethod: string,
+    options?: { timeoutMs?: number }
+  ) {
+    server.registerTool(toolName, { description, inputSchema: schema }, async (args) => {
+      try {
+        const result = await mapCallFn(mapMethod, withContext(args as Record<string, unknown>), options);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new MCPToolError(`${toolName} failed: ${message}`, "ROUTING_FAILED");
+      }
+    });
+  }
+
+  // Register all tools pointing to their _macro/mcp/* bridge counterparts
+
+  bridgeTool("spawn_agent", SpawnAgentSchema, "Spawn a child agent to work on a subtask",
+    "_macro/mcp/spawn_agent");
+
+  bridgeTool("emit_status", EmitStatusSchema, "Report a status milestone (started, checkpoint, completed, failed, blocked)",
+    "_macro/mcp/emit_status");
+
+  bridgeTool("send_message", SendMessageSchema, "Send a message to another agent, task, or topic",
+    "_macro/mcp/send_message");
+
+  bridgeTool("check_messages", CheckMessagesSchema, "Check pending messages in your inbox",
+    "_macro/mcp/check_messages");
+
+  bridgeTool("query_index", QueryIndexSchema, "Search for agents and tasks",
+    "_macro/mcp/query_index");
+
+  bridgeTool("get_hierarchy", GetHierarchySchema, "View the agent hierarchy tree",
+    "_macro/mcp/get_hierarchy");
+
+  bridgeTool("get_agent_summary", GetAgentSummarySchema, "Get detailed summary of a specific agent",
+    "_macro/mcp/get_agent_summary");
+
+  bridgeTool("stop_agent", StopAgentSchema, "Stop a child agent in your subtree",
+    "_macro/mcp/stop_agent");
+
+  bridgeTool("done", DoneSchema, DONE_TOOL_INFO.description,
+    "_macro/mcp/done");
+
+  bridgeTool("inject_context", InjectContextSchema, INJECT_CONTEXT_TOOL_INFO.description,
+    "_macro/mcp/inject_context");
+
+  bridgeTool("wait_for_activity", WaitForActivitySchema, WAIT_FOR_ACTIVITY_TOOL_INFO.description,
+    "_macro/mcp/wait_for_activity", { timeoutMs: 65000 }); // Extra buffer for long-poll
+
+  bridgeTool("claim_task", ClaimTaskSchema, CLAIM_TASK_TOOL_INFO.description,
+    "_macro/mcp/claim_task");
+
+  bridgeTool("unclaim_task", UnclaimTaskSchema, UNCLAIM_TASK_TOOL_INFO.description,
+    "_macro/mcp/unclaim_task");
+
+  bridgeTool("list_claimable_tasks", ListClaimableTasksSchema, LIST_CLAIMABLE_TASKS_TOOL_INFO.description,
+    "_macro/mcp/list_claimable_tasks");
+
+  bridgeTool("send_peer_message", SendPeerMessageSchema, "Send a fire-and-forget message to another macro-agent (peer)",
+    "_macro/mcp/send_peer_message");
+
+  bridgeTool("send_peer_request", SendPeerRequestSchema, "Send a request to another macro-agent (peer) and wait for response",
+    "_macro/mcp/send_peer_request");
+
+  bridgeTool("respond_to_peer_request", RespondToPeerRequestSchema, "Respond to an incoming peer request",
+    "_macro/mcp/respond_to_peer_request");
+
+  // ─────────────────────────────────────────────────────────────────
+  // Server Lifecycle
+  // ─────────────────────────────────────────────────────────────────
+
+  let transport: StdioServerTransport | null = null;
+
+  async function start(): Promise<void> {
+    transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
+
+  async function close(): Promise<void> {
+    if (transport) {
+      await server.close();
+      transport = null;
+    }
+  }
+
+  return { server, start, close };
+}

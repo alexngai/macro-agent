@@ -368,6 +368,13 @@ export interface AgentManagerConfig {
    * Required when mailService is provided.
    */
   conversationMap?: import("../mail/conversation-map.js").ConversationMap;
+
+  /**
+   * Optional server URL for MCP thin-client mode.
+   * When set, spawned agents use ephemeral MAP WebSocket calls instead
+   * of creating local service stacks.
+   */
+  serverUrl?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -400,6 +407,7 @@ export function createAgentManager(
     healthCheckService,
     mailService: initialMailService,
     conversationMap: initialConversationMap,
+    serverUrl,
   } = config;
 
   // Mutable mail services (support late binding via setMailServices)
@@ -436,22 +444,40 @@ export function createAgentManager(
     taskId: string;
     cwd: string;
     permissionMode: string;
+    lineage?: string[];
+    sessionId?: string;
   }) {
+    // Common env vars for both thin-client and legacy modes
+    const env = [
+      { name: "MACRO_AGENT_ID", value: opts.agentId },
+      { name: "MACRO_PARENT_ID", value: opts.parentId },
+      { name: "MACRO_TASK_ID", value: opts.taskId },
+      { name: "MACRO_AGENT_CWD", value: opts.cwd },
+      { name: "MACRO_PERMISSION_MODE", value: opts.permissionMode },
+      { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
+      { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
+    ];
+
+    if (serverUrl) {
+      // Thin-client mode: forward tool calls to main server via MAP WebSocket
+      env.push(
+        { name: "MACRO_SERVER_URL", value: serverUrl },
+        { name: "MACRO_AGENT_LINEAGE", value: JSON.stringify(opts.lineage ?? []) },
+        { name: "MACRO_SESSION_ID", value: opts.sessionId ?? "" },
+      );
+    } else {
+      // Legacy mode: create local service stack with shared SQLite
+      env.push(
+        { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
+        { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
+      );
+    }
+
     return {
       name: "macro-agent",
       command: "npx",
       args: ["multiagent-mcp"],
-      env: [
-        { name: "MACRO_AGENT_ID", value: opts.agentId },
-        { name: "MACRO_PARENT_ID", value: opts.parentId },
-        { name: "MACRO_TASK_ID", value: opts.taskId },
-        { name: "MACRO_AGENT_CWD", value: opts.cwd },
-        { name: "MACRO_INSTANCE_ID", value: eventStore.instanceId },
-        { name: "MACRO_BASE_DIR", value: eventStore.baseDir },
-        { name: "MACRO_PERMISSION_MODE", value: opts.permissionMode },
-        { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
-        { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
-      ],
+      env,
     };
   }
 
@@ -619,6 +645,8 @@ export function createAgentManager(
           taskId,
           cwd,
           permissionMode,
+          lineage: parentAgent?.lineage ? [...parentAgent.lineage, parent!] : [],
+          sessionId,
         });
 
         // Combine with any user-provided MCP servers
@@ -1026,6 +1054,8 @@ export function createAgentManager(
         taskId: agent.task_id ?? "",
         cwd: agentCwd,
         permissionMode,
+        lineage: agent.lineage ?? [],
+        sessionId: agent.session_id ?? "",
       });
       const mcpServers = [macroAgentMcp];
 
@@ -1189,6 +1219,8 @@ export function createAgentManager(
         taskId,
         cwd,
         permissionMode: defaultPermissionMode,
+        lineage: sourceAgent.lineage ?? [],
+        sessionId,
       });
 
       // Load the forked session on the new process with correct MCP config.
