@@ -2,8 +2,8 @@
  * Role Registry Implementation
  *
  * Manages role definitions with layered resolution:
- * - Project-level (.macro-agent/roles)
- * - User-level (~/.macro-agent/roles)
+ * - Project-level (.multiagent/roles)
+ * - User-level (~/.multiagent/roles)
  * - Built-in (framework)
  */
 

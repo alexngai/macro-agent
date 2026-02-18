@@ -71,6 +71,7 @@ import type { AgentId, EventId } from "../store/types/index.js";
 
 import { parseArgs } from "./parse-args.js";
 import { getStableInstanceId } from "./stable-instance-id.js";
+import { loadMergedConfig } from "../config/project-config.js";
 
 // Re-export utilities for backwards compatibility
 export { parseArgs, type ACPServerOptions } from "./parse-args.js";
@@ -222,16 +223,17 @@ async function main() {
     ? undefined
     : `http://${options.host ?? "localhost"}:${options.port ?? 3001}`;
 
-  // Set up authentication tokens
-  // Auth is only enforced when MACRO_SERVER_SECRET is set or --no-auth explicitly disables it.
-  // Without MACRO_SERVER_SECRET, the server runs without auth for local development.
-  const noAuth = options.noAuth || process.env.MACRO_NO_AUTH === "true";
+  // Load merged config (global → project → env vars)
+  const mergedConfig = loadMergedConfig(defaultCwd);
+
+  // Set up authentication tokens from merged config
+  const noAuth = options.noAuth || mergedConfig.auth?.disabled === true;
   let serverToken: string | undefined;
   let agentTokenManager: import("../auth/token.js").AgentTokenManager | undefined;
 
-  if (!noAuth && process.env.MACRO_SERVER_SECRET) {
+  if (!noAuth && mergedConfig.auth?.secret) {
     const { AgentTokenManager } = await import("../auth/token.js");
-    serverToken = process.env.MACRO_SERVER_SECRET;
+    serverToken = mergedConfig.auth.secret;
     agentTokenManager = new AgentTokenManager();
   }
 
@@ -240,11 +242,13 @@ async function main() {
     serverUrl,
     serverToken: serverUrl ? serverToken : undefined,
     agentTokenManager: serverUrl ? agentTokenManager : undefined,
+    taskBackend: mergedConfig.task?.backend,
+    openTasksSocketPath: mergedConfig.task?.opentasks?.socket_path,
   });
   const taskManager = createTaskManager(eventStore);
 
   // Create task backend for dynamic task tools (create_task, get_task, etc.)
-  const { createTaskBackend, loadTaskConfigFromEnv } = await import("../task/backend/index.js");
+  const { createTaskBackend, loadTaskConfigFromMerged } = await import("../task/backend/index.js");
   const { UnifiedTaskToolProvider } = await import("../task/backend/unified-tool-provider.js");
 
   let taskBackend: import("../task/backend/types.js").TaskBackend | undefined;
@@ -256,7 +260,7 @@ async function main() {
   const taskToolContext = { agent_id: "" as string };
 
   try {
-    const taskConfig = loadTaskConfigFromEnv();
+    const taskConfig = loadTaskConfigFromMerged(mergedConfig);
     const result = await createTaskBackend(taskConfig, eventStore);
     taskBackend = result.backend;
 

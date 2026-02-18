@@ -203,6 +203,34 @@ export function loadTaskConfigFromEnv(): TaskConfig {
 }
 
 /**
+ * Load task configuration from a merged MultiagentConfig.
+ *
+ * Use this instead of loadTaskConfigFromEnv() when you have
+ * a merged config from the layered config system.
+ *
+ * @param config - Merged config with task settings already resolved
+ * @returns Task configuration
+ */
+export function loadTaskConfigFromMerged(config: {
+  task?: { backend?: string; opentasks?: { socket_path?: string } };
+}): TaskConfig {
+  const backendType = config.task?.backend ?? "memory";
+
+  if (backendType === "opentasks") {
+    return {
+      backend: {
+        type: "opentasks",
+        socketPath: config.task?.opentasks?.socket_path,
+      },
+    };
+  }
+
+  return {
+    backend: { type: "memory" },
+  };
+}
+
+/**
  * Default task configuration (in-memory backend)
  */
 export { DEFAULT_TASK_CONFIG, DEFAULT_OPENTASKS_CONFIG };

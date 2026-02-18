@@ -394,6 +394,18 @@ export interface AgentManagerConfig {
    * and revokes it on terminate.
    */
   agentTokenManager?: AgentTokenManager;
+
+  /**
+   * Task backend type to propagate to child MCP subprocesses.
+   * Sourced from merged config. Falls back to MACRO_TASK_BACKEND env var.
+   */
+  taskBackend?: string;
+
+  /**
+   * OpenTasks socket path to propagate to child MCP subprocesses.
+   * Sourced from merged config. Falls back to OPENTASKS_SOCKET_PATH env var.
+   */
+  openTasksSocketPath?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -429,6 +441,8 @@ export function createAgentManager(
     serverUrl,
     serverToken,
     agentTokenManager,
+    taskBackend: configTaskBackend,
+    openTasksSocketPath: configOpenTasksSocketPath,
   } = config;
 
   // Mutable mail services (support late binding via setMailServices)
@@ -477,11 +491,11 @@ export function createAgentManager(
       { name: "MACRO_PERMISSION_MODE", value: opts.permissionMode },
       {
         name: "MACRO_TASK_BACKEND",
-        value: process.env.MACRO_TASK_BACKEND ?? "",
+        value: configTaskBackend ?? process.env.MACRO_TASK_BACKEND ?? "",
       },
       {
         name: "OPENTASKS_SOCKET_PATH",
-        value: process.env.OPENTASKS_SOCKET_PATH ?? "",
+        value: configOpenTasksSocketPath ?? process.env.OPENTASKS_SOCKET_PATH ?? "",
       },
     ];
 

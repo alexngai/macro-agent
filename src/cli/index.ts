@@ -16,9 +16,9 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { createAPIServer } from "../api/server.js";
-import { loadProjectConfig } from "../config/project-config.js";
+import { loadMergedConfig } from "../config/project-config.js";
 import { loadTeam, TeamRuntime } from "../teams/index.js";
-import { createTaskBackend, loadTaskConfigFromEnv } from "../task/backend/index.js";
+import { createTaskBackend, loadTaskConfigFromMerged } from "../task/backend/index.js";
 import type { Agent, Task } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -128,15 +128,22 @@ program
     console.log(chalk.blue("Starting multi-agent server..."));
 
     try {
+      // Load merged config (global → project → env vars)
+      const mergedConfig = loadMergedConfig(options.cwd);
+
       // Initialize services
       const eventStore = await createEventStore({ inMemory: false });
       const messageRouter = createMessageRouter(eventStore);
       const serverUrl = `http://${options.host}:${options.port}`;
-      const agentManager = createAgentManager(eventStore, messageRouter, { serverUrl });
+      const agentManager = createAgentManager(eventStore, messageRouter, {
+        serverUrl,
+        taskBackend: mergedConfig.task?.backend,
+        openTasksSocketPath: mergedConfig.task?.opentasks?.socket_path,
+      });
       const taskManager = createTaskManager(eventStore);
 
-      // Create task backend from env config
-      const taskConfig = loadTaskConfigFromEnv();
+      // Create task backend from merged config
+      const taskConfig = loadTaskConfigFromMerged(mergedConfig);
       let openTasksClient: { disconnect(): void } | undefined;
       try {
         const result = await createTaskBackend(taskConfig, eventStore);
@@ -146,9 +153,8 @@ program
         console.log(chalk.yellow(`Task backend creation failed: ${err}. Using legacy TaskManager.`));
       }
 
-      // Determine team name: CLI flag > project config > none
-      const projectConfig = loadProjectConfig(options.cwd);
-      const teamName = options.team ?? projectConfig.team;
+      // Determine team name: CLI flag > merged config
+      const teamName = options.team ?? mergedConfig.team;
 
       // Load and initialize team if specified
       let teamRuntime: TeamRuntime | null = null;
@@ -172,9 +178,9 @@ program
         );
       }
 
-      // Resolve server token — only enforce auth when MACRO_SERVER_SECRET is explicitly set
-      const noAuth = process.env.MACRO_NO_AUTH === "true";
-      const serverToken = noAuth ? undefined : (process.env.MACRO_SERVER_SECRET ?? undefined);
+      // Resolve auth from merged config
+      const noAuth = mergedConfig.auth?.disabled ?? false;
+      const serverToken = noAuth ? undefined : (mergedConfig.auth?.secret ?? undefined);
 
       // Create API server
       const server = createAPIServer(
@@ -757,8 +763,9 @@ program
       agentManager = createAgentManager(eventStore, messageRouter);
       const taskManager = createTaskManager(eventStore);
 
-      // Create task backend from env config
-      const taskConfig = loadTaskConfigFromEnv();
+      // Create task backend from merged config
+      const acpMergedConfig = loadMergedConfig(defaultCwd);
+      const taskConfig = loadTaskConfigFromMerged(acpMergedConfig);
       let openTasksClient: { disconnect(): void } | undefined;
       try {
         const result = await createTaskBackend(taskConfig, eventStore);
