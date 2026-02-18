@@ -196,6 +196,7 @@ export interface GetTaskInput {
  */
 export interface SpawnAgentOutput {
   agent_id: AgentId;
+  name?: string;
   task_id: TaskId;
   session_id: string;
 }
@@ -223,6 +224,7 @@ export interface CheckMessagesOutput {
   messages: Array<{
     id: string;
     from: AgentId;
+    from_name?: string;
     content: string;
     timestamp: number;
     truncated: boolean;
@@ -239,6 +241,7 @@ export interface QueryIndexOutput {
   entries: Array<{
     type: "agent" | "task";
     id: string;
+    name?: string;
     summary: string;
     state?: string;
     status?: string;
@@ -258,6 +261,7 @@ export interface GetHierarchyOutput {
 
 export interface HierarchyNode {
   agent_id: AgentId;
+  name?: string;
   task: string;
   state: string;
   children: HierarchyNode[];
@@ -268,6 +272,7 @@ export interface HierarchyNode {
  */
 export interface GetAgentSummaryOutput {
   id: AgentId;
+  name?: string;
   session_id: string;
   task: string;
   state: string;
@@ -286,7 +291,7 @@ export interface GetAgentSummaryOutput {
  */
 export interface StopAgentOutput {
   success: boolean;
-  stopped_agents: AgentId[];
+  stopped_agents: Array<{ agent_id: AgentId; name?: string }>;
 }
 
 /**

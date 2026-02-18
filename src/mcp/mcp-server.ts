@@ -363,6 +363,7 @@ export function createMCPServer(
             type: "text" as const,
             text: JSON.stringify({
               agent_id: spawned.id,
+              name: spawned.agent.name,
               task_id: spawned.agent.task_id,
               session_id: spawned.session_id,
             }),
@@ -508,14 +509,18 @@ export function createMCPServer(
       includeAcknowledged: args.include_acknowledged ?? false,
     });
 
-    const formattedInternalMessages = internalMessages.map((msg) => ({
-      id: msg.id,
-      from: `agent:${msg.from.agent_id}`,
-      content: msg.content.length > 500 ? msg.content.substring(0, 500) : msg.content,
-      timestamp: msg.timestamp,
-      truncated: msg.truncated || msg.content.length > 500,
-      correlation_id: msg.correlation_id,
-    }));
+    const formattedInternalMessages = internalMessages.map((msg) => {
+      const fromAgent = msg.from.agent_id ? agentManager.get(msg.from.agent_id) : undefined;
+      return {
+        id: msg.id,
+        from: `agent:${msg.from.agent_id}`,
+        from_name: fromAgent?.name,
+        content: msg.content.length > 500 ? msg.content.substring(0, 500) : msg.content,
+        timestamp: msg.timestamp,
+        truncated: msg.truncated || msg.content.length > 500,
+        correlation_id: msg.correlation_id,
+      };
+    });
 
     // Get peer messages if peerManager is available
     let formattedPeerMessages: Array<{
@@ -583,6 +588,7 @@ export function createMCPServer(
     const entries: Array<{
       type: "agent" | "task";
       id: string;
+      name?: string;
       summary: string;
       state?: string;
       status?: string;
@@ -609,6 +615,7 @@ export function createMCPServer(
         agents = agents.filter(
           (a) =>
             a.id.toLowerCase().includes(search) ||
+            a.name?.toLowerCase().includes(search) ||
             a.task?.toLowerCase().includes(search)
         );
       }
@@ -617,6 +624,7 @@ export function createMCPServer(
         entries.push({
           type: "agent",
           id: agent.id,
+          name: agent.name,
           summary: agent.task ?? "No task description",
           state: agent.state,
         });
@@ -700,6 +708,7 @@ export function createMCPServer(
 
         return {
           agent_id: node.agent.id,
+          name: node.agent.name,
           task: node.agent.task ?? "No task",
           state: node.agent.state,
           children: shouldIncludeChildren
@@ -769,6 +778,7 @@ export function createMCPServer(
             type: "text" as const,
             text: JSON.stringify({
               id: agent.id,
+              name: agent.name,
               session_id: agent.session_id,
               task: agent.task ?? "No task",
               state: agent.state,
@@ -814,7 +824,7 @@ export function createMCPServer(
     }
 
     // Collect all agents that will be stopped (target + descendants)
-    const stoppedAgents: AgentId[] = [];
+    const stoppedAgents: Array<{ agent_id: AgentId; name?: string }> = [];
 
     async function stopRecursive(agentId: AgentId): Promise<void> {
       const agent = agentManager.get(agentId);
@@ -826,9 +836,10 @@ export function createMCPServer(
         await stopRecursive(child.id);
       }
 
-      // Stop this agent
+      // Capture name before stopping
+      const agentName = agent.name;
       await agentManager.terminate(agentId, args.reason ?? "cancelled");
-      stoppedAgents.push(agentId);
+      stoppedAgents.push({ agent_id: agentId, name: agentName });
     }
 
     await stopRecursive(args.agent_id);
