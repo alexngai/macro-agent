@@ -368,6 +368,10 @@ export function createCombinedServer(
   }
 
   function getUrl(): string {
+    const addr = httpServer.address();
+    if (addr && typeof addr === "object") {
+      return `http://${host}:${addr.port}`;
+    }
     return `http://${host}:${port}`;
   }
 

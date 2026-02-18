@@ -132,7 +132,7 @@ function createMockAgentManager(): AgentManager {
     getHierarchy: vi.fn(() => null),
     getOrCreateHeadManager: vi.fn(async () => ({} as any)),
     listHeadManagers: vi.fn(() => []),
-    prompt: vi.fn(),
+    prompt: vi.fn(async function* () {}),
     getSession: vi.fn(() => null),
     hasActiveSession: vi.fn(() => false),
     onLifecycleEvent: vi.fn(() => () => {}),
@@ -848,6 +848,242 @@ describe("MCP Bridge Extensions", () => {
 
       // The done handler should return a result with shouldTerminate
       expect(result).toBeDefined();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // spawn_agent — fire-and-forget prompt session streaming
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("spawn_agent session streaming", () => {
+    /**
+     * Helper: wait until adapter.emitEvent has been called with a specific event type.
+     * Polls every 10ms up to timeoutMs.
+     */
+    async function waitForEmitEvent(
+      emitFn: ReturnType<typeof vi.fn>,
+      eventType: string,
+      timeoutMs = 5000,
+    ): Promise<unknown> {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const call = emitFn.mock.calls.find(
+          (c: unknown[]) => (c[0] as Record<string, unknown>)?.type === eventType,
+        );
+        if (call) return call[0];
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(
+        `Timeout waiting for emitEvent(${eventType}). ` +
+          `Received: ${emitFn.mock.calls.map((c: unknown[]) => (c[0] as Record<string, unknown>)?.type).join(", ")}`,
+      );
+    }
+
+    beforeEach(() => {
+      registerMCPBridgeExtensions(adapter, services);
+    });
+
+    it("emits session_user_message MAP event before prompt starts", async () => {
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "do something" }));
+
+      // Fire-and-forget IIFE starts immediately — wait for it
+      const event = await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_user_message");
+      const evt = event as Record<string, unknown>;
+      expect(evt.type).toBe("session_user_message");
+      expect(evt.agentId).toBe("agent_spawned");
+      expect(evt.eventId).toBeDefined();
+      expect(evt.timestamp).toBeGreaterThan(0);
+
+      const data = evt.data as Record<string, unknown>;
+      expect(data.agentId).toBe("agent_spawned");
+      expect(data.sessionId).toBe("sess_spawned");
+      expect(data.content).toBe("do something");
+    });
+
+    it("emits session_prompt_done MAP event after prompt completes", async () => {
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "finish this" }));
+
+      const event = await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+      const evt = event as Record<string, unknown>;
+      expect(evt.type).toBe("session_prompt_done");
+      expect(evt.agentId).toBe("agent_spawned");
+
+      const data = evt.data as Record<string, unknown>;
+      expect(data.agentId).toBe("agent_spawned");
+      expect(data.stopReason).toBe("end_turn");
+    });
+
+    it("emits session_update MAP events for each prompt update", async () => {
+      // Configure prompt to yield controlled updates
+      const updates = [
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } },
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: " world" } },
+        { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "Read file", status: "running" },
+        { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "Read file", status: "completed", rawOutput: "contents" },
+      ];
+
+      (services.agentManager.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async function* () {
+          for (const u of updates) {
+            yield u;
+          }
+        },
+      );
+
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "read a file" }));
+
+      // Wait for the final event
+      await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+
+      // Collect all emitEvent calls
+      const calls = (adapter.emitEvent as ReturnType<typeof vi.fn>).mock.calls.map(
+        (c: unknown[]) => c[0] as Record<string, unknown>,
+      );
+
+      // Should have: 1 user_message + 4 session_updates + 1 prompt_done = 6 events
+      const userMessages = calls.filter((c) => c.type === "session_user_message");
+      const sessionUpdates = calls.filter((c) => c.type === "session_update");
+      const promptDones = calls.filter((c) => c.type === "session_prompt_done");
+
+      expect(userMessages).toHaveLength(1);
+      expect(sessionUpdates).toHaveLength(4);
+      expect(promptDones).toHaveLength(1);
+
+      // Verify update payloads contain the original update objects
+      const updatePayloads = sessionUpdates.map(
+        (c) => (c.data as Record<string, unknown>).update,
+      );
+      expect((updatePayloads[0] as Record<string, unknown>).sessionUpdate).toBe("agent_message_chunk");
+      expect((updatePayloads[2] as Record<string, unknown>).sessionUpdate).toBe("tool_call");
+    });
+
+    it("records user and assistant turns in eventStore after prompt completes", async () => {
+      const updates = [
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "I will help." } },
+      ];
+
+      (services.agentManager.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async function* () {
+          for (const u of updates) yield u;
+        },
+      );
+
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "help me" }));
+
+      // Wait for prompt to finish
+      await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+
+      // Small delay for turn recording (happens after emitMAPEvent)
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Check eventStore.emit calls for turn recording
+      const turnCalls = (services.eventStore.emit as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as Record<string, unknown>)?.type === "turn",
+      );
+
+      expect(turnCalls.length).toBe(2);
+
+      // First turn: user prompt
+      const userTurn = turnCalls[0][0] as Record<string, unknown>;
+      expect(userTurn.type).toBe("turn");
+      expect((userTurn.source as Record<string, unknown>).agent_id).toBe("agent_spawned");
+      const userPayload = userTurn.payload as Record<string, unknown>;
+      expect(userPayload.participant).toBe("user");
+      expect(userPayload.content).toBe("help me");
+      expect(userPayload.conversation_id).toBe("sess_spawned");
+
+      // Second turn: assistant response
+      const assistantTurn = turnCalls[1][0] as Record<string, unknown>;
+      const assistantPayload = assistantTurn.payload as Record<string, unknown>;
+      expect(assistantPayload.participant).toBe("agent_spawned");
+      expect(assistantPayload.content_type).toBe("assistant_response");
+      const content = assistantPayload.content as { parts: Array<{ type: string; text?: string }> };
+      expect(content.parts[0].type).toBe("text");
+      expect(content.parts[0].text).toBe("I will help.");
+    });
+
+    it("accumulates tool calls in assistant turn content", async () => {
+      const updates = [
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Reading file..." } },
+        { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "Read", status: "running", _meta: { claudeCode: { toolName: "Read" } }, rawInput: { path: "/foo" } },
+        { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "Read", status: "completed", rawOutput: "file contents", _meta: { claudeCode: { toolName: "Read" } }, rawInput: { path: "/foo" } },
+      ];
+
+      (services.agentManager.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async function* () {
+          for (const u of updates) yield u;
+        },
+      );
+
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "read /foo" }));
+
+      await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+      await new Promise((r) => setTimeout(r, 50));
+
+      const turnCalls = (services.eventStore.emit as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as Record<string, unknown>)?.type === "turn",
+      );
+
+      const assistantTurn = turnCalls[1][0] as Record<string, unknown>;
+      const assistantPayload = assistantTurn.payload as Record<string, unknown>;
+      const content = assistantPayload.content as { parts: Array<Record<string, unknown>> };
+
+      // Should have text part + tool part
+      expect(content.parts).toHaveLength(2);
+      expect(content.parts[0].type).toBe("text");
+      expect(content.parts[0].text).toBe("Reading file...");
+      expect(content.parts[1].type).toBe("tool");
+      expect(content.parts[1].toolCallId).toBe("tc_1");
+      expect(content.parts[1].name).toBe("Read");
+      expect(content.parts[1].output).toBe("file contents");
+    });
+
+    it("emits session_prompt_done with stopReason 'error' when prompt throws", async () => {
+      (services.agentManager.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async function* () {
+          throw new Error("Agent process crashed");
+        },
+      );
+
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "crash test" }));
+
+      const event = await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+      const evt = event as Record<string, unknown>;
+      const data = evt.data as Record<string, unknown>;
+      expect(data.stopReason).toBe("error");
+    });
+
+    it("does not emit session events when task is empty", async () => {
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "" }));
+
+      // Wait a bit to ensure no events are emitted
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(adapter.emitEvent).not.toHaveBeenCalled();
+    });
+
+    it("all events include agentId at the top level for subscription routing", async () => {
+      const handler = adapter.handlers.get("_macro/mcp/spawn_agent")!;
+      await handler(ctx, withContext({ task: "routing test" }));
+
+      await waitForEmitEvent(adapter.emitEvent as ReturnType<typeof vi.fn>, "session_prompt_done");
+
+      const calls = (adapter.emitEvent as ReturnType<typeof vi.fn>).mock.calls.map(
+        (c: unknown[]) => c[0] as Record<string, unknown>,
+      );
+
+      for (const evt of calls) {
+        expect(evt.agentId).toBe("agent_spawned");
+        expect(evt.eventId).toBeDefined();
+        expect(evt.timestamp).toBeGreaterThan(0);
+      }
     });
   });
 

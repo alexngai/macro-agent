@@ -101,7 +101,10 @@ function toToolContext(ctx: AgentContext): ToolContext {
 // Handler Implementations
 // =============================================================================
 
-function createSpawnAgentBridge(services: MCPBridgeServices): ExtensionHandler {
+function createSpawnAgentBridge(
+  services: MCPBridgeServices,
+  emitMAPEvent: (event: EventNotification) => void,
+): ExtensionHandler {
   return async (_extCtx: ExtensionContext, params: unknown) => {
     const { context, args } = extractContext(params);
 
@@ -120,14 +123,163 @@ function createSpawnAgentBridge(services: MCPBridgeServices): ExtensionHandler {
     // Without this, the agent process is running but idle — waiting for a message.
     if (task) {
       (async () => {
+        // Accumulate assistant response parts for history persistence
+        const buffer: {
+          parts: Array<
+            | { type: "text"; text: string }
+            | ({ type: "tool" } & Record<string, unknown>)
+          >;
+        } = { parts: [] };
+        const toolInfoCache = new Map<
+          string,
+          { title?: string; name?: string; input?: unknown }
+        >();
+
+        // Emit user message event so TUI clients can show the task prompt
+        emitMAPEvent({
+          eventId: ulid(),
+          type: "session_user_message" as MAPEventType,
+          timestamp: Date.now(),
+          agentId: spawned.id as AgentId,
+          data: {
+            agentId: spawned.id,
+            sessionId: spawned.session_id,
+            content: task,
+          },
+        });
+
         try {
-          for await (const _update of services.agentManager.prompt(
+          for await (const update of services.agentManager.prompt(
             spawned.id,
             task,
           )) {
-            // drain iterator — updates flow via event subscriptions
+            // Accumulate content for turn recording (mirrors acp-over-map.ts handlePrompt)
+            const u = update as Record<string, unknown>;
+            const updateType = (u.sessionUpdate as string) ?? (u.type as string);
+
+            if (updateType === "agent_message_chunk") {
+              const content = u.content as { type?: string; text?: string } | undefined;
+              if (content?.text) {
+                const last = buffer.parts[buffer.parts.length - 1];
+                if (last && last.type === "text") {
+                  last.text += content.text;
+                } else {
+                  buffer.parts.push({ type: "text", text: content.text });
+                }
+              }
+            } else if (updateType === "tool_call" || updateType === "tool_call_update") {
+              const toolCallId = u.toolCallId as string | undefined;
+              const status = u.status as string | undefined;
+              const meta = u._meta as { claudeCode?: { toolName?: string } } | undefined;
+
+              if (updateType === "tool_call" && toolCallId) {
+                toolInfoCache.set(toolCallId, {
+                  title: u.title as string | undefined,
+                  name: meta?.claudeCode?.toolName,
+                  input: u.rawInput,
+                });
+              }
+
+              if (status === "completed" || status === "failed") {
+                const cached = toolCallId ? toolInfoCache.get(toolCallId) : undefined;
+                const rawOutput = u.rawOutput;
+                let output: string | undefined;
+                if (typeof rawOutput === "string") output = rawOutput;
+                else if (Array.isArray(rawOutput)) {
+                  output = rawOutput
+                    .filter((item: any) => item.type === "text" && typeof item.text === "string")
+                    .map((item: any) => item.text as string)
+                    .join("\n") || undefined;
+                }
+                buffer.parts.push({
+                  type: "tool",
+                  toolCallId,
+                  title: u.title ?? cached?.title,
+                  name: meta?.claudeCode?.toolName ?? cached?.name,
+                  status: u.status,
+                  input: u.rawInput ?? cached?.input,
+                  output,
+                });
+              }
+            }
+
+            // Emit each session update as a MAP event for live streaming
+            emitMAPEvent({
+              eventId: ulid(),
+              type: "session_update" as MAPEventType,
+              timestamp: Date.now(),
+              agentId: spawned.id as AgentId,
+              data: {
+                agentId: spawned.id,
+                sessionId: spawned.session_id,
+                update,
+              },
+            });
+          }
+
+          // Emit prompt done event
+          emitMAPEvent({
+            eventId: ulid(),
+            type: "session_prompt_done" as MAPEventType,
+            timestamp: Date.now(),
+            agentId: spawned.id as AgentId,
+            data: {
+              agentId: spawned.id,
+              sessionId: spawned.session_id,
+              stopReason: "end_turn",
+            },
+          });
+
+          // Record turns so history is available when TUI reconnects
+          const now = Date.now();
+          const conversationId = spawned.session_id;
+
+          // Record user turn (the initial task prompt)
+          services.eventStore.emit({
+            type: "turn",
+            source: { agent_id: spawned.id },
+            payload: {
+              action: "recorded",
+              turn_id: `turn_user_${now}_${Math.random().toString(36).slice(2, 8)}`,
+              conversation_id: conversationId,
+              participant: "user",
+              timestamp: now,
+              content_type: "user_prompt",
+              content: task,
+              source_type: "explicit",
+            },
+          });
+
+          // Record assistant turn with accumulated content
+          if (buffer.parts.length > 0) {
+            services.eventStore.emit({
+              type: "turn",
+              source: { agent_id: spawned.id },
+              payload: {
+                action: "recorded",
+                turn_id: `turn_asst_${now}_${Math.random().toString(36).slice(2, 8)}`,
+                conversation_id: conversationId,
+                participant: spawned.id,
+                timestamp: now + 1,
+                content_type: "assistant_response",
+                content: { parts: buffer.parts },
+                source_type: "explicit",
+              },
+            });
           }
         } catch (err) {
+          // Emit prompt done with error so TUI stops spinner
+          emitMAPEvent({
+            eventId: ulid(),
+            type: "session_prompt_done" as MAPEventType,
+            timestamp: Date.now(),
+            agentId: spawned.id as AgentId,
+            data: {
+              agentId: spawned.id,
+              sessionId: spawned.session_id,
+              stopReason: "error",
+            },
+          });
           console.error(
             `[MCP Bridge] Failed to send initial prompt to spawned agent ${spawned.id}:`,
             err,
@@ -727,7 +879,7 @@ export function registerMCPBridgeExtensions(
 ): void {
   const emitMAPEvent = (event: EventNotification) => adapter.emitEvent(event);
 
-  adapter.registerExtension("_macro/mcp/spawn_agent", createSpawnAgentBridge(services));
+  adapter.registerExtension("_macro/mcp/spawn_agent", createSpawnAgentBridge(services, emitMAPEvent));
   adapter.registerExtension("_macro/mcp/emit_status", createEmitStatusBridge(services, emitMAPEvent));
   adapter.registerExtension("_macro/mcp/send_message", createSendMessageBridge(services));
   adapter.registerExtension("_macro/mcp/check_messages", createCheckMessagesBridge(services));
