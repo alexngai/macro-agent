@@ -51,6 +51,12 @@ export interface CombinedServerServices {
   capabilityManager?: CapabilityManager;
   /** Optional activity watcher for event-driven waking */
   activityWatcher?: ActivityWatcher;
+  /** Optional task backend for task tool bridge extensions */
+  taskBackend?: import("../task/backend/types.js").TaskBackend;
+  /** Optional task tool provider for dynamic task tools in thin-client mode */
+  taskToolProvider?: import("../task/backend/types.js").TaskToolProvider;
+  /** Mutable context holder for task tool provider agent_id injection */
+  taskToolContext?: { agent_id: string };
 }
 
 export interface CombinedServerConfig {
@@ -268,6 +274,9 @@ export function createCombinedServer(
       messageRouter: services.messageRouter,
       peerManager: services.peerManager,
       activityWatcher: services.activityWatcher,
+      taskBackend: services.taskBackend,
+      taskToolProvider: services.taskToolProvider,
+      taskToolContext: services.taskToolContext,
     });
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);

@@ -226,6 +226,33 @@ async function main() {
   agentManager = createAgentManager(eventStore, messageRouter, { serverUrl });
   const taskManager = createTaskManager(eventStore);
 
+  // Create task backend for dynamic task tools (create_task, get_task, etc.)
+  const { createTaskBackend, loadTaskConfigFromEnv } = await import("../task/backend/index.js");
+  const { UnifiedTaskToolProvider } = await import("../task/backend/unified-tool-provider.js");
+
+  let taskBackend: import("../task/backend/types.js").TaskBackend | undefined;
+  let taskToolProvider: import("../task/backend/types.js").TaskToolProvider | undefined;
+
+  // Mutable context holder for the task tool provider. Bridge handlers set
+  // this before each tool call so the provider uses the calling agent's ID.
+  // Safe because Node.js is single-threaded.
+  const taskToolContext = { agent_id: "" as string };
+
+  try {
+    const taskConfig = loadTaskConfigFromEnv();
+    const result = await createTaskBackend(taskConfig, eventStore);
+    taskBackend = result.backend;
+
+    taskToolProvider = new UnifiedTaskToolProvider(
+      taskBackend,
+      () => taskToolContext,
+      result.openTasksClient
+    );
+    console.error(`[acp] Task backend created: ${taskConfig.backend.type}`);
+  } catch (err) {
+    console.error(`[acp] Failed to create task backend: ${err}. Task tools will be unavailable.`);
+  }
+
   // Create ActivityWatcher for event-driven agent waking
   const sessionProvider = createSessionProviderFromAgentManager(agentManager);
   const wakeHandler = createWakeHandler(sessionProvider, agentManager);
@@ -355,7 +382,7 @@ async function main() {
       const port = options.port ?? 3001;
 
       combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher },
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext },
         { port, host, defaultCwd }
       );
 

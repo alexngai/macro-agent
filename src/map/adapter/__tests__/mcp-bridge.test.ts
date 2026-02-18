@@ -245,9 +245,9 @@ describe("MCP Bridge Extensions", () => {
   // ─────────────────────────────────────────────────────────────────
 
   describe("registration", () => {
-    it("registers 10 core methods without optional services", () => {
+    it("registers 11 core methods without optional services", () => {
       registerMCPBridgeExtensions(adapter, services);
-      expect(adapter.handlers.size).toBe(10);
+      expect(adapter.handlers.size).toBe(11);
       expect(adapter.handlers.has("_macro/mcp/spawn_agent")).toBe(true);
       expect(adapter.handlers.has("_macro/mcp/emit_status")).toBe(true);
       expect(adapter.handlers.has("_macro/mcp/send_message")).toBe(true);
@@ -258,6 +258,7 @@ describe("MCP Bridge Extensions", () => {
       expect(adapter.handlers.has("_macro/mcp/stop_agent")).toBe(true);
       expect(adapter.handlers.has("_macro/mcp/done")).toBe(true);
       expect(adapter.handlers.has("_macro/mcp/inject_context")).toBe(true);
+      expect(adapter.handlers.has("_macro/mcp/task_tools_list")).toBe(true);
     });
 
     it("registers wait_for_activity when activityWatcher is provided", () => {
@@ -299,12 +300,12 @@ describe("MCP Bridge Extensions", () => {
       expect(adapter.handlers.has("_macro/mcp/send_peer_message")).toBe(false);
     });
 
-    it("registers all 17 methods with all optional services", () => {
+    it("registers all 18 methods with all optional services", () => {
       services.activityWatcher = createMockActivityWatcher();
       services.taskBackend = createMockTaskBackend();
       services.peerManager = createMockPeerManager();
       registerMCPBridgeExtensions(adapter, services);
-      expect(adapter.handlers.size).toBe(17);
+      expect(adapter.handlers.size).toBe(18);
     });
 
     it("unregisters all methods via unregisterMCPBridgeExtensions", () => {
@@ -312,20 +313,24 @@ describe("MCP Bridge Extensions", () => {
       services.taskBackend = createMockTaskBackend();
       services.peerManager = createMockPeerManager();
       registerMCPBridgeExtensions(adapter, services);
-      expect(adapter.handlers.size).toBe(17);
+      expect(adapter.handlers.size).toBe(18);
 
       unregisterMCPBridgeExtensions(adapter);
+      // Dynamic task tool methods (registered per-tool, not in MCP_BRIDGE_METHODS)
+      // are not cleaned up by unregisterMCPBridgeExtensions since their names are
+      // dynamic. Only the static MCP_BRIDGE_METHODS entries are removed.
       expect(adapter.handlers.size).toBe(0);
     });
 
-    it("MCP_BRIDGE_METHODS lists all 17 methods", () => {
-      expect(MCP_BRIDGE_METHODS).toHaveLength(17);
+    it("MCP_BRIDGE_METHODS lists all 18 static methods", () => {
+      expect(MCP_BRIDGE_METHODS).toHaveLength(18);
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/spawn_agent");
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/done");
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/wait_for_activity");
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/claim_task");
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/send_peer_message");
       expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/respond_to_peer_request");
+      expect(MCP_BRIDGE_METHODS).toContain("_macro/mcp/task_tools_list");
     });
   });
 

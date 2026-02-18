@@ -50,6 +50,9 @@ export interface MCPBridgeServices {
   activityWatcher?: ActivityWatcher;
   roleRegistry?: RoleRegistry;
   taskBackend?: TaskBackend;
+  taskToolProvider?: import("../../../task/backend/types.js").TaskToolProvider;
+  /** Mutable context holder for task tool provider agent_id injection */
+  taskToolContext?: { agent_id: string };
   integrationStrategy?: import("../../../workspace/strategies/types.js").IntegrationStrategy;
 }
 
@@ -841,6 +844,34 @@ function createRespondToPeerRequestBridge(services: MCPBridgeServices): Extensio
 }
 
 // =============================================================================
+// Dynamic Task Tool Bridge
+// =============================================================================
+
+/**
+ * Creates a bridge handler for a dynamic task tool from the TaskToolProvider.
+ * The handler extracts agent context from params and delegates to the tool's
+ * handler. The TaskToolProvider's getContext() is backed by a mutable holder
+ * that we update here before each call (safe since Node.js is single-threaded).
+ */
+function createTaskToolBridge(
+  tool: import("../../../task/backend/types.js").MCPToolDefinition,
+  contextHolder: { agent_id: string },
+): ExtensionHandler {
+  return async (_extCtx: ExtensionContext, params: unknown) => {
+    const { context, args } = extractContext(params);
+
+    // Set the calling agent's ID so the tool provider's getContext() returns it
+    contextHolder.agent_id = context.agent_id;
+
+    // The tool handler receives the params directly (or unwrapped from the
+    // `params` envelope that the thin-client MCP server wraps them in)
+    const toolParams = (args as Record<string, unknown>).params ?? args;
+
+    return tool.handler(toolParams);
+  };
+}
+
+// =============================================================================
 // Registration
 // =============================================================================
 
@@ -865,6 +896,7 @@ export const MCP_BRIDGE_METHODS = [
   "_macro/mcp/send_peer_message",
   "_macro/mcp/send_peer_request",
   "_macro/mcp/respond_to_peer_request",
+  "_macro/mcp/task_tools_list",
 ] as const;
 
 /**
@@ -904,6 +936,27 @@ export function registerMCPBridgeExtensions(
     adapter.registerExtension("_macro/mcp/send_peer_message", createSendPeerMessageBridge(services));
     adapter.registerExtension("_macro/mcp/send_peer_request", createSendPeerRequestBridge(services));
     adapter.registerExtension("_macro/mcp/respond_to_peer_request", createRespondToPeerRequestBridge(services));
+  }
+
+  // Register dynamic task tool bridges from the TaskToolProvider
+  if (services.taskToolProvider) {
+    const contextHolder = services.taskToolContext ?? { agent_id: "" };
+    const tools = services.taskToolProvider.getTools();
+    for (const tool of tools) {
+      const method = `_macro/mcp/task_tool/${tool.name}`;
+      adapter.registerExtension(method, createTaskToolBridge(tool, contextHolder));
+    }
+
+    // Discovery endpoint: returns list of available task tool names so
+    // thin-client MCP subprocesses only register tools the server supports
+    adapter.registerExtension("_macro/mcp/task_tools_list", async () => {
+      return { tools: tools.map((t) => ({ name: t.name, description: t.description })) };
+    });
+  } else {
+    // No task tools available — return empty list
+    adapter.registerExtension("_macro/mcp/task_tools_list", async () => {
+      return { tools: [] };
+    });
   }
 }
 

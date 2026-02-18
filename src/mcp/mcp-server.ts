@@ -1354,6 +1354,32 @@ export function createMCPServerThinClient(
   let transport: StdioServerTransport | null = null;
 
   async function start(): Promise<void> {
+    // Discover dynamic task tools from the server before connecting.
+    // This ensures we only register tools the server actually supports
+    // (e.g. memory backend = 4 tools, OpenTasks = 7 tools, none = 0).
+    try {
+      const result = await mapCallFn<{ tools: Array<{ name: string; description: string }> }>(
+        "_macro/mcp/task_tools_list",
+        withContext({})
+      );
+
+      if (result?.tools?.length > 0) {
+        const DynamicTaskParamsSchema = {
+          params: z.record(z.string(), z.unknown()).optional()
+            .describe("Tool parameters (validated by the server-side handler)"),
+        };
+
+        for (const tool of result.tools) {
+          bridgeTool(tool.name, DynamicTaskParamsSchema, tool.description,
+            `_macro/mcp/task_tool/${tool.name}`);
+        }
+        debugLog(`[MCP] Registered ${result.tools.length} dynamic task tools from server`);
+      }
+    } catch (error) {
+      // Server may not support task tools — continue without them
+      debugLog(`[MCP] Failed to discover task tools: ${error instanceof Error ? error.message : error}`);
+    }
+
     transport = new StdioServerTransport();
     await server.connect(transport);
   }
