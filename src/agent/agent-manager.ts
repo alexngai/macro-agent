@@ -8,7 +8,11 @@
  */
 
 import { nanoid } from "nanoid";
-import { uniqueNamesGenerator, adjectives, animals } from "unique-names-generator";
+import {
+  uniqueNamesGenerator,
+  adjectives,
+  animals,
+} from "unique-names-generator";
 import {
   AgentFactory,
   type Session,
@@ -51,6 +55,7 @@ import {
   type CascadeAgentManager,
 } from "../lifecycle/cascade.js";
 import type { HealthCheckService } from "../monitor/health-check-service.js";
+import { AgentTokenManager } from "../auth/token.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -106,7 +111,10 @@ export interface AgentManager {
    * Resume a stopped agent by loading its existing session.
    * @param permissionMode - Optional permission mode override (defaults to the agent manager's default)
    */
-  resume(agentId: AgentId, permissionMode?: PermissionMode): Promise<SpawnedAgent>;
+  resume(
+    agentId: AgentId,
+    permissionMode?: PermissionMode,
+  ): Promise<SpawnedAgent>;
 
   /**
    * Continue a terminated agent by spawning a new agent with the same
@@ -119,7 +127,7 @@ export interface AgentManager {
    */
   continueAgent(
     agentId: AgentId,
-    options?: ContinueAgentOptions
+    options?: ContinueAgentOptions,
   ): Promise<SpawnedAgent>;
 
   /**
@@ -132,7 +140,7 @@ export interface AgentManager {
    */
   forkAgent(
     sourceAgentId: AgentId,
-    options?: { name?: string; prompt?: string; cwd?: string }
+    options?: { name?: string; prompt?: string; cwd?: string },
   ): Promise<SpawnedAgent>;
 
   // ── Queries ────────────────────────────────────────────────────
@@ -158,7 +166,7 @@ export interface AgentManager {
    */
   getHierarchy(
     agentId: AgentId,
-    options?: HierarchyOptions
+    options?: HierarchyOptions,
   ): AgentHierarchy | null;
 
   // ── Head Manager ───────────────────────────────────────────────
@@ -181,7 +189,7 @@ export interface AgentManager {
    */
   prompt(
     agentId: AgentId,
-    message: string
+    message: string,
   ): AsyncIterable<ExtendedSessionUpdate>;
 
   /**
@@ -201,7 +209,7 @@ export interface AgentManager {
       maxFollowUps?: number;
       /** Callback for each update during prompting */
       onUpdate?: (update: ExtendedSessionUpdate) => void;
-    }
+    },
   ): Promise<{
     doneCalled: boolean;
     doneStatus?: string;
@@ -250,7 +258,7 @@ export interface AgentManager {
   respondToPermission(
     agentId: AgentId,
     requestId: string,
-    optionId: string
+    optionId: string,
   ): boolean;
 
   /**
@@ -293,9 +301,7 @@ export interface AgentManager {
    * Set a spawn interceptor that transforms SpawnAgentOptions before spawning.
    * Used by TeamRuntime to inject team topics, prompts, MCP servers, and env vars.
    */
-  setSpawnInterceptor(
-    interceptor: SpawnInterceptor | null
-  ): void;
+  setSpawnInterceptor(interceptor: SpawnInterceptor | null): void;
 
   /**
    * Get the RoleRegistry used by this AgentManager.
@@ -310,7 +316,7 @@ export interface AgentManager {
    */
   setMailServices(
     mailService: import("../mail/mail-service.js").MailService,
-    conversationMap: import("../mail/conversation-map.js").ConversationMap
+    conversationMap: import("../mail/conversation-map.js").ConversationMap,
   ): void;
 
   // ── Cleanup ────────────────────────────────────────────────────
@@ -375,6 +381,19 @@ export interface AgentManagerConfig {
    * of creating local service stacks.
    */
   serverUrl?: string;
+
+  /**
+   * Server authentication token for MCP thin-client connections.
+   * Passed to spawned agents as MACRO_SERVER_TOKEN env var.
+   */
+  serverToken?: string;
+
+  /**
+   * Per-agent token manager for MCP bridge authentication.
+   * When provided, generates a unique token per agent at spawn time
+   * and revokes it on terminate.
+   */
+  agentTokenManager?: AgentTokenManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -386,7 +405,7 @@ export interface AgentManagerConfig {
  * Used by TeamRuntime to inject team-specific configuration.
  */
 export type SpawnInterceptor = (
-  options: SpawnAgentOptions
+  options: SpawnAgentOptions,
 ) => SpawnAgentOptions | Promise<SpawnAgentOptions>;
 
 // ─────────────────────────────────────────────────────────────────
@@ -396,7 +415,7 @@ export type SpawnInterceptor = (
 export function createAgentManager(
   eventStore: EventStore,
   messageRouter: MessageRouter,
-  config: AgentManagerConfig = {}
+  config: AgentManagerConfig = {},
 ): AgentManager {
   const {
     defaultPermissionMode = "auto-approve",
@@ -408,6 +427,8 @@ export function createAgentManager(
     mailService: initialMailService,
     conversationMap: initialConversationMap,
     serverUrl,
+    serverToken,
+    agentTokenManager,
   } = config;
 
   // Mutable mail services (support late binding via setMailServices)
@@ -454,17 +475,35 @@ export function createAgentManager(
       { name: "MACRO_TASK_ID", value: opts.taskId },
       { name: "MACRO_AGENT_CWD", value: opts.cwd },
       { name: "MACRO_PERMISSION_MODE", value: opts.permissionMode },
-      { name: "MACRO_TASK_BACKEND", value: process.env.MACRO_TASK_BACKEND ?? "" },
-      { name: "OPENTASKS_SOCKET_PATH", value: process.env.OPENTASKS_SOCKET_PATH ?? "" },
+      {
+        name: "MACRO_TASK_BACKEND",
+        value: process.env.MACRO_TASK_BACKEND ?? "",
+      },
+      {
+        name: "OPENTASKS_SOCKET_PATH",
+        value: process.env.OPENTASKS_SOCKET_PATH ?? "",
+      },
     ];
 
     if (serverUrl) {
       // Thin-client mode: forward tool calls to main server via MAP WebSocket
       env.push(
         { name: "MACRO_SERVER_URL", value: serverUrl },
-        { name: "MACRO_AGENT_LINEAGE", value: JSON.stringify(opts.lineage ?? []) },
+        {
+          name: "MACRO_AGENT_LINEAGE",
+          value: JSON.stringify(opts.lineage ?? []),
+        },
         { name: "MACRO_SESSION_ID", value: opts.sessionId ?? "" },
       );
+
+      // Auth tokens for thin-client connections
+      if (serverToken) {
+        env.push({ name: "MACRO_SERVER_TOKEN", value: serverToken });
+      }
+      if (agentTokenManager) {
+        const agentToken = agentTokenManager.createToken(opts.agentId);
+        env.push({ name: "MACRO_AGENT_TOKEN", value: agentToken });
+      }
     } else {
       // Legacy mode: create local service stack with shared SQLite
       env.push(
@@ -489,7 +528,7 @@ export function createAgentManager(
     if (isShuttingDown) {
       throw new AgentManagerError(
         "Cannot spawn agent during shutdown",
-        "SHUTDOWN_IN_PROGRESS"
+        "SHUTDOWN_IN_PROGRESS",
       );
     }
 
@@ -529,7 +568,7 @@ export function createAgentManager(
         throw new AgentManagerError(
           `Parent agent not found: ${parent}`,
           "AGENT_NOT_FOUND",
-          parent
+          parent,
         );
       }
 
@@ -540,8 +579,12 @@ export function createAgentManager(
 
       // Accept either the specific capability (e.g., agent.spawn.grinder)
       // or the generic agent.spawn.custom as a fallback for non-built-in roles
-      const hasSpecific = roleRegistry.hasCapability(parentRole, requiredCapability);
-      const hasGeneric = requiredCapability !== AGENT_CAPABILITIES.SPAWN_CUSTOM &&
+      const hasSpecific = roleRegistry.hasCapability(
+        parentRole,
+        requiredCapability,
+      );
+      const hasGeneric =
+        requiredCapability !== AGENT_CAPABILITIES.SPAWN_CUSTOM &&
         roleRegistry.hasCapability(parentRole, AGENT_CAPABILITIES.SPAWN_CUSTOM);
 
       if (!hasSpecific && !hasGeneric) {
@@ -549,7 +592,7 @@ export function createAgentManager(
           `Parent agent with role '${parentRole}' does not have capability to spawn '${childRole}' agents. ` +
             `Required capability: ${requiredCapability}`,
           "CAPABILITY_DENIED",
-          parent
+          parent,
         );
       }
     }
@@ -625,10 +668,10 @@ export function createAgentManager(
     const verifyAgent = eventStore.getAgent(agentId);
     const allAgents = eventStore.listAgents();
     console.error(
-      `[AgentManager] After persist: agent ${agentId} exists = ${!!verifyAgent}, total agents = ${allAgents.length}, instancePath = ${eventStore.instancePath}`
+      `[AgentManager] After persist: agent ${agentId} exists = ${!!verifyAgent}, total agents = ${allAgents.length}, instancePath = ${eventStore.instancePath}`,
     );
     console.error(
-      `[AgentManager] All agent IDs: ${allAgents.map((a) => a.id).join(", ")}`
+      `[AgentManager] All agent IDs: ${allAgents.map((a) => a.id).join(", ")}`,
     );
 
     try {
@@ -645,7 +688,9 @@ export function createAgentManager(
           taskId,
           cwd,
           permissionMode,
-          lineage: parentAgent?.lineage ? [...parentAgent.lineage, parent!] : [],
+          lineage: parentAgent?.lineage
+            ? [...parentAgent.lineage, parent!]
+            : [],
           sessionId,
         });
 
@@ -669,9 +714,10 @@ export function createAgentManager(
         // the Claude Code subprocess doesn't read pre-approved tool rules from
         // the user's ~/.claude/settings.local.json. This ensures ALL tool calls
         // go through the canUseTool → requestPermission ACP flow.
-        const agentMeta = permissionMode === "interactive"
-          ? { claudeCode: { options: { settingSources: [] } } }
-          : undefined;
+        const agentMeta =
+          permissionMode === "interactive"
+            ? { claudeCode: { options: { settingSources: [] } } }
+            : undefined;
         const session = await handle.createSession(cwd, {
           mcpServers: [macroAgentMcp, ...userMcpServers],
           ...(agentMeta && { agentMeta }),
@@ -709,8 +755,8 @@ export function createAgentManager(
         if (mailService && conversationMap) {
           try {
             const parentConversationId = parent
-              ? conversationMap.getAgentConversation(parent) ??
-                conversationMap.getSessionConversation(parent)
+              ? (conversationMap.getAgentConversation(parent) ??
+                conversationMap.getSessionConversation(parent))
               : undefined;
 
             const { conversationId: taskConvId } =
@@ -744,7 +790,7 @@ export function createAgentManager(
             // Never fail spawn due to mail errors
             console.warn(
               `[AgentManager] Failed to create task conversation for ${agentId}:`,
-              err
+              err,
             );
           }
         }
@@ -779,7 +825,7 @@ export function createAgentManager(
                 streamConfig,
                 dataplaneTaskId,
                 cwd,
-              }
+              },
             );
 
             if (workspace) {
@@ -787,23 +833,20 @@ export function createAgentManager(
               resolvedStreamId = workspace.streamId;
 
               // Register with parent coordinator if applicable
-              if (
-                parent &&
-                (role === "worker" || role === "integrator")
-              ) {
+              if (parent && (role === "worker" || role === "integrator")) {
                 const parentWorkspace = agentWorkspaces.get(parent);
                 if (parentWorkspace?.role === "coordinator") {
                   workspaceManager.registerChildWorkspace(
                     parent,
                     agentId,
-                    workspace.path
+                    workspace.path,
                   );
                 }
               }
             }
           } catch (wsError) {
             console.error(
-              `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`
+              `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`,
             );
             // Continue without workspace - don't fail the spawn
           }
@@ -849,21 +892,21 @@ export function createAgentManager(
       throw new AgentManagerError(
         `Failed to spawn agent: ${error}`,
         "SPAWN_FAILED",
-        agentId
+        agentId,
       );
     }
   }
 
   async function terminate(
     agentId: AgentId,
-    reason: AgentStopReason
+    reason: AgentStopReason,
   ): Promise<void> {
     const agent = eventStore.getAgent(agentId);
     if (!agent) {
       throw new AgentManagerError(
         `Agent not found: ${agentId}`,
         "AGENT_NOT_FOUND",
-        agentId
+        agentId,
       );
     }
 
@@ -892,10 +935,15 @@ export function createAgentManager(
         agentWorkspaces.delete(agentId);
       } catch (wsError) {
         console.error(
-          `[AgentManager] Failed to deallocate workspace for ${agentId}: ${wsError}`
+          `[AgentManager] Failed to deallocate workspace for ${agentId}: ${wsError}`,
         );
         // Continue with termination even if workspace cleanup fails
       }
+    }
+
+    // Revoke agent authentication token
+    if (agentTokenManager) {
+      agentTokenManager.revokeToken(agentId);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -912,8 +960,7 @@ export function createAgentManager(
           });
         }
         // Close any peer conversations
-        const peerConvIds =
-          conversationMap.closePeerConversationsFor(agentId);
+        const peerConvIds = conversationMap.closePeerConversationsFor(agentId);
         for (const peerConvId of peerConvIds) {
           mailService.closeConversation({
             conversationId: peerConvId,
@@ -925,7 +972,7 @@ export function createAgentManager(
       } catch (err) {
         console.warn(
           `[AgentManager] Failed to close conversation for ${agentId}:`,
-          err
+          err,
         );
       }
     }
@@ -999,18 +1046,21 @@ export function createAgentManager(
           child.id,
           agentId,
           cascadeAdapter,
-          workspaceProvider
+          workspaceProvider,
         );
       }
     }
   }
 
-  async function resume(agentId: AgentId, overridePermissionMode?: PermissionMode): Promise<SpawnedAgent> {
+  async function resume(
+    agentId: AgentId,
+    overridePermissionMode?: PermissionMode,
+  ): Promise<SpawnedAgent> {
     if (isShuttingDown) {
       throw new AgentManagerError(
         "Cannot resume agent during shutdown",
         "SHUTDOWN_IN_PROGRESS",
-        agentId
+        agentId,
       );
     }
 
@@ -1019,7 +1069,7 @@ export function createAgentManager(
       throw new AgentManagerError(
         `Agent not found: ${agentId}`,
         "AGENT_NOT_FOUND",
-        agentId
+        agentId,
       );
     }
 
@@ -1028,7 +1078,7 @@ export function createAgentManager(
       throw new AgentManagerError(
         `Agent already has active session: ${agentId}`,
         "ALREADY_RUNNING",
-        agentId
+        agentId,
       );
     }
 
@@ -1044,9 +1094,10 @@ export function createAgentManager(
       let session;
 
       // When interactive mode, strip settings to prevent auto-approval
-      const resumeAgentMeta = permissionMode === "interactive"
-        ? { claudeCode: { options: { settingSources: [] } } }
-        : undefined;
+      const resumeAgentMeta =
+        permissionMode === "interactive"
+          ? { claudeCode: { options: { settingSources: [] } } }
+          : undefined;
 
       const macroAgentMcp = buildMacroAgentMcp({
         agentId,
@@ -1068,7 +1119,7 @@ export function createAgentManager(
           agent.provider_session_id,
           agentCwd,
           mcpServers as any,
-          resumeAgentMeta ? { agentMeta: resumeAgentMeta } : undefined
+          resumeAgentMeta ? { agentMeta: resumeAgentMeta } : undefined,
         );
       } else {
         // No provider session ID available (agent predates this feature or wasn't persisted).
@@ -1135,13 +1186,13 @@ export function createAgentManager(
 
   async function forkAgent(
     sourceAgentId: AgentId,
-    options?: { name?: string; prompt?: string; cwd?: string }
+    options?: { name?: string; prompt?: string; cwd?: string },
   ): Promise<SpawnedAgent> {
     if (isShuttingDown) {
       throw new AgentManagerError(
         "Cannot fork agent during shutdown",
         "SHUTDOWN_IN_PROGRESS",
-        sourceAgentId
+        sourceAgentId,
       );
     }
 
@@ -1150,7 +1201,7 @@ export function createAgentManager(
       throw new AgentManagerError(
         `Agent not found: ${sourceAgentId}`,
         "AGENT_NOT_FOUND",
-        sourceAgentId
+        sourceAgentId,
       );
     }
 
@@ -1160,7 +1211,7 @@ export function createAgentManager(
       throw new AgentManagerError(
         `Agent has no session to fork: ${sourceAgentId}`,
         "FORK_NOT_SUPPORTED",
-        sourceAgentId
+        sourceAgentId,
       );
     }
 
@@ -1227,11 +1278,9 @@ export function createAgentManager(
       // Note: loadSession's TS type for mcpServers is { name, uri }[] but
       // the underlying ACP protocol accepts full McpServerStdio. The JS
       // implementation passes mcpServers through to the connection unchanged.
-      const session = await handle.loadSession(
-        forkedProviderSessionId,
-        cwd,
-        [macroAgentMcp] as any,
-      );
+      const session = await handle.loadSession(forkedProviderSessionId, cwd, [
+        macroAgentMcp,
+      ] as any);
 
       // Emit started status with provider session ID
       eventStore.emit({
@@ -1320,7 +1369,7 @@ export function createAgentManager(
 
   function getHierarchy(
     agentId: AgentId,
-    options?: HierarchyOptions
+    options?: HierarchyOptions,
   ): AgentHierarchy | null {
     const agent = eventStore.getAgent(agentId);
     if (!agent) return null;
@@ -1361,7 +1410,7 @@ export function createAgentManager(
   // ─────────────────────────────────────────────────────────────────
 
   async function getOrCreateHeadManager(
-    options: HeadManagerOptions
+    options: HeadManagerOptions,
   ): Promise<SpawnedAgent> {
     const {
       cwd,
@@ -1433,14 +1482,14 @@ export function createAgentManager(
 
   async function* prompt(
     agentId: AgentId,
-    message: string
+    message: string,
   ): AsyncIterable<ExtendedSessionUpdate> {
     const activeSession = activeSessions.get(agentId);
     if (!activeSession) {
       throw new AgentManagerError(
         `No active session for agent: ${agentId}`,
         "SESSION_NOT_FOUND",
-        agentId
+        agentId,
       );
     }
 
@@ -1465,7 +1514,7 @@ export function createAgentManager(
       maxFollowUps?: number;
       throwOnMaxExceeded?: boolean;
       onUpdate?: (update: ExtendedSessionUpdate) => void;
-    }
+    },
   ): Promise<{
     doneCalled: boolean;
     doneStatus?: string;
@@ -1482,7 +1531,10 @@ export function createAgentManager(
     // Helper to check if done() was called by looking for status events
     // The done() MCP tool emits status events with status_type completed/failed
     // and includes signal: "WORKER_DONE" in the details
-    const checkDoneCalled = async (): Promise<{ called: boolean; status?: string }> => {
+    const checkDoneCalled = async (): Promise<{
+      called: boolean;
+      status?: string;
+    }> => {
       // Reload from disk to see events from MCP subprocess
       await eventStore.reload();
       const statusEvents = eventStore.query({ type: "status" });
@@ -1492,14 +1544,15 @@ export function createAgentManager(
         (e) =>
           e.source?.agent_id === agentId &&
           (e.payload?.status_type === "completed" ||
-           e.payload?.status_type === "failed" ||
-           (e.payload?.details as Record<string, unknown>)?.signal === "WORKER_DONE")
+            e.payload?.status_type === "failed" ||
+            (e.payload?.details as Record<string, unknown>)?.signal ===
+              "WORKER_DONE"),
       );
 
       if (agentCompletedStatus) {
         return {
           called: true,
-          status: agentCompletedStatus.payload?.status_type as string
+          status: agentCompletedStatus.payload?.status_type as string,
         };
       }
 
@@ -1539,7 +1592,8 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
 
     for (let i = 0; i < maxFollowUps; i++) {
       followUpCount++;
-      const followUpMessage = followUpMessages[Math.min(i, followUpMessages.length - 1)];
+      const followUpMessage =
+        followUpMessages[Math.min(i, followUpMessages.length - 1)];
 
       // Send follow-up prompt
       for await (const update of prompt(agentId, followUpMessage)) {
@@ -1564,7 +1618,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     if (throwOnMaxExceeded) {
       throw new Error(
         `Agent ${agentId} did not call done() after ${maxFollowUps} follow-up attempts. ` +
-        `Total prompts sent: ${1 + followUpCount}. Consider increasing maxFollowUps or investigating agent behavior.`
+          `Total prompts sent: ${1 + followUpCount}. Consider increasing maxFollowUps or investigating agent behavior.`,
       );
     }
 
@@ -1619,12 +1673,12 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
   function respondToPermission(
     agentId: AgentId,
     requestId: string,
-    optionId: string
+    optionId: string,
   ): boolean {
     const activeSession = activeSessions.get(agentId);
     if (!activeSession) {
       console.warn(
-        `[AgentManager] Cannot respond to permission: no active session for agent ${agentId}`
+        `[AgentManager] Cannot respond to permission: no active session for agent ${agentId}`,
       );
       return false;
     }
@@ -1632,13 +1686,13 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     try {
       activeSession.session.respondToPermission(requestId, optionId);
       console.log(
-        `[AgentManager] Responded to permission ${requestId} for agent ${agentId} with ${optionId}`
+        `[AgentManager] Responded to permission ${requestId} for agent ${agentId} with ${optionId}`,
       );
       return true;
     } catch (err) {
       console.error(
         `[AgentManager] Error responding to permission ${requestId}:`,
-        err
+        err,
       );
       return false;
     }
@@ -1648,7 +1702,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     const activeSession = activeSessions.get(agentId);
     if (!activeSession) {
       console.warn(
-        `[AgentManager] Cannot cancel permission: no active session for agent ${agentId}`
+        `[AgentManager] Cannot cancel permission: no active session for agent ${agentId}`,
       );
       return false;
     }
@@ -1656,26 +1710,23 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     try {
       activeSession.session.cancelPermission(requestId);
       console.log(
-        `[AgentManager] Cancelled permission ${requestId} for agent ${agentId}`
+        `[AgentManager] Cancelled permission ${requestId} for agent ${agentId}`,
       );
       return true;
     } catch (err) {
       console.error(
         `[AgentManager] Error cancelling permission ${requestId}:`,
-        err
+        err,
       );
       return false;
     }
   }
 
-  function setPermissionMode(
-    agentId: AgentId,
-    mode: PermissionMode
-  ): boolean {
+  function setPermissionMode(agentId: AgentId, mode: PermissionMode): boolean {
     const activeSession = activeSessions.get(agentId);
     if (!activeSession) {
       console.warn(
-        `[AgentManager] Cannot set permission mode: no active session for agent ${agentId}`
+        `[AgentManager] Cannot set permission mode: no active session for agent ${agentId}`,
       );
       return false;
     }
@@ -1683,13 +1734,13 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     try {
       activeSession.handle.setPermissionMode(mode);
       console.log(
-        `[AgentManager] Set permission mode for agent ${agentId} to ${mode}`
+        `[AgentManager] Set permission mode for agent ${agentId} to ${mode}`,
       );
       return true;
     } catch (err) {
       console.error(
         `[AgentManager] Error setting permission mode for agent ${agentId}:`,
-        err
+        err,
       );
       return false;
     }
@@ -1728,7 +1779,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
 
   function setMailServices(
     ms: import("../mail/mail-service.js").MailService,
-    cm: import("../mail/conversation-map.js").ConversationMap
+    cm: import("../mail/conversation-map.js").ConversationMap,
   ): void {
     mailService = ms;
     conversationMap = cm;
@@ -1757,7 +1808,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
           } catch {
             // Ignore errors during cleanup
           }
-        })()
+        })(),
       );
     }
 
@@ -1780,14 +1831,14 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
    */
   async function continueAgent(
     agentId: AgentId,
-    options?: ContinueAgentOptions
+    options?: ContinueAgentOptions,
   ): Promise<SpawnedAgent> {
     const agent = eventStore.getAgent(agentId);
     if (!agent) {
       throw new AgentManagerError(
         `Agent not found: ${agentId}`,
         "AGENT_NOT_FOUND",
-        agentId
+        agentId,
       );
     }
 
@@ -1807,7 +1858,9 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
 
     if (events.length > 0) {
       contextLines.push("## Prior Session Context");
-      contextLines.push(`Continuing from agent ${agentId} (${events.length} events).`);
+      contextLines.push(
+        `Continuing from agent ${agentId} (${events.length} events).`,
+      );
       for (const event of events.slice(-20)) {
         const summary = event.payload?.summary;
         if (summary && typeof summary === "string") {
@@ -1820,9 +1873,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
 
     // Spawn a continuation agent with same role, task, and context
     const taskDescription =
-      options?.task ??
-      agent.task ??
-      `Continue work from ${agentId}`;
+      options?.task ?? agent.task ?? `Continue work from ${agentId}`;
 
     const newAgent = await spawn({
       task: taskDescription,
@@ -1901,7 +1952,7 @@ async function createWorkspaceForRole(
   workspaceManager: WorkspaceManager,
   agentId: AgentId,
   role: string,
-  options: CreateWorkspaceOptions
+  options: CreateWorkspaceOptions,
 ): Promise<Workspace | undefined> {
   const { streamId, streamConfig, dataplaneTaskId } = options;
 
@@ -1910,14 +1961,14 @@ async function createWorkspaceForRole(
       // Coordinators create a new integration stream
       if (!streamConfig) {
         console.warn(
-          `[AgentManager] Coordinator ${agentId} spawn missing streamConfig, skipping workspace`
+          `[AgentManager] Coordinator ${agentId} spawn missing streamConfig, skipping workspace`,
         );
         return undefined;
       }
 
       const newStreamId = workspaceManager.createIntegrationStream(
         agentId,
-        streamConfig
+        streamConfig,
       );
 
       return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
@@ -1927,7 +1978,7 @@ async function createWorkspaceForRole(
       // Integrators join an existing stream
       if (!streamId) {
         console.warn(
-          `[AgentManager] Integrator ${agentId} spawn missing streamId, skipping workspace`
+          `[AgentManager] Integrator ${agentId} spawn missing streamId, skipping workspace`,
         );
         return undefined;
       }
@@ -1940,7 +1991,7 @@ async function createWorkspaceForRole(
       // Workers need streamId and either dataplaneTaskId or create a new task
       if (!streamId) {
         console.warn(
-          `[AgentManager] Worker ${agentId} spawn missing streamId, skipping workspace`
+          `[AgentManager] Worker ${agentId} spawn missing streamId, skipping workspace`,
         );
         return undefined;
       }
@@ -1949,7 +2000,7 @@ async function createWorkspaceForRole(
       const taskId = dataplaneTaskId;
       if (!taskId) {
         console.warn(
-          `[AgentManager] Worker ${agentId} spawn missing dataplaneTaskId, skipping workspace`
+          `[AgentManager] Worker ${agentId} spawn missing dataplaneTaskId, skipping workspace`,
         );
         return undefined;
       }

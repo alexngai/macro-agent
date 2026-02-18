@@ -239,7 +239,7 @@ describe("Multi-client event broadcast E2E", () => {
   });
 
   function createClient(): MAPTestClient {
-    const client = new MAPTestClient(`ws://localhost:${port}/map`);
+    const client = new MAPTestClient(`ws://localhost:${port}/map?token=${server.serverToken}`);
     clients.push(client);
     return client;
   }

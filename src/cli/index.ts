@@ -172,10 +172,14 @@ program
         );
       }
 
+      // Resolve server token — only enforce auth when MACRO_SERVER_SECRET is explicitly set
+      const noAuth = process.env.MACRO_NO_AUTH === "true";
+      const serverToken = noAuth ? undefined : (process.env.MACRO_SERVER_SECRET ?? undefined);
+
       // Create API server
       const server = createAPIServer(
         { eventStore, agentManager, taskManager, messageRouter },
-        { port: parseInt(options.port), host: options.host }
+        { port: parseInt(options.port), host: options.host, serverToken }
       );
 
       // Start server
@@ -184,6 +188,11 @@ program
       console.log(
         chalk.green(`Server running at http://${options.host}:${options.port}`)
       );
+      if (serverToken) {
+        console.log(chalk.gray(`Server token: ${serverToken.substring(0, 8)}...`));
+      } else {
+        console.log(chalk.yellow(`Auth: disabled (MACRO_NO_AUTH)`));
+      }
 
       // Bootstrap team agents after server is running
       if (teamRuntime) {

@@ -36,6 +36,8 @@ async function startThinClient() {
   const serverUrl = process.env.MACRO_SERVER_URL!;
   const lineageStr = process.env.MACRO_AGENT_LINEAGE || "[]";
   const sessionId = process.env.MACRO_SESSION_ID || "";
+  const serverToken = process.env.MACRO_SERVER_TOKEN || "";
+  const agentToken = process.env.MACRO_AGENT_TOKEN || "";
 
   let lineage: string[];
   try {
@@ -55,21 +57,27 @@ async function startThinClient() {
     task_id: taskId ?? undefined,
     lineage,
     cwd: agentCwd,
+    agent_token: agentToken || undefined,
   };
 
   // Also pass permission mode for spawn_agent forwarding
   const permissionMode = process.env.MACRO_PERMISSION_MODE;
 
+  // Build mapCall options with server token for WebSocket auth
+  const callOptions = serverToken ? { serverToken } : undefined;
+
   const mcpServer = createMCPServerThinClient(
     context,
     async (method, params, options) => {
+      // Merge auth options with per-call options
+      const mergedOptions = { ...callOptions, ...options };
       // Inject permission_mode into spawn_agent calls
       if (method === "_macro/mcp/spawn_agent" && permissionMode) {
         const p = (params ?? {}) as Record<string, unknown>;
         p.permission_mode = permissionMode;
-        return mapCall(serverUrl, method, p, options);
+        return mapCall(serverUrl, method, p, mergedOptions);
       }
-      return mapCall(serverUrl, method, params, options);
+      return mapCall(serverUrl, method, params, mergedOptions);
     }
   );
 

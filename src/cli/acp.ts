@@ -222,8 +222,25 @@ async function main() {
     ? undefined
     : `http://${options.host ?? "localhost"}:${options.port ?? 3001}`;
 
+  // Set up authentication tokens
+  // Auth is only enforced when MACRO_SERVER_SECRET is set or --no-auth explicitly disables it.
+  // Without MACRO_SERVER_SECRET, the server runs without auth for local development.
+  const noAuth = options.noAuth || process.env.MACRO_NO_AUTH === "true";
+  let serverToken: string | undefined;
+  let agentTokenManager: import("../auth/token.js").AgentTokenManager | undefined;
+
+  if (!noAuth && process.env.MACRO_SERVER_SECRET) {
+    const { AgentTokenManager } = await import("../auth/token.js");
+    serverToken = process.env.MACRO_SERVER_SECRET;
+    agentTokenManager = new AgentTokenManager();
+  }
+
   // Now create the agentManager with the real router
-  agentManager = createAgentManager(eventStore, messageRouter, { serverUrl });
+  agentManager = createAgentManager(eventStore, messageRouter, {
+    serverUrl,
+    serverToken: serverUrl ? serverToken : undefined,
+    agentTokenManager: serverUrl ? agentTokenManager : undefined,
+  });
   const taskManager = createTaskManager(eventStore);
 
   // Create task backend for dynamic task tools (create_task, get_task, etc.)
@@ -382,11 +399,16 @@ async function main() {
       const port = options.port ?? 3001;
 
       combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext },
-        { port, host, defaultCwd }
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager },
+        { port, host, defaultCwd, serverToken, noAuth }
       );
 
       await combinedServer.start();
+      if (serverToken) {
+        console.error(`[acp] Server token: ${serverToken.substring(0, 8)}...`);
+      } else {
+        console.error(`[acp] Auth disabled (--no-auth)`);
+      }
 
       // Keep process alive - will exit via SIGINT/SIGTERM handlers
       await new Promise<void>(() => {

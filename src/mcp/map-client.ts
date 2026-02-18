@@ -37,6 +37,8 @@ interface JsonRpcResponse {
 export interface MapCallOptions {
   /** Timeout in milliseconds (default: 30000) */
   timeoutMs?: number;
+  /** Server token for authentication (appended as query param on WebSocket URL) */
+  serverToken?: string;
 }
 
 export class MapCallError extends Error {
@@ -77,7 +79,10 @@ export async function mapCall<T = unknown>(
   options?: MapCallOptions
 ): Promise<T> {
   const timeoutMs = options?.timeoutMs ?? 30000;
-  const wsUrl = serverUrl.replace(/^http/, "ws") + "/map";
+  let wsUrl = serverUrl.replace(/^http/, "ws") + "/map";
+  if (options?.serverToken) {
+    wsUrl += `?token=${encodeURIComponent(options.serverToken)}`;
+  }
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;

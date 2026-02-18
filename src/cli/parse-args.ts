@@ -13,6 +13,8 @@ export interface ACPServerOptions {
   host?: string;
   /** Instance ID to reuse an existing event store (omit for new instance) */
   instanceId?: string;
+  /** Disable authentication (for local development/testing) */
+  noAuth?: boolean;
 }
 
 /**
@@ -43,6 +45,8 @@ export function parseArgs(argv?: string[]): ACPServerOptions {
     } else if (args[i] === "--instance-id" && args[i + 1]) {
       options.instanceId = args[i + 1];
       i++;
+    } else if (args[i] === "--no-auth") {
+      options.noAuth = true;
     }
   }
 

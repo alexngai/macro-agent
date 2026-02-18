@@ -35,8 +35,17 @@ import {
 import type { Agent, AgentId } from "../store/types/index.js";
 import type { Address, SendOptions } from "../map/types.js";
 import { createMailService, type MailService } from "../mail/mail-service.js";
-import { createConversationMap, type ConversationMap } from "../mail/conversation-map.js";
+import {
+  createConversationMap,
+  type ConversationMap,
+} from "../mail/conversation-map.js";
 import { createTurnRecorder } from "../mail/turn-recorder.js";
+import {
+  AgentTokenManager,
+  generateToken as generateTokenFn,
+  secureCompare,
+} from "../auth/token.js";
+import { TaskBackend, TaskToolProvider } from "../task/backend/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -52,11 +61,13 @@ export interface CombinedServerServices {
   /** Optional activity watcher for event-driven waking */
   activityWatcher?: ActivityWatcher;
   /** Optional task backend for task tool bridge extensions */
-  taskBackend?: import("../task/backend/types.js").TaskBackend;
+  taskBackend?: TaskBackend;
   /** Optional task tool provider for dynamic task tools in thin-client mode */
-  taskToolProvider?: import("../task/backend/types.js").TaskToolProvider;
+  taskToolProvider?: TaskToolProvider;
   /** Mutable context holder for task tool provider agent_id injection */
   taskToolContext?: { agent_id: string };
+  /** Per-agent token manager for MCP bridge authentication */
+  agentTokenManager?: AgentTokenManager;
 }
 
 export interface CombinedServerConfig {
@@ -77,6 +88,12 @@ export interface CombinedServerConfig {
 
   /** Disable MAP protocol (default: false - MAP is enabled) */
   disableMap?: boolean;
+
+  /** Server token for authentication. Auto-generated if not provided (unless noAuth is true). */
+  serverToken?: string;
+
+  /** Disable authentication entirely (for local development/testing) */
+  noAuth?: boolean;
 }
 
 export interface CombinedServer {
@@ -109,6 +126,9 @@ export interface CombinedServer {
 
   /** Conversation map (for agent-to-conversation tracking) */
   readonly conversationMap?: ConversationMap;
+
+  /** Server token used for authentication (exposed for tests). Undefined when auth is disabled. */
+  readonly serverToken?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -118,7 +138,10 @@ export interface CombinedServer {
 /**
  * Get all descendants of an agent recursively.
  */
-function getDescendantsRecursive(agentId: AgentId, agentManager: AgentManager): AgentId[] {
+function getDescendantsRecursive(
+  agentId: AgentId,
+  agentManager: AgentManager,
+): AgentId[] {
   const descendants: AgentId[] = [];
   const children = agentManager.getChildren(agentId);
   for (const child of children) {
@@ -132,7 +155,9 @@ function getDescendantsRecursive(agentId: AgentId, agentManager: AgentManager): 
  * Create MAPAdapterServices from CombinedServerServices.
  * Wires the internal services to the MAP adapter interface.
  */
-function createMAPServices(services: CombinedServerServices): MAPAdapterServices {
+function createMAPServices(
+  services: CombinedServerServices,
+): MAPAdapterServices {
   // Create agent source for getAncestors (needs lineage lookup)
   // RelevanceAgentSource expects getAgent to return null (not undefined) when not found
   const agentSource: RelevanceAgentSource = {
@@ -162,7 +187,7 @@ function createMAPServices(services: CombinedServerServices): MAPAdapterServices
       from: AgentId,
       to: Address,
       content: string,
-      options?: SendOptions
+      options?: SendOptions,
     ) => {
       const result = await services.messageRouter.sendToAddress({
         from,
@@ -188,7 +213,7 @@ function createMAPServices(services: CombinedServerServices): MAPAdapterServices
 
 export function createCombinedServer(
   services: CombinedServerServices,
-  config: CombinedServerConfig = {}
+  config: CombinedServerConfig = {},
 ): CombinedServer {
   const {
     port = 3001,
@@ -197,7 +222,14 @@ export function createCombinedServer(
     cors = true,
     mapPath = "/map",
     disableMap = false,
+    serverToken: configToken,
+    noAuth = false,
   } = config;
+
+  // Resolve server token: disabled > config > env > none (no auth by default)
+  const resolvedServerToken = noAuth
+    ? undefined
+    : (configToken ?? process.env.MACRO_SERVER_SECRET ?? undefined);
 
   // Set up mail service and conversation map (always created, independent of MAP)
   const mailService = createMailService({ eventStore: services.eventStore });
@@ -221,7 +253,7 @@ export function createCombinedServer(
   // Create Express app with API routes (include mail services)
   const app = createAPIApp(
     { ...services, mailService, conversationMap },
-    { cors }
+    { cors, serverToken: resolvedServerToken },
   );
 
   // Create HTTP server with Express
@@ -249,21 +281,22 @@ export function createCombinedServer(
     };
     mapAdapter = createMAPAdapter(
       { name: "macro-agent", version: "1.0.0" },
-      mapServices
+      mapServices,
     );
 
     // Register workspace file extensions for TUI file attachment.
     // Uses defaultCwd (project root) as the workspace path for all agents,
     // since the head manager doesn't have an isolated worktree.
     registerWorkspaceFileExtensions(mapAdapter, {
-      getWorkspace: () => ({ path: defaultCwd } as any),
+      getWorkspace: () => ({ path: defaultCwd }) as any,
       agentExists: () => true,
     });
 
     // Register generic metadata update extension
     registerUpdateMetadataExtension(mapAdapter, {
       getAgent: (id) => services.agentManager.get(id),
-      updateAgentMetadata: (id, updates) => services.eventStore.updateAgentMetadata(id, updates),
+      updateAgentMetadata: (id, updates) =>
+        services.eventStore.updateAgentMetadata(id, updates),
     });
 
     // Register MCP bridge extensions for thin-client MCP subprocesses
@@ -277,34 +310,52 @@ export function createCombinedServer(
       taskBackend: services.taskBackend,
       taskToolProvider: services.taskToolProvider,
       taskToolContext: services.taskToolContext,
+      agentTokenManager: services.agentTokenManager,
     });
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);
   }
 
   // Handle upgrade requests - route by path
-  httpServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const pathname = new URL(request.url ?? "/", `http://${request.headers.host}`).pathname;
+  httpServer.on(
+    "upgrade",
+    (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+      const parsedUrl = new URL(
+        request.url ?? "/",
+        `http://${request.headers.host}`,
+      );
+      const pathname = parsedUrl.pathname;
 
-    if (pathname === "/acp") {
-      acpWss.handleUpgrade(request, socket, head, (ws) => {
-        acpWss.emit("connection", ws, request);
-      });
-    } else if (pathname === "/api/ws") {
-      apiWss.handleUpgrade(request, socket, head, (ws) => {
-        apiWss.emit("connection", ws, request);
-      });
-    } else if (pathname === mapPath && mapHandler) {
-      // MAP protocol connection
-      acpWss.handleUpgrade(request, socket, head, (ws) => {
-        mapHandler.handleConnection(ws, request);
-      });
-    } else {
-      // Unknown WebSocket path
-      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-      socket.destroy();
-    }
-  });
+      // Validate server token on WebSocket upgrade (skip when auth disabled)
+      if (resolvedServerToken) {
+        const urlToken = parsedUrl.searchParams.get("token");
+        if (!urlToken || !secureCompare(urlToken, resolvedServerToken)) {
+          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+      }
+
+      if (pathname === "/acp") {
+        acpWss.handleUpgrade(request, socket, head, (ws) => {
+          acpWss.emit("connection", ws, request);
+        });
+      } else if (pathname === "/api/ws") {
+        apiWss.handleUpgrade(request, socket, head, (ws) => {
+          apiWss.emit("connection", ws, request);
+        });
+      } else if (pathname === mapPath && mapHandler) {
+        // MAP protocol connection
+        acpWss.handleUpgrade(request, socket, head, (ws) => {
+          mapHandler.handleConnection(ws, request);
+        });
+      } else {
+        // Unknown WebSocket path
+        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        socket.destroy();
+      }
+    },
+  );
 
   // Add health endpoint
   app.get("/health", (_req, res) => {
@@ -330,13 +381,23 @@ export function createCombinedServer(
       httpServer.on("error", reject);
       httpServer.listen(port, host, () => {
         httpServer.removeListener("error", reject);
+        const tokenParam = resolvedServerToken ? `?token=${resolvedServerToken}` : "";
         console.error(`[combined] Server listening on http://${host}:${port}`);
-        console.error(`[combined]   ACP WebSocket: ws://${host}:${port}/acp`);
+        console.error(`[combined]   ACP WebSocket: ws://${host}:${port}/acp${tokenParam}`);
         if (mapHandler) {
-          console.error(`[combined]   MAP WebSocket: ws://${host}:${port}${mapPath}`);
+          console.error(
+            `[combined]   MAP WebSocket: ws://${host}:${port}${mapPath}${tokenParam}`,
+          );
         }
-        console.error(`[combined]   API WebSocket: ws://${host}:${port}/api/ws`);
+        console.error(
+          `[combined]   API WebSocket: ws://${host}:${port}/api/ws${tokenParam}`,
+        );
         console.error(`[combined]   REST API: http://${host}:${port}/api/*`);
+        if (resolvedServerToken) {
+          console.error(`[combined]   Server token: ${resolvedServerToken.substring(0, 8)}...`);
+        } else {
+          console.error(`[combined]   Auth: disabled`);
+        }
         resolve();
       });
     });
@@ -403,5 +464,6 @@ export function createCombinedServer(
     mapAdapter,
     mailService,
     conversationMap,
+    serverToken: resolvedServerToken,
   };
 }

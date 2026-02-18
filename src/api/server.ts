@@ -56,6 +56,7 @@ import {
   type InjectionDeps,
 } from "../steering/index.js";
 import type { AgentId } from "../store/types/index.js";
+import { secureCompare } from "../auth/token.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Server Configuration
@@ -73,6 +74,9 @@ export interface APIServerConfig {
 
   /** Grace period in milliseconds for in-flight work during shutdown (default: 5000) */
   shutdownGracePeriodMs?: number;
+
+  /** Server token for Bearer auth on API routes. When set, all routes except /health require auth. */
+  serverToken?: string;
 }
 
 export interface APIServices {
@@ -351,7 +355,7 @@ export function createAPIServer(
   services: APIServices,
   config: APIServerConfig = {}
 ): APIServer {
-  const { port = 3000, host = "localhost", cors = true, shutdownGracePeriodMs = 5000 } = config;
+  const { port = 3000, host = "localhost", cors = true, shutdownGracePeriodMs = 5000, serverToken } = config;
   const { eventStore, agentManager, taskManager } = services;
 
   // Server state
@@ -374,8 +378,23 @@ export function createAPIServer(
   if (cors) {
     app.use((_req: Request, res: Response, next: NextFunction) => {
       res.header("Access-Control-Allow-Origin", "*");
-      res.header("Access-Control-Allow-Headers", "Content-Type");
+      res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.header("Access-Control-Allow-Methods", "GET, POST, DELETE");
+      next();
+    });
+  }
+
+  // Bearer token auth middleware (skip /health)
+  if (serverToken) {
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path === "/health") return next();
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+      if (!token || !secureCompare(token, serverToken)) {
+        const error: APIError = { error: "Unauthorized", code: "AUTH_REQUIRED" };
+        res.status(401).json(error);
+        return;
+      }
       next();
     });
   }
@@ -1241,9 +1260,9 @@ export function createAPIServer(
  */
 export function createAPIApp(
   services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter"> & Pick<Partial<APIServices>, "mailService" | "conversationMap">,
-  config: { cors?: boolean } = {}
+  config: { cors?: boolean; serverToken?: string } = {}
 ): Express {
-  const { cors = true } = config;
+  const { cors = true, serverToken } = config;
   const { agentManager, taskManager, messageRouter } = services;
 
   // Create shared state
@@ -1262,8 +1281,23 @@ export function createAPIApp(
   if (cors) {
     app.use((_req: Request, res: Response, next: NextFunction) => {
       res.header("Access-Control-Allow-Origin", "*");
-      res.header("Access-Control-Allow-Headers", "Content-Type");
+      res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.header("Access-Control-Allow-Methods", "GET, POST, DELETE");
+      next();
+    });
+  }
+
+  // Bearer token auth middleware (skip /health)
+  if (serverToken) {
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path === "/health") return next();
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+      if (!token || !secureCompare(token, serverToken)) {
+        const error: APIError = { error: "Unauthorized", code: "AUTH_REQUIRED" };
+        res.status(401).json(error);
+        return;
+      }
       next();
     });
   }

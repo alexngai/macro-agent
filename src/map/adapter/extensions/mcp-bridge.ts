@@ -24,6 +24,7 @@ import type { Agent } from "../../../store/types/index.js";
 import type { AgentStopReason } from "../../../agent/types.js";
 import type { EventNotification, MAPEventType } from "../types.js";
 import { RPCError } from "../rpc-handler.js";
+import type { AgentTokenManager } from "../../../auth/token.js";
 import { ulid } from "ulid";
 import { createDoneHandler, type DoneToolDeps } from "../../../mcp/tools/done.js";
 import { createInjectContextHandler } from "../../../mcp/tools/inject_context.js";
@@ -54,7 +55,15 @@ export interface MCPBridgeServices {
   /** Mutable context holder for task tool provider agent_id injection */
   taskToolContext?: { agent_id: string };
   integrationStrategy?: import("../../../workspace/strategies/types.js").IntegrationStrategy;
+  /** Optional agent token manager for per-agent authentication */
+  agentTokenManager?: AgentTokenManager;
 }
+
+// =============================================================================
+// Agent Token Validation (module-level, set by registerMCPBridgeExtensions)
+// =============================================================================
+
+let _agentTokenManager: AgentTokenManager | undefined;
 
 // =============================================================================
 // Agent Context Extraction
@@ -69,6 +78,7 @@ interface AgentContext {
   task_id?: string;
   lineage: string[];
   cwd: string;
+  agent_token?: string;
 }
 
 /**
@@ -80,6 +90,13 @@ function extractContext(params: unknown): { context: AgentContext; args: Record<
 
   if (!context?.agent_id) {
     throw RPCError.invalidParams("params.context.agent_id is required");
+  }
+
+  // Validate per-agent token if token manager is configured
+  if (_agentTokenManager) {
+    if (!context.agent_token || !_agentTokenManager.verifyToken(context.agent_id, context.agent_token)) {
+      throw RPCError.invalidParams("Invalid or missing agent token");
+    }
   }
 
   // Return everything except context as args
@@ -909,6 +926,9 @@ export function registerMCPBridgeExtensions(
   adapter: MAPAdapter,
   services: MCPBridgeServices
 ): void {
+  // Set module-level agent token manager for extractContext() validation
+  _agentTokenManager = services.agentTokenManager;
+
   const emitMAPEvent = (event: EventNotification) => adapter.emitEvent(event);
 
   adapter.registerExtension("_macro/mcp/spawn_agent", createSpawnAgentBridge(services, emitMAPEvent));
