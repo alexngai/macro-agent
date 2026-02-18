@@ -23,7 +23,7 @@ Team templates make these compositions **declarative and loadable** without modi
 A team template is a directory. The structure is designed to be interoperable with other multi-agent systems — the core topology and role structure uses a generic schema, while macro-agent specific configuration lives in clearly namespaced extension fields.
 
 ```
-.macro-agent/teams/<team-name>/
+.multiagent/teams/<team-name>/
 ├── team.yaml              # Manifest: topology, communication, modes
 ├── roles/                 # Role definitions
 │   ├── <role-name>.yaml
@@ -578,7 +578,7 @@ Reads and validates the template directory:
 
 ```
 TeamLoader.load(teamName, basePath?)
-  1. Resolve: .macro-agent/teams/<teamName>/
+  1. Resolve: .multiagent/teams/<teamName>/
   2. Parse team.yaml, validate schema
   3. For each role in manifest:
      a. Load roles/<role>.yaml if present

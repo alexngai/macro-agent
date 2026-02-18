@@ -13,12 +13,12 @@ Seven resolved design decisions (RD1–RD7) guide the implementation:
 | **RD3** | `spawn_rules` translate to capability additions (e.g., `planner: [grinder]` → `agent.spawn.grinder`) |
 | **RD4** | Team `customPrompt` replaces base role `systemPrompt` entirely |
 | **RD5** | Optimistic strategy is thin — validation is the judge agent's job |
-| **RD6** | Team selection via `.macro-agent/config.json` with CLI `--team` override |
+| **RD6** | Team selection via `.multiagent/config.json` with CLI `--team` override |
 | **RD7** | Use `js-yaml` for YAML parsing |
 
 ## Phase 0–1: Team Template System
 
-**New modules**: `src/teams/`, `.macro-agent/teams/self-driving/`
+**New modules**: `src/teams/`, `.multiagent/teams/self-driving/`
 
 ### Data Model (`src/teams/types.ts`)
 
@@ -371,21 +371,21 @@ src/mcp/tools/list_claimable_tasks.ts
 src/metrics/metrics.ts
 src/metrics/index.ts
 
-.macro-agent/teams/self-driving/team.yaml
-.macro-agent/teams/self-driving/roles/planner.yaml
-.macro-agent/teams/self-driving/roles/grinder.yaml
-.macro-agent/teams/self-driving/roles/judge.yaml
-.macro-agent/teams/self-driving/prompts/planner.md
-.macro-agent/teams/self-driving/prompts/grinder.md
-.macro-agent/teams/self-driving/prompts/judge.md
+.multiagent/teams/self-driving/team.yaml
+.multiagent/teams/self-driving/roles/planner.yaml
+.multiagent/teams/self-driving/roles/grinder.yaml
+.multiagent/teams/self-driving/roles/judge.yaml
+.multiagent/teams/self-driving/prompts/planner.md
+.multiagent/teams/self-driving/prompts/grinder.md
+.multiagent/teams/self-driving/prompts/judge.md
 
-.macro-agent/teams/structured/team.yaml
-.macro-agent/teams/structured/roles/lead.yaml
-.macro-agent/teams/structured/roles/developer.yaml
-.macro-agent/teams/structured/roles/reviewer.yaml
-.macro-agent/teams/structured/prompts/lead.md
-.macro-agent/teams/structured/prompts/developer.md
-.macro-agent/teams/structured/prompts/reviewer.md
+.multiagent/teams/structured/team.yaml
+.multiagent/teams/structured/roles/lead.yaml
+.multiagent/teams/structured/roles/developer.yaml
+.multiagent/teams/structured/roles/reviewer.yaml
+.multiagent/teams/structured/prompts/lead.md
+.multiagent/teams/structured/prompts/developer.md
+.multiagent/teams/structured/prompts/reviewer.md
 
 docs/teams.md
 docs/implementation-summary.md

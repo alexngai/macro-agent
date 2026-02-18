@@ -1,11 +1,11 @@
 # Team Templates
 
-Team templates define reusable multi-agent configurations that can be loaded and bootstrapped by the TeamRuntime. Templates live in `.macro-agent/teams/<name>/` directories.
+Team templates define reusable multi-agent configurations that can be loaded and bootstrapped by the TeamRuntime. Templates live in `.multiagent/teams/<name>/` directories.
 
 ## Directory Structure
 
 ```
-.macro-agent/teams/<name>/
+.multiagent/teams/<name>/
 ├── team.yaml              # Main manifest (required)
 ├── roles/
 │   ├── <role>.yaml        # Custom role definitions
@@ -188,7 +188,7 @@ Hierarchical development with explicit assignment. Uses push-mode task assignmen
 
 ## Creating a Custom Team
 
-1. Create directory: `.macro-agent/teams/my-team/`
+1. Create directory: `.multiagent/teams/my-team/`
 2. Write `team.yaml` with your manifest
 3. Define custom roles in `roles/`
 4. Write system prompts in `prompts/`
