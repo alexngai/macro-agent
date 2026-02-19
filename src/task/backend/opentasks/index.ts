@@ -49,6 +49,16 @@ export type {
   ProviderSummary,
 } from "./client.js";
 
+// Daemon Manager
+export {
+  DaemonManager,
+  createDaemonManager,
+} from "./daemon-manager.js";
+export type {
+  DaemonManagerConfig,
+  DaemonManagerResult,
+} from "./daemon-manager.js";
+
 // Mapping
 export {
   mapOpenTasksStatus,

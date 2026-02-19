@@ -72,6 +72,10 @@ export class InMemoryTaskBackend implements TaskBackend {
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────────────────
 
+  async close(): Promise<void> {
+    // No-op for in-memory backend
+  }
+
   async create(options: CreateTaskOptions): Promise<ExtendedTask> {
     const taskId = `task_${nanoid(12)}`;
 

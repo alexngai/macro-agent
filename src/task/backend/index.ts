@@ -98,6 +98,9 @@ import type { TaskBackend, TaskConfig, TaskBackendConfig } from "./types.js";
 import type { OpenTasksClient } from "./opentasks/client.js";
 import { DEFAULT_TASK_CONFIG, DEFAULT_OPENTASKS_CONFIG } from "./types.js";
 import { InMemoryTaskBackend } from "./memory.js";
+import { OpenTasksTaskBackend } from "./opentasks/backend.js";
+import { createOpenTasksClient } from "./opentasks/client.js";
+import { DaemonManager } from "./opentasks/daemon-manager.js";
 
 /**
  * Result of creating a task backend
@@ -108,6 +111,18 @@ export interface TaskBackendResult {
 
   /** OpenTasks client (if opentasks backend is used) */
   openTasksClient?: OpenTasksClient;
+
+  /** Runtime socket path of the daemon (for propagating to child agents) */
+  socketPath?: string;
+
+  /** Shutdown function — stops daemon if we started it, disconnects client */
+  shutdown?: () => Promise<void>;
+
+  /** Connect a project's .opentasks/ directory to the central daemon (Phase 2) */
+  connectProject?: (projectPath: string) => Promise<void>;
+
+  /** Get list of connected project .opentasks/ paths */
+  getConnectedProjects?: () => string[];
 }
 
 /**
@@ -144,20 +159,49 @@ export async function createTaskBackend(
   }
 
   if (backendConfig.type === "opentasks") {
-    // Dynamic import to avoid loading opentasks dependencies if not needed
-    const { createOpenTasksClient } = await import("./opentasks/client.js");
-    const { OpenTasksTaskBackend } = await import("./opentasks/backend.js");
-
     // Merge with defaults
     const openTasksConfig = {
       ...DEFAULT_OPENTASKS_CONFIG,
       ...backendConfig,
     };
 
-    // Create OpenTasks client
-    const openTasksClient = await createOpenTasksClient({
-      socketPath: openTasksConfig.socketPath,
-    });
+    // Determine how to get the OpenTasks client:
+    // 1. If socketPath is explicitly provided, connect directly (legacy / child agent mode)
+    // 2. If autoStart is enabled (default), use DaemonManager to auto-start central daemon
+    // 3. Otherwise, try to connect without auto-start
+
+    let openTasksClient: OpenTasksClient;
+    let resolvedSocketPath: string | undefined;
+    let shutdownFn: (() => Promise<void>) | undefined;
+    let daemonManager: DaemonManager | undefined;
+
+    if (openTasksConfig.socketPath) {
+      // Direct connection to a known socket (e.g., child agent with inherited socket path)
+      openTasksClient = await createOpenTasksClient({
+        socketPath: openTasksConfig.socketPath,
+      });
+      resolvedSocketPath = openTasksConfig.socketPath;
+      shutdownFn = async () => {
+        openTasksClient.disconnect();
+      };
+    } else if (openTasksConfig.autoStart !== false) {
+      // Auto-start daemon via DaemonManager (default behavior)
+      daemonManager = new DaemonManager({
+        centralPath: openTasksConfig.centralPath,
+        connectOnSpawn: openTasksConfig.connectOnSpawn,
+      });
+
+      const result = await daemonManager.ensureDaemon();
+      openTasksClient = result.client;
+      resolvedSocketPath = result.socketPath;
+      shutdownFn = () => daemonManager!.shutdown();
+    } else {
+      // Auto-start disabled, no socket path — try default socket discovery
+      openTasksClient = await createOpenTasksClient();
+      shutdownFn = async () => {
+        openTasksClient.disconnect();
+      };
+    }
 
     // Create backend
     const backend = new OpenTasksTaskBackend(eventStore, openTasksClient, {
@@ -166,7 +210,26 @@ export async function createTaskBackend(
       sourceLabel: openTasksConfig.sourceLabel,
     });
 
-    return { backend, openTasksClient };
+    // Wrap shutdown to close the backend before disconnecting the client/daemon
+    const finalShutdown = async () => {
+      if (backend.close) {
+        try { await backend.close(); } catch { /* ignore */ }
+      }
+      if (shutdownFn) await shutdownFn();
+    };
+
+    return {
+      backend,
+      openTasksClient,
+      socketPath: resolvedSocketPath,
+      shutdown: finalShutdown,
+      connectProject: daemonManager
+        ? (projectPath: string) => daemonManager.connectProject(projectPath)
+        : undefined,
+      getConnectedProjects: daemonManager
+        ? () => daemonManager.getConnectedProjects()
+        : undefined,
+    };
   }
 
   throw new Error(
@@ -184,7 +247,7 @@ export async function createTaskBackend(
  * @returns Task configuration
  */
 export function loadTaskConfigFromEnv(): TaskConfig {
-  const backendType = process.env.MACRO_TASK_BACKEND ?? "memory";
+  const backendType = process.env.MACRO_TASK_BACKEND ?? "opentasks";
 
   if (backendType === "opentasks") {
     const socketPath = process.env.OPENTASKS_SOCKET_PATH;
@@ -212,15 +275,26 @@ export function loadTaskConfigFromEnv(): TaskConfig {
  * @returns Task configuration
  */
 export function loadTaskConfigFromMerged(config: {
-  task?: { backend?: string; opentasks?: { socket_path?: string } };
+  task?: {
+    backend?: string;
+    opentasks?: {
+      socket_path?: string;
+      auto_start?: boolean;
+      central_path?: string;
+      connect_on_spawn?: boolean;
+    };
+  };
 }): TaskConfig {
-  const backendType = config.task?.backend ?? "memory";
+  const backendType = config.task?.backend ?? "opentasks";
 
   if (backendType === "opentasks") {
     return {
       backend: {
         type: "opentasks",
         socketPath: config.task?.opentasks?.socket_path,
+        autoStart: config.task?.opentasks?.auto_start,
+        centralPath: config.task?.opentasks?.central_path,
+        connectOnSpawn: config.task?.opentasks?.connect_on_spawn,
       },
     };
   }

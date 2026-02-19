@@ -49,6 +49,12 @@ export interface MultiagentConfig {
     opentasks?: {
       /** Path to OpenTasks daemon socket */
       socket_path?: string;
+      /** Auto-start central daemon (default: true) */
+      auto_start?: boolean;
+      /** Central daemon location (default: ~/.multiagent/opentasks) */
+      central_path?: string;
+      /** Auto-connect project .opentasks/ on agent spawn (default: true) */
+      connect_on_spawn?: boolean;
     };
   };
 }

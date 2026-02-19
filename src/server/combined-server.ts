@@ -68,6 +68,8 @@ export interface CombinedServerServices {
   taskToolContext?: { agent_id: string };
   /** Per-agent token manager for MCP bridge authentication */
   agentTokenManager?: AgentTokenManager;
+  /** Get connected opentasks project paths (for health endpoint) */
+  getConnectedProjects?: () => string[];
 }
 
 export interface CombinedServerConfig {
@@ -359,10 +361,15 @@ export function createCombinedServer(
 
   // Add health endpoint
   app.get("/health", (_req, res) => {
+    const connectedProjects = services.getConnectedProjects?.() ?? [];
     res.json({
       status: "ok",
       acp_connections: acpHandler.getConnectionCount(),
       map_connections: mapHandler?.getConnectionCount() ?? 0,
+      opentasks: {
+        connected_projects: connectedProjects,
+        project_count: connectedProjects.length,
+      },
       timestamp: Date.now(),
     });
   });

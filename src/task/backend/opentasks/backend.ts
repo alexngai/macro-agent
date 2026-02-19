@@ -93,6 +93,7 @@ const DEFAULT_CONFIG: Required<OpenTasksBackendConfig> = {
  */
 export class OpenTasksTaskBackend implements TaskBackend {
   private readonly config: Required<OpenTasksBackendConfig>;
+  private closed = false;
 
   /** Map from macro-agent task ID to OpenTasks issue ID */
   private readonly taskToIssue = new Map<TaskId, string>();
@@ -108,11 +109,25 @@ export class OpenTasksTaskBackend implements TaskBackend {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
+  /**
+   * Throw if the backend has been closed.
+   */
+  private ensureOpen(): void {
+    if (this.closed) {
+      throw new OpenTasksBackendError("Backend is closed", "BACKEND_CLOSED");
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────────────────
 
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
   async create(options: CreateTaskOptions): Promise<ExtendedTask> {
+    this.ensureOpen();
     const taskId = `task_${nanoid(12)}`;
 
     // Resolve parent issue ID if parent task specified
@@ -192,6 +207,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async update(id: TaskId, updates: UpdateTaskOptions): Promise<ExtendedTask> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -278,6 +294,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async delete(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const issueId = this.taskToIssue.get(id);
     if (issueId) {
       await this.client.deleteIssue(issueId);
@@ -295,6 +312,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     agentId: AgentId,
     options?: AssignOptions
   ): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -328,6 +346,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async unassign(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -366,6 +385,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async start(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -398,6 +418,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async complete(id: TaskId, outputs?: TaskOutputs): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -465,6 +486,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async fail(id: TaskId, error: TaskError): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -653,6 +675,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   // ─────────────────────────────────────────────────────────────────────────────
 
   async addBlocker(taskId: TaskId, blockerId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -691,6 +714,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async removeBlocker(taskId: TaskId, blockerId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -807,6 +831,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     agentId: AgentId,
     filter?: ClaimFilter
   ): Promise<ExtendedTask | null> {
+    this.ensureOpen();
     const candidates = await this.listClaimable(filter);
 
     if (candidates.length === 0) {
@@ -846,6 +871,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async unclaim(taskId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -1001,6 +1027,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     issueId: string,
     createdBy: AgentId
   ): Promise<ExtendedTask> {
+    this.ensureOpen();
     // Check if already imported
     const existingTaskId = this.issueToTask.get(issueId);
     if (existingTaskId) {
@@ -1083,6 +1110,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
    * Bulk import all open issues from OpenTasks as tasks.
    */
   async importOpenIssues(createdBy: AgentId): Promise<ExtendedTask[]> {
+    this.ensureOpen();
     const issues = await this.client.listIssues({
       status: ["open", "in_progress"],
       archived: false,

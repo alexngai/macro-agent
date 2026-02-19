@@ -891,4 +891,78 @@ describe("OpenTasksTaskBackend", () => {
       expect(events.every((e) => e.taskId === task1.id)).toBe(true);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // close()
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("close()", () => {
+    it("should mark backend as closed", async () => {
+      await backend.close();
+
+      // Write operations should throw BACKEND_CLOSED
+      await expect(
+        backend.create({ description: "after close", created_by: testAgentId })
+      ).rejects.toThrow("Backend is closed");
+    });
+
+    it("should throw BACKEND_CLOSED on write operations after close", async () => {
+      // Create a task before closing
+      const task = await backend.create({
+        description: "Test task",
+        created_by: testAgentId,
+      });
+
+      await backend.close();
+
+      // All write methods should throw with BACKEND_CLOSED code
+      const expectClosed = async (fn: () => Promise<unknown>) => {
+        try {
+          await fn();
+          throw new Error("Expected to throw");
+        } catch (err: any) {
+          expect(err.code).toBe("BACKEND_CLOSED");
+          expect(err.message).toBe("Backend is closed");
+        }
+      };
+
+      await expectClosed(() => backend.create({ description: "x", created_by: testAgentId }));
+      await expectClosed(() => backend.update(task.id, { description: "x" }));
+      await expectClosed(() => backend.delete(task.id));
+      await expectClosed(() => backend.assign(task.id, testAgentId));
+      await expectClosed(() => backend.start(task.id));
+      await expectClosed(() => backend.complete(task.id));
+      await expectClosed(() => backend.fail(task.id, { message: "err" }));
+      await expectClosed(() => backend.addBlocker(task.id, task.id));
+      await expectClosed(() => backend.removeBlocker(task.id, task.id));
+      await expectClosed(() => backend.claim!(testAgentId));
+    });
+
+    it("should still allow read operations after close", async () => {
+      // Create a task before closing
+      const task = await backend.create({
+        description: "readable after close",
+        created_by: testAgentId,
+      });
+
+      await backend.close();
+
+      // Read-only operations should still work
+      const fetched = await backend.get(task.id);
+      expect(fetched).not.toBeNull();
+      expect(fetched!.description).toBe("readable after close");
+
+      const listed = await backend.list();
+      expect(listed.length).toBe(1);
+
+      const children = await backend.getChildren(task.id);
+      expect(children).toEqual([]);
+
+      const status = await backend.getSubtaskStatus(task.id);
+      expect(status.total).toBe(0);
+
+      const history = await backend.getAgentHistory(task.id);
+      expect(history).toEqual([]);
+    });
+  });
 });

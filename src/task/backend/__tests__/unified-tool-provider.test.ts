@@ -106,12 +106,12 @@ describe("UnifiedTaskToolProvider", () => {
       ]);
     });
 
-    it("should expose 7 tools when OpenTasks client is provided", () => {
+    it("should expose 8 tools when OpenTasks client is provided", () => {
       const client = createMockOpenTasksClient();
       const provider = new UnifiedTaskToolProvider(backend, getContext, client);
       const tools = provider.getTools();
 
-      expect(tools).toHaveLength(7);
+      expect(tools).toHaveLength(8);
       expect(tools.map((t) => t.name)).toEqual([
         "create_task",
         "get_task",
@@ -120,6 +120,7 @@ describe("UnifiedTaskToolProvider", () => {
         "task",
         "link",
         "annotate",
+        "list_providers",
       ]);
     });
 
@@ -146,7 +147,7 @@ describe("UnifiedTaskToolProvider", () => {
       const client = createMockOpenTasksClient();
       const provider = createUnifiedToolProvider(backend, getContext, client);
       expect(provider).toBeInstanceOf(UnifiedTaskToolProvider);
-      expect(provider.getTools()).toHaveLength(7);
+      expect(provider.getTools()).toHaveLength(8);
     });
   });
 

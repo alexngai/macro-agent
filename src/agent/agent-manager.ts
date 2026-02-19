@@ -308,6 +308,15 @@ export interface AgentManager {
    */
   getRoleRegistry(): RoleRegistry;
 
+  // ── OpenTasks Socket Path (Late Binding) ─────────────────────
+
+  /**
+   * Set the runtime OpenTasks socket path for propagation to child agents.
+   * Used when createTaskBackend() discovers the daemon socket path after
+   * AgentManager is already created.
+   */
+  setOpenTasksSocketPath(socketPath: string): void;
+
   // ── Mail Services (Late Binding) ─────────────────────────────
 
   /**
@@ -442,8 +451,11 @@ export function createAgentManager(
     serverToken,
     agentTokenManager,
     taskBackend: configTaskBackend,
-    openTasksSocketPath: configOpenTasksSocketPath,
+    openTasksSocketPath: initialOpenTasksSocketPath,
   } = config;
+
+  // Mutable OpenTasks socket path (support late binding via setOpenTasksSocketPath)
+  let configOpenTasksSocketPath = initialOpenTasksSocketPath;
 
   // Mutable mail services (support late binding via setMailServices)
   let mailService = initialMailService;
@@ -1788,6 +1800,14 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // OpenTasks Socket Path (Late Binding)
+  // ─────────────────────────────────────────────────────────────────
+
+  function setOpenTasksSocketPath(socketPath: string): void {
+    configOpenTasksSocketPath = socketPath;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // Mail Services (Late Binding)
   // ─────────────────────────────────────────────────────────────────
 
@@ -1937,6 +1957,7 @@ Call done() NOW with status "completed" if your work is finished, or "blocked" i
     onLifecycleEvent,
     setSpawnInterceptor,
     getRoleRegistry,
+    setOpenTasksSocketPath,
     setMailServices,
     close,
   };

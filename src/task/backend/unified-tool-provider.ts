@@ -67,7 +67,8 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
       tools.push(
         this.taskTool(),
         this.linkTool(),
-        this.annotateTool()
+        this.annotateTool(),
+        this.listProvidersTool()
       );
     }
 
@@ -161,6 +162,7 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
           status: task.status,
           isBlocked: task.isBlocked,
           external_id: task.external_id,
+          source_location: task.source_location,
           assigned_agent: task.assigned_agent,
           parent_task: task.parent_task,
           blockers: task.blockers ?? [],
@@ -175,9 +177,12 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
   }
 
   private listTasksTool(): MCPToolDefinition {
+    const client = this.openTasksClient;
     return {
       name: "list_tasks",
-      description: "List tasks with optional filtering",
+      description:
+        "List tasks with optional filtering. Use federated=true to include " +
+        "tasks from connected project locations (requires opentasks backend).",
       schema: {
         type: "object",
         properties: {
@@ -202,6 +207,12 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
             type: "boolean",
             description: "Include blocked tasks (default: true)",
           },
+          federated: {
+            type: "boolean",
+            description:
+              "Include tasks from connected project locations (default: false). " +
+              "Queries the opentasks daemon for ready tasks across all connected projects.",
+          },
         },
       },
       handler: async (params: unknown) => {
@@ -211,6 +222,7 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
           parent_task?: string;
           root_only?: boolean;
           include_blocked?: boolean;
+          federated?: boolean;
         };
 
         const filter: TaskFilter = {};
@@ -221,19 +233,58 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
         if (args.include_blocked !== undefined)
           filter.includeBlocked = args.include_blocked;
 
-        const tasks = await this.backend.list(filter);
+        // Local tasks from EventStore
+        const localTasks = await this.backend.list(filter);
+        const localTaskItems = localTasks.map((t) => ({
+          id: t.id,
+          description: t.description,
+          status: t.status,
+          isBlocked: t.isBlocked,
+          external_id: t.external_id,
+          assigned_agent: t.assigned_agent,
+          parent_task: t.parent_task,
+          source_location: t.source_location,
+        }));
+
+        // If federated requested and client available, also query daemon
+        if (args.federated && client) {
+          try {
+            const result = await client.taskReady({
+              tags: filter.tags,
+              assignee: args.assigned_agent,
+            });
+            if (result.success && result.data) {
+              const readyData = result.data as { type: string; items: Array<{ id: string; type: string; title: string; status?: string; priority?: number; archived: boolean }>; total: number };
+              // Collect external IDs we already know about
+              const knownExternalIds = new Set(
+                localTaskItems
+                  .map((t) => t.external_id)
+                  .filter(Boolean)
+              );
+              // Add federated items not already in local list
+              for (const item of readyData.items ?? []) {
+                if (!knownExternalIds.has(item.id)) {
+                  localTaskItems.push({
+                    id: item.id,
+                    description: item.title,
+                    status: (item.status ?? "pending") as TaskStatus,
+                    isBlocked: false,
+                    external_id: item.id,
+                    assigned_agent: undefined,
+                    parent_task: undefined,
+                    source_location: "federated",
+                  });
+                }
+              }
+            }
+          } catch {
+            // Non-fatal — federated query failed, return local results only
+          }
+        }
 
         return {
-          tasks: tasks.map((t) => ({
-            id: t.id,
-            description: t.description,
-            status: t.status,
-            isBlocked: t.isBlocked,
-            external_id: t.external_id,
-            assigned_agent: t.assigned_agent,
-            parent_task: t.parent_task,
-          })),
-          total: tasks.length,
+          tasks: localTaskItems,
+          total: localTaskItems.length,
         };
       },
     };
@@ -438,6 +489,8 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
       name: "link",
       description:
         "Create or remove a relationship between nodes. " +
+        "Supports cross-project references via opentasks:// URIs " +
+        "(e.g., opentasks://<location-hash>/i-xxxx). " +
         "Types: blocks, implements, references, related, child-of, " +
         "parent-of, depends-on, discovered-from, duplicates, supersedes.",
       schema: {
@@ -635,6 +688,41 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
         throw new Error(
           "Must provide content (new feedback), resolve, dismiss, or reopen"
         );
+      },
+    };
+  }
+
+  private listProvidersTool(): MCPToolDefinition {
+    const client = this.openTasksClient!;
+    return {
+      name: "list_providers",
+      description:
+        "List all registered providers and their capabilities. " +
+        "Shows what task systems are connected (native opentasks, external integrations) " +
+        "and what operations each supports.",
+      schema: {
+        type: "object",
+        properties: {},
+      },
+      handler: async () => {
+        const providers = await client.listProviders();
+        return {
+          providers: providers.map((p) => ({
+            name: p.name,
+            schemes: p.schemes,
+            is_default: p.isDefault,
+            capabilities: p.capabilities,
+            task_capabilities: p.taskCapabilities
+              ? {
+                  actions: p.taskCapabilities.actions,
+                  supports_assignment: p.taskCapabilities.supportsAssignment,
+                  supports_ready_query: p.taskCapabilities.supportsReadyQuery,
+                  status_model: p.taskCapabilities.statusModel,
+                }
+              : undefined,
+          })),
+          total: providers.length,
+        };
       },
     };
   }

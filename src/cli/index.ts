@@ -144,13 +144,29 @@ program
 
       // Create task backend from merged config
       const taskConfig = loadTaskConfigFromMerged(mergedConfig);
-      let openTasksClient: { disconnect(): void } | undefined;
+      let taskBackendShutdown: (() => Promise<void>) | undefined;
+      let connectProject: ((projectPath: string) => Promise<void>) | undefined;
       try {
         const result = await createTaskBackend(taskConfig, eventStore);
-        openTasksClient = result.openTasksClient;
+        taskBackendShutdown = result.shutdown;
+        connectProject = result.connectProject;
         console.log(chalk.blue(`Task backend: ${taskConfig.backend.type}`));
+
+        // Propagate runtime socket path to child agents so they skip daemon discovery
+        if (result.socketPath) {
+          agentManager.setOpenTasksSocketPath(result.socketPath);
+        }
+
+        // Auto-connect the server's own project directory on startup
+        if (connectProject) {
+          connectProject(options.cwd ?? process.cwd()).catch(() => {});
+        }
       } catch (err) {
-        console.log(chalk.yellow(`Task backend creation failed: ${err}. Using legacy TaskManager.`));
+        // Fall back to in-memory backend if opentasks connection fails
+        console.log(chalk.yellow(`Task backend creation failed (${err}), falling back to memory`));
+        try {
+          await createTaskBackend({ backend: { type: "memory" } }, eventStore);
+        } catch { /* non-critical */ }
       }
 
       // Determine team name: CLI flag > merged config
@@ -213,16 +229,39 @@ program
         );
       }
 
+      // Connect-on-spawn: auto-connect project .opentasks/ dirs when agents spawn
+      if (connectProject) {
+        agentManager.onLifecycleEvent((event) => {
+          if (event.type === "spawned" && event.agent.cwd && connectProject) {
+            connectProject(event.agent.cwd).catch(() => {});
+          }
+        });
+      }
+
       console.log(chalk.gray("Press Ctrl+C to stop"));
 
-      // Handle shutdown
+      // Handle shutdown — best-effort, each step isolated
       process.on("SIGINT", async () => {
         console.log(chalk.yellow("\nShutting down..."));
-        if (teamRuntime) await teamRuntime.teardown();
-        await server.stop();
-        await agentManager.close();
-        try { openTasksClient?.disconnect(); } catch { /* ignore */ }
-        await eventStore.close();
+        if (teamRuntime) {
+          try { await teamRuntime.teardown(); } catch (err) {
+            console.error(`[cleanup] Team teardown failed: ${err}`);
+          }
+        }
+        try { await server.stop(); } catch (err) {
+          console.error(`[cleanup] Server stop failed: ${err}`);
+        }
+        try { await agentManager.close(); } catch (err) {
+          console.error(`[cleanup] AgentManager close failed: ${err}`);
+        }
+        if (taskBackendShutdown) {
+          try { await taskBackendShutdown(); } catch (err) {
+            console.error(`[cleanup] Task backend shutdown failed: ${err}`);
+          }
+        }
+        try { await eventStore.close(); } catch (err) {
+          console.error(`[cleanup] EventStore close failed: ${err}`);
+        }
         process.exit(0);
       });
     } catch (error) {
@@ -269,8 +308,12 @@ program
       // Handle Ctrl+C and SIGTERM to clean up child processes
       const cleanup = async () => {
         console.log(chalk.yellow("\nShutting down..."));
-        await agentManager.close();
-        await eventStore.close();
+        try { await agentManager.close(); } catch (err) {
+          console.error(`[cleanup] AgentManager close failed: ${err}`);
+        }
+        try { await eventStore.close(); } catch (err) {
+          console.error(`[cleanup] EventStore close failed: ${err}`);
+        }
         rl.close();
         process.exit(0);
       };
@@ -766,11 +809,16 @@ program
       // Create task backend from merged config
       const acpMergedConfig = loadMergedConfig(defaultCwd);
       const taskConfig = loadTaskConfigFromMerged(acpMergedConfig);
-      let openTasksClient: { disconnect(): void } | undefined;
+      let acpTaskBackendShutdown: (() => Promise<void>) | undefined;
       try {
         const result = await createTaskBackend(taskConfig, eventStore);
-        openTasksClient = result.openTasksClient;
-      } catch { /* non-critical for acp command */ }
+        acpTaskBackendShutdown = result.shutdown;
+      } catch {
+        // Fall back to memory if opentasks connection fails
+        try {
+          await createTaskBackend({ backend: { type: "memory" } }, eventStore);
+        } catch { /* non-critical */ }
+      }
 
       // Create stdio streams for ACP communication
       const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -802,14 +850,22 @@ program
         stream
       );
 
-      // Handle graceful shutdown
+      // Handle graceful shutdown — best-effort, each step isolated
       const cleanup = async () => {
         if (agentManager) {
-          await agentManager.close();
+          try { await agentManager.close(); } catch (err) {
+            console.error(`[cleanup] AgentManager close failed: ${err}`);
+          }
         }
-        try { openTasksClient?.disconnect(); } catch { /* ignore */ }
+        if (acpTaskBackendShutdown) {
+          try { await acpTaskBackendShutdown(); } catch (err) {
+            console.error(`[cleanup] Task backend shutdown failed: ${err}`);
+          }
+        }
         if (eventStore) {
-          await eventStore.close();
+          try { await eventStore.close(); } catch (err) {
+            console.error(`[cleanup] EventStore close failed: ${err}`);
+          }
         }
         process.exit(0);
       };
