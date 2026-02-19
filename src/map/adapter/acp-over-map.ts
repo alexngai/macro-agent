@@ -11,8 +11,9 @@
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { EventStore } from "../../store/event-store.js";
 import type { TaskManager } from "../../task/task-manager.js";
-import type { AgentId } from "../../store/types/index.js";
+import type { AgentId, TaskId } from "../../store/types/index.js";
 import type { AgentConfig } from "../../agent/types.js";
+import type { TaskFilter } from "../../task/types.js";
 import { SessionMapper } from "../../acp/session-mapper.js";
 import type { ACPSessionId } from "../../acp/types.js";
 
@@ -1180,6 +1181,128 @@ export class ACPOverMAPHandler {
         // Compaction is handled internally by the agent process.
         // Accept the request as a no-op so the client doesn't get an error.
         // TODO: Make sure this overrides if needed.
+        return { success: true };
+      }
+
+      // ── Task Management Extensions ────────────────────────────────
+      // These mirror the registered adapter extensions (_macro/task/*)
+      // so they're accessible via ACP-over-MAP streams.
+
+      case "_macro/task/list": {
+        const { filter } = (methodParams ?? {}) as {
+          filter?: {
+            status?: string;
+            assignedAgent?: string;
+            parentTask?: string;
+            createdBy?: string;
+            rootTasksOnly?: boolean;
+          };
+        };
+
+        const taskFilter: TaskFilter | undefined = filter
+          ? {
+              status: filter.status as TaskFilter["status"],
+              assigned_agent: filter.assignedAgent as AgentId | undefined,
+              parent_task: filter.parentTask as TaskId | undefined,
+              created_by: filter.createdBy as AgentId | undefined,
+              rootTasksOnly: filter.rootTasksOnly,
+            }
+          : undefined;
+
+        const tasks = this.taskManager.list(taskFilter);
+        return {
+          tasks: tasks.map((t) => ({
+            id: t.id,
+            description: t.description,
+            status: t.status,
+            assignedAgent: t.assigned_agent,
+            createdBy: t.created_by,
+            createdAt: t.created_at,
+            parentTask: t.parent_task,
+            isBlocked: (t as any).isBlocked,
+            externalId: (t as any).external_id,
+          })),
+        };
+      }
+
+      case "_macro/task/get": {
+        const { taskId } = methodParams as { taskId: string };
+        if (!taskId) throw new Error("taskId is required");
+        const task = this.taskManager.get(taskId as TaskId);
+        if (!task) throw new Error(`Task not found: ${taskId}`);
+        return {
+          task: {
+            id: task.id,
+            description: task.description,
+            status: task.status,
+            assignedAgent: task.assigned_agent,
+            createdBy: task.created_by,
+            createdAt: task.created_at,
+            parentTask: task.parent_task,
+            isBlocked: (task as any).isBlocked,
+            externalId: (task as any).external_id,
+          },
+        };
+      }
+
+      case "_macro/task/create": {
+        const { description, parentTask, externalId } = methodParams as {
+          description: string;
+          parentTask?: string;
+          externalId?: string;
+        };
+        if (!description) throw new Error("description is required");
+
+        // Determine who is creating the task — use the stream's agent or a default
+        const createdBy = (streamState.agentId ?? "tui") as AgentId;
+
+        const task = this.taskManager.create({
+          description,
+          created_by: createdBy,
+          parent_task: parentTask as TaskId | undefined,
+        });
+
+        return {
+          task: {
+            id: task.id,
+            description: task.description,
+            status: task.status,
+            assignedAgent: task.assigned_agent,
+            createdBy: task.created_by,
+            createdAt: task.created_at,
+            parentTask: task.parent_task,
+          },
+        };
+      }
+
+      case "_macro/task/assign": {
+        const { taskId, agentId, role } = methodParams as {
+          taskId: string;
+          agentId: string;
+          role?: string;
+        };
+        if (!taskId) throw new Error("taskId is required");
+        if (!agentId) throw new Error("agentId is required");
+
+        this.taskManager.assign(taskId as TaskId, agentId as AgentId, role);
+        return { success: true };
+      }
+
+      case "_macro/task/complete": {
+        const { taskId, outputs } = methodParams as {
+          taskId: string;
+          outputs?: { summary?: string; data?: unknown };
+        };
+        if (!taskId) throw new Error("taskId is required");
+
+        // Update status to completed
+        this.taskManager.updateStatus(taskId as TaskId, "completed");
+
+        // If outputs provided, update task metadata
+        if (outputs) {
+          this.taskManager.update(taskId as TaskId, { outputs });
+        }
+
         return { success: true };
       }
 

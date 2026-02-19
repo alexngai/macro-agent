@@ -1000,6 +1000,7 @@ export class MAPAdapterImpl implements MAPAdapter {
             messaging?: { canSend?: boolean; canReceive?: boolean; canBroadcast?: boolean };
             lifecycle?: { canSpawn?: boolean; canRegister?: boolean; canUnregister?: boolean; canSteer?: boolean; canStop?: boolean };
             scopes?: { canCreateScopes?: boolean; canManageScopes?: boolean };
+            management?: { canManageTasks?: boolean; canManageLifecycle?: boolean };
           };
         }
       | undefined;
@@ -1048,6 +1049,8 @@ export class MAPAdapterImpl implements MAPAdapter {
       if (req.lifecycle?.canSpawn !== undefined) requested.canSpawn = req.lifecycle.canSpawn;
       if (req.lifecycle?.canStop !== undefined) requested.canStop = req.lifecycle.canStop;
       if (req.scopes?.canManageScopes !== undefined) requested.canManageScopes = req.scopes.canManageScopes;
+      if (req.management?.canManageTasks !== undefined) requested.canManageTasks = req.management.canManageTasks;
+      if (req.management?.canManageLifecycle !== undefined) requested.canManageLifecycle = req.management.canManageLifecycle;
       const mergedCapabilities = { ...baseCapabilities, ...requested };
       this.connections.updateCapabilities(participantId, mergedCapabilities);
 
@@ -1093,6 +1096,7 @@ export class MAPAdapterImpl implements MAPAdapter {
             canManageScopes: true,
             canManageTasks: true,
             canManageFederation: true,
+            canManageLifecycle: true,
           }
         );
       case "gateway":
@@ -1105,6 +1109,7 @@ export class MAPAdapterImpl implements MAPAdapter {
           canManageScopes: false,
           canManageTasks: false,
           canManageFederation: true,
+          canManageLifecycle: false,
         };
       case "client":
       default:
@@ -1117,6 +1122,7 @@ export class MAPAdapterImpl implements MAPAdapter {
             canStop: false,
             canManageScopes: false,
             canManageTasks: false,
+            canManageLifecycle: false,
           }
         );
     }

@@ -28,6 +28,9 @@ import {
   registerWorkspaceFileExtensions,
   registerUpdateMetadataExtension,
   registerMCPBridgeExtensions,
+  registerTaskExtensions,
+  registerResumeExtension,
+  registerAgentLifecycleExtensions,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
@@ -299,6 +302,57 @@ export function createCombinedServer(
       getAgent: (id) => services.agentManager.get(id),
       updateAgentMetadata: (id, updates) =>
         services.eventStore.updateAgentMetadata(id, updates),
+    });
+
+    // Register task extensions for direct MAP task management
+    if (services.taskBackend) {
+      registerTaskExtensions(mapAdapter, {
+        taskBackend: services.taskBackend,
+        sendMessage: async (from, to, content, options) => {
+          const result = await services.messageRouter.sendToAddress({
+            from: from as AgentId,
+            to,
+            content: typeof content === "string" ? content : JSON.stringify(content),
+            options: options ? { priority: options.priority as any } : undefined,
+          });
+          return { delivered: result.delivered };
+        },
+      });
+    }
+
+    // Register resume extension for restarting stopped agents
+    registerResumeExtension(mapAdapter, {
+      getAgent: (id) => {
+        const agent = services.agentManager.get(id);
+        if (!agent) return undefined;
+        return { id: agent.id, state: agent.state, session_id: agent.session_id };
+      },
+      resume: (id) => services.agentManager.resume(id),
+    });
+
+    // Register agent lifecycle extensions (spawn, fork, permission management)
+    registerAgentLifecycleExtensions(mapAdapter, {
+      getAgent: (id) => services.agentManager.get(id),
+      spawn: (opts) => services.agentManager.spawn(opts),
+      forkAgent: (id, opts) => services.agentManager.forkAgent(id, opts),
+      prompt: (id, msg) => services.agentManager.prompt(id, msg),
+      setPermissionMode: (id, mode) =>
+        services.agentManager.setPermissionMode(id, mode as any),
+      getPermissionMode: (id) => services.agentManager.getPermissionMode(id),
+      respondToPermission: (id, reqId, optId) =>
+        services.agentManager.respondToPermission(id, reqId, optId),
+      onAgentRegistered: (agent) => {
+        // Emit agent_registered event to all MAP subscribers
+        // mapAdapter is guaranteed non-null here (inside if (!disableMap) block)
+        mapAdapter!.emitEvent({
+          eventId: `agent-reg-${agent.id}-${Date.now()}`,
+          type: "agent_registered" as any,
+          timestamp: Date.now(),
+          data: agent,
+        });
+      },
+      listHeadManagers: () => services.agentManager.listHeadManagers(),
+      defaultCwd,
     });
 
     // Register MCP bridge extensions for thin-client MCP subprocesses

@@ -14,6 +14,8 @@ import {
   unregisterResumeExtension,
   registerAgentDetectionExtensions,
   unregisterAgentDetectionExtensions,
+  registerAgentLifecycleExtensions,
+  unregisterAgentLifecycleExtensions,
   registerMacroExtensions,
   MACRO_EXTENSION_METHODS,
   EXTENSION_CAPABILITIES,
@@ -22,6 +24,7 @@ import {
   type WorkspaceExtensionServices,
   type ResumeExtensionServices,
   type AgentDetectionExtensionServices,
+  type AgentLifecycleExtensionServices,
 } from "../extensions/index.js";
 import type { MAPAdapter, ExtensionHandler, ExtensionContext } from "../interface.js";
 import type { ParticipantCapabilities } from "../types.js";
@@ -892,6 +895,389 @@ describe("Agent Detection Extensions", () => {
 });
 
 // =============================================================================
+// Agent Lifecycle Extension Tests
+// =============================================================================
+
+describe("Agent Lifecycle Extensions", () => {
+  let adapter: MAPAdapter & { handlers: Map<string, ExtensionHandler> };
+  let services: AgentLifecycleExtensionServices;
+
+  beforeEach(() => {
+    adapter = createMockAdapter();
+
+    services = {
+      getAgent: vi.fn().mockReturnValue({
+        id: "agent-1" as AgentId,
+        state: "running",
+        session_id: "session-1",
+        cwd: "/test/cwd",
+      }),
+      spawn: vi.fn().mockResolvedValue({
+        id: "agent-2" as AgentId,
+        session_id: "session-2",
+      }),
+      forkAgent: vi.fn().mockResolvedValue({
+        id: "agent-3" as AgentId,
+        session_id: "session-3",
+        session: { id: "provider-session-3" },
+      }),
+      prompt: vi.fn().mockReturnValue((async function* () {})()),
+      setPermissionMode: vi.fn().mockReturnValue(true),
+      getPermissionMode: vi.fn().mockReturnValue("default"),
+      respondToPermission: vi.fn().mockReturnValue(true),
+      onAgentRegistered: vi.fn(),
+      listHeadManagers: vi.fn().mockReturnValue([{ id: "head-1" as AgentId }]),
+      defaultCwd: "/default/cwd",
+    };
+  });
+
+  describe("registration", () => {
+    it("registers all agent lifecycle methods", () => {
+      registerAgentLifecycleExtensions(adapter, services);
+
+      expect(adapter.handlers.has("_macro/spawnAgent")).toBe(true);
+      expect(adapter.handlers.has("_macro/forkAgent")).toBe(true);
+      expect(adapter.handlers.has("_macro/setPermissionMode")).toBe(true);
+      expect(adapter.handlers.has("_macro/respondToPermission")).toBe(true);
+    });
+
+    it("unregisters all agent lifecycle methods", () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      unregisterAgentLifecycleExtensions(adapter);
+
+      expect(adapter.handlers.has("_macro/spawnAgent")).toBe(false);
+      expect(adapter.handlers.has("_macro/forkAgent")).toBe(false);
+      expect(adapter.handlers.has("_macro/setPermissionMode")).toBe(false);
+      expect(adapter.handlers.has("_macro/respondToPermission")).toBe(false);
+    });
+  });
+
+  describe("_macro/spawnAgent", () => {
+    it("spawns an agent with explicit parentId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+      const ctx = createMockContext({ canManageLifecycle: true });
+
+      const result = await handler(ctx, {
+        task: "Do something",
+        cwd: "/work/dir",
+        parentId: "parent-1",
+        topics: ["topic-a"],
+        config: { key: "value" },
+      });
+
+      expect(services.spawn).toHaveBeenCalledWith({
+        parent: "parent-1",
+        task: "Do something",
+        cwd: "/work/dir",
+        role: "worker",
+        topics: ["topic-a"],
+        config: { key: "value" },
+      });
+      expect(result).toHaveProperty("agentId", "agent-2");
+      expect(result).toHaveProperty("sessionId", "session-2");
+    });
+
+    it("falls back to head manager when no parentId provided", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        task: "Do something",
+      });
+
+      expect(services.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({ parent: "head-1" })
+      );
+    });
+
+    it("uses defaultCwd when no cwd provided", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        task: "Do something",
+        parentId: "parent-1",
+      });
+
+      expect(services.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: "/default/cwd" })
+      );
+    });
+
+    it("throws for missing task", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {})
+      ).rejects.toThrow("task is required");
+    });
+
+    it("throws when no parent available", async () => {
+      (services.listHeadManagers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {
+          task: "Do something",
+        })
+      ).rejects.toThrow("No parent agent available");
+    });
+
+    it("notifies onAgentRegistered after spawn", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/spawnAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        task: "Do something",
+        parentId: "parent-1",
+      });
+
+      expect(services.onAgentRegistered).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "agent-2",
+          role: "worker",
+          parent: "parent-1",
+        })
+      );
+    });
+  });
+
+  describe("_macro/forkAgent", () => {
+    it("forks an agent", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      const result = await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        name: "forked-agent",
+        cwd: "/fork/dir",
+      });
+
+      expect(services.forkAgent).toHaveBeenCalledWith("agent-1", {
+        name: "forked-agent",
+        prompt: undefined,
+        cwd: "/fork/dir",
+      });
+      expect(result).toHaveProperty("newAgentId", "agent-3");
+      expect(result).toHaveProperty("newSessionId", "session-3");
+      expect(result).toHaveProperty("originalAgentId", "agent-1");
+      expect(result).toHaveProperty("providerSessionId", "provider-session-3");
+    });
+
+    it("uses source agent cwd as fallback", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+      });
+
+      expect(services.forkAgent).toHaveBeenCalledWith("agent-1", {
+        name: undefined,
+        prompt: undefined,
+        cwd: "/test/cwd",
+      });
+    });
+
+    it("uses defaultCwd when source agent has no cwd", async () => {
+      (services.getAgent as ReturnType<typeof vi.fn>).mockReturnValue({
+        id: "agent-1" as AgentId,
+        state: "running",
+        cwd: null,
+      });
+
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+      });
+
+      expect(services.forkAgent).toHaveBeenCalledWith("agent-1",
+        expect.objectContaining({ cwd: "/default/cwd" })
+      );
+    });
+
+    it("throws for missing agentId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {})
+      ).rejects.toThrow("agentId is required");
+    });
+
+    it("throws for non-existent agent", async () => {
+      (services.getAgent as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), { agentId: "missing" })
+      ).rejects.toThrow("not found");
+    });
+
+    it("fires prompt after fork when prompt is provided", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        prompt: "Start working",
+      });
+
+      // prompt is fire-and-forget but should have been called
+      expect(services.prompt).toHaveBeenCalledWith("agent-3", "Start working");
+    });
+
+    it("notifies onAgentRegistered after fork", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/forkAgent")!;
+
+      await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        name: "forked",
+      });
+
+      expect(services.onAgentRegistered).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "agent-3",
+          name: "forked",
+          parent: "agent-1",
+        })
+      );
+    });
+  });
+
+  describe("_macro/setPermissionMode", () => {
+    it("sets permission mode successfully", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/setPermissionMode")!;
+
+      const result = await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        permissionMode: "trust",
+      });
+
+      expect(services.setPermissionMode).toHaveBeenCalledWith("agent-1", "trust");
+      expect(result).toEqual({
+        success: true,
+        agentId: "agent-1",
+        previousMode: "default",
+        newMode: "trust",
+      });
+    });
+
+    it("returns error when no active session", async () => {
+      (services.setPermissionMode as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/setPermissionMode")!;
+
+      const result = await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        permissionMode: "trust",
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: "No active session found for agent agent-1",
+      });
+    });
+
+    it("throws for missing agentId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/setPermissionMode")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), { permissionMode: "trust" })
+      ).rejects.toThrow("agentId and permissionMode are required");
+    });
+
+    it("throws for missing permissionMode", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/setPermissionMode")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), { agentId: "agent-1" })
+      ).rejects.toThrow("agentId and permissionMode are required");
+    });
+  });
+
+  describe("_macro/respondToPermission", () => {
+    it("responds to permission request successfully", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/respondToPermission")!;
+
+      const result = await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        requestId: "req-1",
+        optionId: "allow",
+      });
+
+      expect(services.respondToPermission).toHaveBeenCalledWith("agent-1", "req-1", "allow");
+      expect(result).toEqual({ success: true });
+    });
+
+    it("returns failure when respondToPermission returns false", async () => {
+      (services.respondToPermission as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/respondToPermission")!;
+
+      const result = await handler(createMockContext({ canManageLifecycle: true }), {
+        agentId: "agent-1",
+        requestId: "req-1",
+        optionId: "deny",
+      });
+
+      expect(result).toEqual({ success: false });
+    });
+
+    it("throws for missing agentId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/respondToPermission")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {
+          requestId: "req-1",
+          optionId: "allow",
+        })
+      ).rejects.toThrow("agentId, requestId, and optionId are required");
+    });
+
+    it("throws for missing requestId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/respondToPermission")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {
+          agentId: "agent-1",
+          optionId: "allow",
+        })
+      ).rejects.toThrow("agentId, requestId, and optionId are required");
+    });
+
+    it("throws for missing optionId", async () => {
+      registerAgentLifecycleExtensions(adapter, services);
+      const handler = adapter.handlers.get("_macro/respondToPermission")!;
+
+      await expect(
+        handler(createMockContext({ canManageLifecycle: true }), {
+          agentId: "agent-1",
+          requestId: "req-1",
+        })
+      ).rejects.toThrow("agentId, requestId, and optionId are required");
+    });
+  });
+});
+
+// =============================================================================
 // Combined Registration Tests
 // =============================================================================
 
@@ -938,6 +1324,16 @@ describe("registerMacroExtensions", () => {
         isDetecting: vi.fn(),
         getCachedResult: vi.fn(),
       },
+      agentLifecycle: {
+        getAgent: vi.fn(),
+        spawn: vi.fn(),
+        forkAgent: vi.fn(),
+        prompt: vi.fn(),
+        setPermissionMode: vi.fn(),
+        getPermissionMode: vi.fn(),
+        respondToPermission: vi.fn(),
+        listHeadManagers: vi.fn(),
+      },
     });
 
     expect(adapter.handlers.has("_macro/task/list")).toBe(true);
@@ -946,6 +1342,10 @@ describe("registerMacroExtensions", () => {
     expect(adapter.handlers.has("_macro/resume")).toBe(true);
     expect(adapter.handlers.has("_macro/agents/available")).toBe(true);
     expect(adapter.handlers.has("_macro/agents/refresh")).toBe(true);
+    expect(adapter.handlers.has("_macro/spawnAgent")).toBe(true);
+    expect(adapter.handlers.has("_macro/forkAgent")).toBe(true);
+    expect(adapter.handlers.has("_macro/setPermissionMode")).toBe(true);
+    expect(adapter.handlers.has("_macro/respondToPermission")).toBe(true);
   });
 });
 
@@ -962,6 +1362,10 @@ describe("MACRO_EXTENSION_METHODS", () => {
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/resume");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/agents/available");
     expect(MACRO_EXTENSION_METHODS).toContain("_macro/agents/refresh");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/spawnAgent");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/forkAgent");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/setPermissionMode");
+    expect(MACRO_EXTENSION_METHODS).toContain("_macro/respondToPermission");
   });
 });
 
@@ -975,5 +1379,9 @@ describe("EXTENSION_CAPABILITIES", () => {
     expect(EXTENSION_CAPABILITIES["_macro/resume"]).toBe("canManageLifecycle");
     expect(EXTENSION_CAPABILITIES["_macro/agents/available"]).toBe("canQuery");
     expect(EXTENSION_CAPABILITIES["_macro/agents/refresh"]).toBe("canQuery");
+    expect(EXTENSION_CAPABILITIES["_macro/spawnAgent"]).toBe("canManageLifecycle");
+    expect(EXTENSION_CAPABILITIES["_macro/forkAgent"]).toBe("canManageLifecycle");
+    expect(EXTENSION_CAPABILITIES["_macro/setPermissionMode"]).toBe("canManageLifecycle");
+    expect(EXTENSION_CAPABILITIES["_macro/respondToPermission"]).toBe("canManageLifecycle");
   });
 });

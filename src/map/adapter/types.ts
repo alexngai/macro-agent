@@ -88,6 +88,8 @@ export interface ParticipantCapabilities {
   canManageTasks?: boolean;
   /** Can manage federation connections (connect/disconnect peers) */
   canManageFederation?: boolean;
+  /** Can manage agent lifecycle (resume, spawn, fork, permissions) */
+  canManageLifecycle?: boolean;
 }
 
 /**
