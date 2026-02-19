@@ -241,7 +241,7 @@ export async function createTaskBackend(
  * Load task configuration from environment variables
  *
  * Environment variables:
- * - MACRO_TASK_BACKEND: 'memory' | 'opentasks' (default: 'memory')
+ * - MACRO_TASK_BACKEND: 'memory' | 'opentasks' (default: 'opentasks')
  * - OPENTASKS_SOCKET_PATH: Path to OpenTasks daemon socket (auto-discovered if not set)
  *
  * @returns Task configuration

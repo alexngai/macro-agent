@@ -319,7 +319,7 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `memory` |
+| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `opentasks` |
 | `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | — |
 | `MACRO_WORKSPACE_POOL_SIZE` | Max concurrent workspaces | `10` |
 | `MACRO_MERGE_QUEUE_DB` | Merge queue SQLite path | `:memory:` |
