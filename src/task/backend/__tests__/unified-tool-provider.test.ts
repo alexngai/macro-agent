@@ -106,12 +106,12 @@ describe("UnifiedTaskToolProvider", () => {
       ]);
     });
 
-    it("should expose 7 tools when OpenTasks client is provided", () => {
+    it("should expose 8 tools when OpenTasks client is provided", () => {
       const client = createMockOpenTasksClient();
       const provider = new UnifiedTaskToolProvider(backend, getContext, client);
       const tools = provider.getTools();
 
-      expect(tools).toHaveLength(7);
+      expect(tools).toHaveLength(8);
       expect(tools.map((t) => t.name)).toEqual([
         "create_task",
         "get_task",
@@ -120,6 +120,7 @@ describe("UnifiedTaskToolProvider", () => {
         "task",
         "link",
         "annotate",
+        "list_providers",
       ]);
     });
 
@@ -146,7 +147,7 @@ describe("UnifiedTaskToolProvider", () => {
       const client = createMockOpenTasksClient();
       const provider = createUnifiedToolProvider(backend, getContext, client);
       expect(provider).toBeInstanceOf(UnifiedTaskToolProvider);
-      expect(provider.getTools()).toHaveLength(7);
+      expect(provider.getTools()).toHaveLength(8);
     });
   });
 
@@ -369,6 +370,59 @@ describe("UnifiedTaskToolProvider", () => {
       await expect(
         tool.handler({ transition: { id: "i-1", action: "start" } })
       ).rejects.toThrow("Invalid transition");
+    });
+
+    it("should call syncExternalTransition after successful transition", async () => {
+      const client = createMockOpenTasksClient();
+      const syncFn = vi.fn().mockResolvedValue(undefined);
+      const backendWithSync = {
+        ...backend,
+        syncExternalTransition: syncFn,
+      };
+      const provider = new UnifiedTaskToolProvider(backendWithSync, getContext, client);
+      const tool = findTool(provider.getTools(), "task")!;
+
+      await tool.handler({
+        transition: { id: "i-abc1", action: "complete" },
+      });
+
+      expect(syncFn).toHaveBeenCalledWith("i-abc1", "complete", TEST_AGENT_ID);
+    });
+
+    it("should call syncExternalTransition after successful assign", async () => {
+      const client = createMockOpenTasksClient();
+      const syncFn = vi.fn().mockResolvedValue(undefined);
+      const backendWithSync = {
+        ...backend,
+        syncExternalTransition: syncFn,
+      };
+      const provider = new UnifiedTaskToolProvider(backendWithSync, getContext, client);
+      const tool = findTool(provider.getTools(), "task")!;
+
+      await tool.handler({
+        assign: { id: "i-abc1" },
+      });
+
+      expect(syncFn).toHaveBeenCalledWith("i-abc1", "assign", TEST_AGENT_ID);
+    });
+
+    it("should not fail tool call if syncExternalTransition throws", async () => {
+      const client = createMockOpenTasksClient();
+      const syncFn = vi.fn().mockRejectedValue(new Error("sync error"));
+      const backendWithSync = {
+        ...backend,
+        syncExternalTransition: syncFn,
+      };
+      const provider = new UnifiedTaskToolProvider(backendWithSync, getContext, client);
+      const tool = findTool(provider.getTools(), "task")!;
+
+      // Should not throw even though sync fails
+      const result = await tool.handler({
+        transition: { id: "i-abc1", action: "start" },
+      });
+
+      expect(result).toBeDefined();
+      expect(syncFn).toHaveBeenCalled();
     });
   });
 

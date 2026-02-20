@@ -20,6 +20,7 @@ import type { Agent, Task } from "../../store/types/index.js";
 function createMockAgent(overrides: Partial<Agent> = {}): Agent {
   return {
     id: "agent_test123",
+    name: "swift-falcon",
     session_id: "sess_test123",
     parent: null,
     lineage: [],
@@ -83,7 +84,7 @@ function createMockAgentManager(): AgentManager {
     spawn: vi.fn(async (options) => ({
       id: "agent_spawned123",
       session_id: "sess_spawned123",
-      agent: createMockAgent({ id: "agent_spawned123", task: options.task, task_id: "task_spawned123" }),
+      agent: createMockAgent({ id: "agent_spawned123", name: "brave-tiger", task: options.task, task_id: "task_spawned123" }),
       session: {} as any,
     })),
     terminate: vi.fn(async () => {}),
@@ -236,6 +237,21 @@ describe("MCP Server", () => {
         topics: [],
         config: undefined,
       });
+    });
+
+    it("should include name in spawn result", async () => {
+      createMCPServer(context, services);
+
+      const result = await (agentManager.spawn as ReturnType<typeof vi.fn>)({
+        task: "Named task",
+        parent: context.agent_id,
+        subscribeParent: true,
+        topics: [],
+        config: undefined,
+      });
+
+      expect(result.agent.name).toBe("brave-tiger");
+      expect(result.id).toBe("agent_spawned123");
     });
 
     it("should pass config options to spawn", async () => {
@@ -391,6 +407,21 @@ describe("MCP Server", () => {
         includeAcknowledged: false,
       });
     });
+
+    it("should resolve sender name from agent manager", () => {
+      const senderAgent = createMockAgent({ id: "agent_sender1", name: "wise-owl" });
+
+      (agentManager.get as ReturnType<typeof vi.fn>).mockImplementation((id: string) => {
+        if (id === "agent_sender1") return senderAgent;
+        return null;
+      });
+
+      createMCPServer(context, services);
+
+      // Verify agent name can be resolved for message senders
+      const resolved = agentManager.get("agent_sender1");
+      expect(resolved?.name).toBe("wise-owl");
+    });
   });
 
   describe("query_index tool", () => {
@@ -444,6 +475,43 @@ describe("MCP Server", () => {
       expect(filtered).toHaveLength(1);
       expect(filtered[0].id).toBe("agent_1");
     });
+
+    it("should search by agent name", () => {
+      const agents = [
+        createMockAgent({ id: "agent_1", name: "brave-tiger", task: "Implement auth" }),
+        createMockAgent({ id: "agent_2", name: "calm-dolphin", task: "Add logging" }),
+      ];
+
+      (agentManager.list as ReturnType<typeof vi.fn>).mockReturnValue(agents);
+
+      createMCPServer(context, services);
+
+      const allAgents = agentManager.list();
+      const search = "tiger";
+      const filtered = allAgents.filter(
+        (a: Agent) =>
+          a.id.toLowerCase().includes(search) ||
+          a.name?.toLowerCase().includes(search) ||
+          a.task?.toLowerCase().includes(search)
+      );
+
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].id).toBe("agent_1");
+      expect(filtered[0].name).toBe("brave-tiger");
+    });
+
+    it("should include name in agent entries", () => {
+      const agents = [
+        createMockAgent({ id: "agent_1", name: "brave-tiger" }),
+      ];
+
+      (agentManager.list as ReturnType<typeof vi.fn>).mockReturnValue(agents);
+
+      createMCPServer(context, services);
+
+      const allAgents = agentManager.list();
+      expect(allAgents[0].name).toBe("brave-tiger");
+    });
   });
 
   describe("get_hierarchy tool", () => {
@@ -473,6 +541,31 @@ describe("MCP Server", () => {
       expect(result!.depth).toBe(2);
     });
 
+    it("should include name in hierarchy nodes", () => {
+      const hierarchy = {
+        root: {
+          agent: createMockAgent({ id: "agent_root", name: "bold-eagle" }),
+          children: [
+            {
+              agent: createMockAgent({ id: "agent_child1", name: "calm-dolphin", parent: "agent_root" }),
+              children: [],
+            },
+          ],
+        },
+        depth: 2,
+        totalAgents: 2,
+      };
+
+      (agentManager.getHierarchy as ReturnType<typeof vi.fn>).mockReturnValue(hierarchy);
+
+      createMCPServer(context, services);
+
+      const result = agentManager.getHierarchy("agent_root");
+
+      expect(result!.root.agent.name).toBe("bold-eagle");
+      expect(result!.root.children[0].agent.name).toBe("calm-dolphin");
+    });
+
     it("should return null for non-existent agent", () => {
       (agentManager.getHierarchy as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
@@ -488,6 +581,7 @@ describe("MCP Server", () => {
     it("should get agent details", () => {
       const agent = createMockAgent({
         id: "agent_detail123",
+        name: "fierce-lion",
         task: "Important task",
         state: "running",
         parent: "agent_parent123",
@@ -506,6 +600,7 @@ describe("MCP Server", () => {
 
       expect(result).toBeDefined();
       expect(result!.task).toBe("Important task");
+      expect(result!.name).toBe("fierce-lion");
       expect(children).toHaveLength(2);
     });
 
@@ -524,6 +619,7 @@ describe("MCP Server", () => {
     it("should stop agent in subtree", async () => {
       const targetAgent = createMockAgent({
         id: "agent_target123",
+        name: "quick-fox",
         lineage: [context.agent_id], // Target has caller in lineage
       });
 
@@ -534,6 +630,9 @@ describe("MCP Server", () => {
 
       // Verify subtree check passes
       expect(targetAgent.lineage.includes(context.agent_id)).toBe(true);
+
+      // Name should be available for inclusion in stop response
+      expect(targetAgent.name).toBe("quick-fox");
 
       // Terminate should be called
       await agentManager.terminate("agent_target123", "cancelled");

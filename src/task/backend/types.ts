@@ -34,6 +34,9 @@ export interface ExtendedTask extends Task {
 
   /** Binding to external system (e.g., OpenTasks issue ID "i-xxxx") */
   external_id?: string;
+
+  /** Source project location (e.g., opentasks path or URI) for federated tasks */
+  source_location?: string;
 }
 
 // =============================================================================
@@ -246,6 +249,9 @@ export type Unsubscribe = () => void;
  */
 export interface TaskBackend {
   // ─── Lifecycle ───────────────────────────────────────────────
+  /** Gracefully close the backend. After close(), write operations may throw. */
+  close?(): Promise<void>;
+
   /** Create a new task */
   create(options: CreateTaskOptions): Promise<ExtendedTask>;
 
@@ -329,6 +335,16 @@ export interface TaskBackend {
   /** Get agent assignment history for a task */
   getAgentHistory(taskId: TaskId): Promise<AgentHistoryEntry[]>;
 
+  // ─── External Sync ──────────────────────────────────────────
+  /**
+   * Sync a task transition that happened externally (e.g., via opentasks daemon).
+   * Updates the internal store without re-syncing to the external system.
+   * @param externalId - The external system's task ID (e.g., opentasks issue ID)
+   * @param action - The transition action (e.g., "complete", "start", "close")
+   * @param agentId - The agent that performed the transition
+   */
+  syncExternalTransition?(externalId: string, action: string, agentId?: string): Promise<void>;
+
   // ─── Event Subscriptions ─────────────────────────────────────
   /** Subscribe to all task changes */
   onTaskChange(callback: TaskChangeCallback): Unsubscribe;
@@ -396,6 +412,15 @@ export interface OpenTasksBackendConfig {
 
   /** Source label for issues created by this backend (default: "macro-agent") */
   sourceLabel?: string;
+
+  /** Auto-start the central opentasks daemon (default: true) */
+  autoStart?: boolean;
+
+  /** Central daemon location (default: ~/.multiagent/opentasks) */
+  centralPath?: string;
+
+  /** Auto-connect project .opentasks/ dirs on agent spawn (default: true) */
+  connectOnSpawn?: boolean;
 }
 
 /**
@@ -419,7 +444,7 @@ export interface TaskConfig {
  * Default task configuration
  */
 export const DEFAULT_TASK_CONFIG: TaskConfig = {
-  backend: { type: "memory" },
+  backend: { type: "opentasks" },
 };
 
 /**
@@ -428,4 +453,6 @@ export const DEFAULT_TASK_CONFIG: TaskConfig = {
 export const DEFAULT_OPENTASKS_CONFIG: Omit<OpenTasksBackendConfig, "type"> = {
   syncStatus: true,
   sourceLabel: "macro-agent",
+  autoStart: true,
+  connectOnSpawn: true,
 };

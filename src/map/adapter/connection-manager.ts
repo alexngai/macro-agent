@@ -80,6 +80,7 @@ const DEFAULT_ANONYMOUS_CAPABILITIES: ParticipantCapabilities = {
   canManageScopes: false,
   canUpdatePermissions: false,
   canManageTasks: false,
+  canManageLifecycle: false,
 };
 
 /**
@@ -95,6 +96,7 @@ const DEFAULT_CLIENT_CAPABILITIES: ParticipantCapabilities = {
   canUpdatePermissions: false,
   canManageTasks: false,
   canManageFederation: false,
+  canManageLifecycle: false,
 };
 
 /**
@@ -110,6 +112,7 @@ const DEFAULT_AGENT_CAPABILITIES: ParticipantCapabilities = {
   canUpdatePermissions: false,
   canManageTasks: true,
   canManageFederation: true,
+  canManageLifecycle: true,
 };
 
 // =============================================================================

@@ -131,9 +131,9 @@ describe("UnifiedTaskToolProvider E2E with real OpenTasks", () => {
   // Tool Exposure
   // ─────────────────────────────────────────────────────────────────────────────
 
-  it("should expose all 7 tools with OpenTasks client", () => {
+  it("should expose all 8 tools with OpenTasks client", () => {
     const tools = provider.getTools();
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(8);
     expect(tools.map((t) => t.name)).toEqual([
       "create_task",
       "get_task",
@@ -142,6 +142,7 @@ describe("UnifiedTaskToolProvider E2E with real OpenTasks", () => {
       "task",
       "link",
       "annotate",
+      "list_providers",
     ]);
   });
 
@@ -230,33 +231,71 @@ describe("UnifiedTaskToolProvider E2E with real OpenTasks", () => {
   // ─────────────────────────────────────────────────────────────────────────────
 
   describe("task tool", () => {
-    it("should transition a task through its lifecycle", async () => {
+    it("should transition a task through its lifecycle and sync to EventStore", async () => {
       const createTool = findTool(provider.getTools(), "create_task");
       const taskTool = findTool(provider.getTools(), "task");
+      const getTool = findTool(provider.getTools(), "get_task");
 
       const created = (await createTool.handler({
         description: "Lifecycle test task",
       })) as { task_id: string; external_id?: string };
 
-      const getTool = findTool(provider.getTools(), "get_task");
       const taskDetails = (await getTool.handler({
         task_id: created.task_id,
-      })) as { external_id?: string };
+      })) as { external_id?: string; status: string };
 
       const externalId = taskDetails.external_id;
       expect(externalId).toBeDefined();
+      expect(taskDetails.status).toBe("pending");
 
-      // Start the task
+      // Start the task via opentasks daemon
       const startResult = await taskTool.handler({
         transition: { id: externalId, action: "start" },
       });
       expect(startResult).toBeDefined();
 
-      // Complete the task
+      // Verify EventStore was synced — get_task reads from EventStore
+      const afterStart = (await getTool.handler({
+        task_id: created.task_id,
+      })) as { status: string };
+      expect(afterStart.status).toBe("in_progress");
+
+      // Complete the task via opentasks daemon
       const completeResult = await taskTool.handler({
         transition: { id: externalId, action: "complete" },
       });
       expect(completeResult).toBeDefined();
+
+      // Verify EventStore was synced
+      const afterComplete = (await getTool.handler({
+        task_id: created.task_id,
+      })) as { status: string };
+      expect(afterComplete.status).toBe("completed");
+    });
+
+    it("should sync task assignment via task tool to EventStore", async () => {
+      const createTool = findTool(provider.getTools(), "create_task");
+      const taskTool = findTool(provider.getTools(), "task");
+      const getTool = findTool(provider.getTools(), "get_task");
+
+      const created = (await createTool.handler({
+        description: "Assign sync test task",
+      })) as { task_id: string };
+
+      const taskDetails = (await getTool.handler({
+        task_id: created.task_id,
+      })) as { external_id: string };
+
+      // Assign via task tool (opentasks daemon path)
+      await taskTool.handler({
+        assign: { id: taskDetails.external_id, assignee: "agent_worker_2" },
+      });
+
+      // Verify EventStore was synced
+      const afterAssign = (await getTool.handler({
+        task_id: created.task_id,
+      })) as { assigned_agent: string };
+      expect(afterAssign.assigned_agent).toBe("agent_worker_2");
     });
 
     it("should query ready tasks", async () => {
@@ -471,13 +510,15 @@ describe("UnifiedTaskToolProvider E2E with real OpenTasks", () => {
 
       expect(completeResult).toBeDefined();
 
-      // 8. Verify parent is completed
+      // 8. Verify parent is completed in EventStore (syncExternalTransition)
       const finalParent = (await getTool.handler({
         task_id: parent.task_id,
-      })) as { status: string; external_id: string };
+      })) as { status: string; external_id: string; assigned_agent: string };
 
       expect(finalParent).toBeDefined();
       expect(finalParent.external_id).toBe(parentDetails.external_id);
+      expect(finalParent.status).toBe("completed");
+      expect(finalParent.assigned_agent).toBe(TEST_AGENT_ID);
     });
   });
 });

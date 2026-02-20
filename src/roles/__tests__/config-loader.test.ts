@@ -65,20 +65,20 @@ describe("Role Config Loader", () => {
     it("CONFIG-PATH-01: getProjectConfigPath returns correct path", () => {
       const projectPath = "/my/project";
       const configPath = getProjectConfigPath(projectPath);
-      expect(configPath).toBe("/my/project/.macro-agent/roles.json");
+      expect(configPath).toBe("/my/project/.multiagent/roles.json");
     });
 
     it("CONFIG-PATH-02: getProjectConfigPath uses cwd when no path provided", () => {
       const configPath = getProjectConfigPath();
       expect(configPath).toBe(
-        path.join(process.cwd(), ".macro-agent", "roles.json")
+        path.join(process.cwd(), ".multiagent", "roles.json")
       );
     });
 
     it("CONFIG-PATH-03: getUserConfigPath returns path in home directory", () => {
       const configPath = getUserConfigPath();
       expect(configPath).toBe(
-        path.join(os.homedir(), ".macro-agent", "roles.json")
+        path.join(os.homedir(), ".multiagent", "roles.json")
       );
     });
   });
@@ -260,7 +260,7 @@ describe("Role Config Loader", () => {
   describe("Project/User Config Loading", () => {
     it("CONFIG-PROJECT-01: loadProjectConfig uses correct path", () => {
       const projectPath = tempDir;
-      const configDir = path.join(projectPath, ".macro-agent");
+      const configDir = path.join(projectPath, ".multiagent");
       fs.mkdirSync(configDir, { recursive: true });
 
       const configPath = path.join(configDir, "roles.json");
@@ -280,7 +280,7 @@ describe("Role Config Loader", () => {
 
     it("CONFIG-ALL-01: loadAllConfigs combines user and project configs", () => {
       // Create project config
-      const projectConfigDir = path.join(tempDir, "project", ".macro-agent");
+      const projectConfigDir = path.join(tempDir, "project", ".multiagent");
       fs.mkdirSync(projectConfigDir, { recursive: true });
       writeConfigFile(path.join(projectConfigDir, "roles.json"), {
         roles: {
@@ -289,7 +289,7 @@ describe("Role Config Loader", () => {
       });
 
       // Create user config
-      const userConfigDir = path.join(tempDir, "user", ".macro-agent");
+      const userConfigDir = path.join(tempDir, "user", ".multiagent");
       fs.mkdirSync(userConfigDir, { recursive: true });
       writeConfigFile(path.join(userConfigDir, "roles.json"), {
         roles: {
@@ -363,7 +363,7 @@ describe("Role Config Loader", () => {
 
     it("CONFIG-REG-03: Registry with autoLoad loads configs on construction", () => {
       // Create project config
-      const projectConfigDir = path.join(tempDir, ".macro-agent");
+      const projectConfigDir = path.join(tempDir, ".multiagent");
       fs.mkdirSync(projectConfigDir, { recursive: true });
       writeConfigFile(path.join(projectConfigDir, "roles.json"), {
         roles: {

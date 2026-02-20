@@ -130,9 +130,12 @@ export {
   unregisterWorkspaceFileExtensions,
   registerUpdateMetadataExtension,
   unregisterUpdateMetadataExtension,
+  registerMCPBridgeExtensions,
+  unregisterMCPBridgeExtensions,
   // Constants
   MACRO_EXTENSION_METHODS,
   EXTENSION_CAPABILITIES,
+  MCP_BRIDGE_METHODS,
   // Types
   type MacroExtensionServices,
   type TaskExtensionServices,
@@ -140,6 +143,16 @@ export {
   type WorkspaceExtensionServices,
   type WorkspaceFileServices,
   type UpdateMetadataExtensionServices,
+  type MCPBridgeServices,
   type SessionInfo,
   type InternalWorkspace,
+  // Agent lifecycle
+  registerAgentLifecycleExtensions,
+  unregisterAgentLifecycleExtensions,
+  AGENT_LIFECYCLE_METHODS,
+  type AgentLifecycleExtensionServices,
+  // Resume
+  registerResumeExtension,
+  unregisterResumeExtension,
+  type ResumeExtensionServices,
 } from "./extensions/index.js";

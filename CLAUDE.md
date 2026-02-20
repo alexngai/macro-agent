@@ -92,7 +92,7 @@ src/
 │   └── index.ts            # CLI commands (start, chat, status, --team)
 │
 ├── config/              # Project configuration
-│   └── project-config.ts   # .macro-agent/config.json loader
+│   └── project-config.ts   # .multiagent/config.json loader
 │
 ├── lifecycle/           # Agent lifecycle management
 │   ├── handlers/           # Role-specific done() handlers
@@ -304,9 +304,9 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 
 ### Adding a Team Role (via YAML)
 
-1. Create `.macro-agent/teams/<team>/roles/<role>.yaml` with `extends` base role
+1. Create `.multiagent/teams/<team>/roles/<role>.yaml` with `extends` base role
 2. Add `capabilities_add`/`capabilities_remove` as needed
-3. Create `.macro-agent/teams/<team>/prompts/<role>.md` for custom prompt
+3. Create `.multiagent/teams/<team>/prompts/<role>.md` for custom prompt
 4. Reference the role in `team.yaml` topology and communication sections
 
 ### Modifying Task Backend
@@ -319,7 +319,7 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `memory` |
+| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `opentasks` |
 | `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | — |
 | `MACRO_WORKSPACE_POOL_SIZE` | Max concurrent workspaces | `10` |
 | `MACRO_MERGE_QUEUE_DB` | Merge queue SQLite path | `:memory:` |

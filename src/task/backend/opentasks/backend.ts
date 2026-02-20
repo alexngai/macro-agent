@@ -93,6 +93,7 @@ const DEFAULT_CONFIG: Required<OpenTasksBackendConfig> = {
  */
 export class OpenTasksTaskBackend implements TaskBackend {
   private readonly config: Required<OpenTasksBackendConfig>;
+  private closed = false;
 
   /** Map from macro-agent task ID to OpenTasks issue ID */
   private readonly taskToIssue = new Map<TaskId, string>();
@@ -108,11 +109,25 @@ export class OpenTasksTaskBackend implements TaskBackend {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
+  /**
+   * Throw if the backend has been closed.
+   */
+  private ensureOpen(): void {
+    if (this.closed) {
+      throw new OpenTasksBackendError("Backend is closed", "BACKEND_CLOSED");
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────────────────
 
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
   async create(options: CreateTaskOptions): Promise<ExtendedTask> {
+    this.ensureOpen();
     const taskId = `task_${nanoid(12)}`;
 
     // Resolve parent issue ID if parent task specified
@@ -192,6 +207,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async update(id: TaskId, updates: UpdateTaskOptions): Promise<ExtendedTask> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -278,6 +294,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async delete(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const issueId = this.taskToIssue.get(id);
     if (issueId) {
       await this.client.deleteIssue(issueId);
@@ -295,6 +312,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     agentId: AgentId,
     options?: AssignOptions
   ): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -328,6 +346,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async unassign(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -366,6 +385,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async start(id: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -398,6 +418,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async complete(id: TaskId, outputs?: TaskOutputs): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -465,6 +486,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async fail(id: TaskId, error: TaskError): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(id);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -653,6 +675,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   // ─────────────────────────────────────────────────────────────────────────────
 
   async addBlocker(taskId: TaskId, blockerId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -691,6 +714,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async removeBlocker(taskId: TaskId, blockerId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -807,6 +831,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     agentId: AgentId,
     filter?: ClaimFilter
   ): Promise<ExtendedTask | null> {
+    this.ensureOpen();
     const candidates = await this.listClaimable(filter);
 
     if (candidates.length === 0) {
@@ -846,6 +871,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
   }
 
   async unclaim(taskId: TaskId): Promise<void> {
+    this.ensureOpen();
     const task = this.eventStore.getTask(taskId);
     if (!task) {
       throw new OpenTasksBackendError(
@@ -1001,6 +1027,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
     issueId: string,
     createdBy: AgentId
   ): Promise<ExtendedTask> {
+    this.ensureOpen();
     // Check if already imported
     const existingTaskId = this.issueToTask.get(issueId);
     if (existingTaskId) {
@@ -1083,6 +1110,7 @@ export class OpenTasksTaskBackend implements TaskBackend {
    * Bulk import all open issues from OpenTasks as tasks.
    */
   async importOpenIssues(createdBy: AgentId): Promise<ExtendedTask[]> {
+    this.ensureOpen();
     const issues = await this.client.listIssues({
       status: ["open", "in_progress"],
       archived: false,
@@ -1128,6 +1156,76 @@ export class OpenTasksTaskBackend implements TaskBackend {
       console.warn(
         `Failed to sync status to OpenTasks for ${taskId} (${issueId}): ${error}`
       );
+    }
+  }
+
+  /**
+   * Sync a transition that happened via the opentasks daemon's `task` tool.
+   * Updates the EventStore without re-syncing back to opentasks (since the
+   * daemon already processed the transition).
+   *
+   * Accepts either an opentasks issue ID (e.g., "i-xxxx") or an EventStore
+   * task ID (e.g., "task-xxx") — resolves to the EventStore ID either way.
+   *
+   * @param externalId - The opentasks issue ID or EventStore task ID
+   * @param action - The transition action ("complete", "start", "close", "block", "reopen", "assign")
+   * @param agentId - The agent that performed the transition or the assignee for "assign"
+   */
+  async syncExternalTransition(externalId: string, action: string, agentId?: string): Promise<void> {
+    // Resolve to EventStore task ID: try opentasks ID lookup first, then direct
+    const taskId = this.issueToTask.get(externalId)
+      ?? (this.eventStore.getTask(externalId as TaskId) ? externalId as TaskId : undefined);
+    if (!taskId) return;
+
+    const task = this.eventStore.getTask(taskId);
+    if (!task) return;
+
+    const agent = (agentId as AgentId | undefined) ?? task.assigned_agent ?? task.created_by;
+
+    // Handle assignment separately — it updates assignee, not status
+    if (action === "assign") {
+      if (task.assigned_agent !== agent) {
+        this.eventStore.emit({
+          type: "task",
+          source: { agent_id: agent },
+          payload: {
+            task_id: taskId,
+            action: "assigned",
+            details: { agent_id: agent },
+          },
+        });
+      }
+      return;
+    }
+
+    // Map action to target status
+    const ACTION_TO_STATUS: Record<string, TaskStatus> = {
+      complete: "completed",
+      close: "completed",
+      start: "in_progress",
+      block: "pending",
+      reopen: "pending",
+    };
+    const targetStatus = ACTION_TO_STATUS[action];
+    if (!targetStatus || task.status === targetStatus) return;
+
+    // Emit the appropriate EventStore event
+    if (targetStatus === "completed") {
+      this.eventStore.emit({
+        type: "task",
+        source: { agent_id: agent },
+        payload: { task_id: taskId, action: "completed", details: {} },
+      });
+    } else {
+      this.eventStore.emit({
+        type: "task",
+        source: { agent_id: agent },
+        payload: {
+          task_id: taskId,
+          action: "status_change",
+          details: { status: targetStatus },
+        },
+      });
     }
   }
 

@@ -11,8 +11,9 @@
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { EventStore } from "../../store/event-store.js";
 import type { TaskManager } from "../../task/task-manager.js";
-import type { AgentId } from "../../store/types/index.js";
+import type { AgentId, TaskId } from "../../store/types/index.js";
 import type { AgentConfig } from "../../agent/types.js";
+import type { TaskFilter } from "../../task/types.js";
 import { SessionMapper } from "../../acp/session-mapper.js";
 import type { ACPSessionId } from "../../acp/types.js";
 
@@ -384,6 +385,44 @@ export class ACPOverMAPHandler {
       console.error(
         `[ACP-over-MAP] loadSession: Resolved agentId ${metaAgentId} to session ${sessionId}`,
       );
+
+      // Handle the agent directly — works for both head managers and sub-agents.
+      // The previous code only searched listHeadManagers(), so sub-agents
+      // were never found and a new head manager was created instead.
+      if (this.agentManager.hasActiveSession(metaAgentId as AgentId)) {
+        console.error(
+          `[ACP-over-MAP] loadSession: Reusing active session for agent ${metaAgentId}`,
+        );
+      } else {
+        // Agent exists but no active session — resume it
+        console.error(
+          `[ACP-over-MAP] loadSession: Resuming agent ${metaAgentId}`,
+        );
+        try {
+          await this.agentManager.resume(
+            metaAgentId as AgentId,
+            streamState.permissionMode,
+          );
+        } catch (resumeErr) {
+          // ALREADY_RUNNING can happen in a race — safe to ignore
+          const code = (resumeErr as { code?: string }).code;
+          if (code !== "ALREADY_RUNNING") {
+            throw resumeErr;
+          }
+          console.error(
+            `[ACP-over-MAP] loadSession: Agent ${metaAgentId} already running (race), continuing`,
+          );
+        }
+      }
+
+      streamState.sessionId = sessionId;
+      streamState.agentId = metaAgentId as AgentId;
+      this.sessionMapper.createMapping(
+        sessionId as ACPSessionId,
+        metaAgentId as AgentId,
+      );
+      this.emitSessionInfo(streamState, sessionId, emitNotification);
+      return { sessionId };
     }
 
     const workingDir = cwd ?? this.defaultCwd;
@@ -831,10 +870,19 @@ export class ACPOverMAPHandler {
           throw new Error(`Agent not found: ${agentId}`);
         }
 
+        // If the agent is already running, return its current state
+        // instead of throwing. The caller likely just wants to ensure
+        // the agent is active, which it already is.
         if (agent.state !== "stopped" && agent.state !== "failed") {
-          throw new Error(
-            `Agent ${agentId} is ${agent.state} — only stopped or failed agents can be resumed`,
+          console.error(
+            `[ACP-over-MAP] _macro/resume: Agent ${agentId} is already ${agent.state}, returning current state`,
           );
+          return {
+            success: true,
+            agentId: agent.id,
+            sessionId: agent.session_id,
+            alreadyRunning: true,
+          };
         }
 
         const spawned = await this.agentManager.resume(agentId as AgentId);
@@ -1133,6 +1181,128 @@ export class ACPOverMAPHandler {
         // Compaction is handled internally by the agent process.
         // Accept the request as a no-op so the client doesn't get an error.
         // TODO: Make sure this overrides if needed.
+        return { success: true };
+      }
+
+      // ── Task Management Extensions ────────────────────────────────
+      // These mirror the registered adapter extensions (_macro/task/*)
+      // so they're accessible via ACP-over-MAP streams.
+
+      case "_macro/task/list": {
+        const { filter } = (methodParams ?? {}) as {
+          filter?: {
+            status?: string;
+            assignedAgent?: string;
+            parentTask?: string;
+            createdBy?: string;
+            rootTasksOnly?: boolean;
+          };
+        };
+
+        const taskFilter: TaskFilter | undefined = filter
+          ? {
+              status: filter.status as TaskFilter["status"],
+              assigned_agent: filter.assignedAgent as AgentId | undefined,
+              parent_task: filter.parentTask as TaskId | undefined,
+              created_by: filter.createdBy as AgentId | undefined,
+              rootTasksOnly: filter.rootTasksOnly,
+            }
+          : undefined;
+
+        const tasks = this.taskManager.list(taskFilter);
+        return {
+          tasks: tasks.map((t) => ({
+            id: t.id,
+            description: t.description,
+            status: t.status,
+            assignedAgent: t.assigned_agent,
+            createdBy: t.created_by,
+            createdAt: t.created_at,
+            parentTask: t.parent_task,
+            isBlocked: (t as any).isBlocked,
+            externalId: (t as any).external_id,
+          })),
+        };
+      }
+
+      case "_macro/task/get": {
+        const { taskId } = methodParams as { taskId: string };
+        if (!taskId) throw new Error("taskId is required");
+        const task = this.taskManager.get(taskId as TaskId);
+        if (!task) throw new Error(`Task not found: ${taskId}`);
+        return {
+          task: {
+            id: task.id,
+            description: task.description,
+            status: task.status,
+            assignedAgent: task.assigned_agent,
+            createdBy: task.created_by,
+            createdAt: task.created_at,
+            parentTask: task.parent_task,
+            isBlocked: (task as any).isBlocked,
+            externalId: (task as any).external_id,
+          },
+        };
+      }
+
+      case "_macro/task/create": {
+        const { description, parentTask, externalId } = methodParams as {
+          description: string;
+          parentTask?: string;
+          externalId?: string;
+        };
+        if (!description) throw new Error("description is required");
+
+        // Determine who is creating the task — use the stream's agent or a default
+        const createdBy = (streamState.agentId ?? "tui") as AgentId;
+
+        const task = this.taskManager.create({
+          description,
+          created_by: createdBy,
+          parent_task: parentTask as TaskId | undefined,
+        });
+
+        return {
+          task: {
+            id: task.id,
+            description: task.description,
+            status: task.status,
+            assignedAgent: task.assigned_agent,
+            createdBy: task.created_by,
+            createdAt: task.created_at,
+            parentTask: task.parent_task,
+          },
+        };
+      }
+
+      case "_macro/task/assign": {
+        const { taskId, agentId, role } = methodParams as {
+          taskId: string;
+          agentId: string;
+          role?: string;
+        };
+        if (!taskId) throw new Error("taskId is required");
+        if (!agentId) throw new Error("agentId is required");
+
+        this.taskManager.assign(taskId as TaskId, agentId as AgentId, role);
+        return { success: true };
+      }
+
+      case "_macro/task/complete": {
+        const { taskId, outputs } = methodParams as {
+          taskId: string;
+          outputs?: { summary?: string; data?: unknown };
+        };
+        if (!taskId) throw new Error("taskId is required");
+
+        // Update status to completed
+        this.taskManager.updateStatus(taskId as TaskId, "completed");
+
+        // If outputs provided, update task metadata
+        if (outputs) {
+          this.taskManager.update(taskId as TaskId, { outputs });
+        }
+
         return { success: true };
       }
 

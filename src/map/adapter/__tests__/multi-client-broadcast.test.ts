@@ -37,8 +37,8 @@ import {
 // Helpers
 // =============================================================================
 
-function getRandomPort(): number {
-  return 10000 + Math.floor(Math.random() * 50000);
+function getPortFromUrl(url: string): number {
+  return parseInt(new URL(url).port, 10);
 }
 
 interface JsonRpcMessage {
@@ -208,7 +208,6 @@ describe("Multi-client event broadcast E2E", () => {
   const clients: MAPTestClient[] = [];
 
   beforeEach(async () => {
-    port = getRandomPort();
     eventStore = await createEventStore({ inMemory: true });
     messageRouter = createMessageRouter(eventStore);
     taskManager = createTaskManager(eventStore);
@@ -224,8 +223,9 @@ describe("Multi-client event broadcast E2E", () => {
       messageRouter,
     };
 
-    server = createCombinedServer(services, { port, host: "localhost" });
+    server = createCombinedServer(services, { port: 0, host: "localhost" });
     await server.start();
+    port = getPortFromUrl(server.getUrl());
   });
 
   afterEach(async () => {
@@ -239,7 +239,7 @@ describe("Multi-client event broadcast E2E", () => {
   });
 
   function createClient(): MAPTestClient {
-    const client = new MAPTestClient(`ws://localhost:${port}/map`);
+    const client = new MAPTestClient(`ws://localhost:${port}/map?token=${server.serverToken}`);
     clients.push(client);
     return client;
   }

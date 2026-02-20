@@ -226,6 +226,17 @@ function createCompleteHandler(services: TaskExtensionServices): ExtensionHandle
       throw new RPCError(TASK_NOT_FOUND, `Task not found: ${taskId}`);
     }
 
+    // Auto-transition through intermediate states if needed.
+    // Valid path to "completed" requires in_progress status.
+    // pending → assigned → in_progress → completed
+    if (task.status === "pending" || task.status === "assigned") {
+      if (task.status === "pending" && !task.assigned_agent) {
+        // Assign to creator if not assigned yet
+        await services.taskBackend.assign(taskId as TaskId, task.created_by, {});
+      }
+      await services.taskBackend.start(taskId as TaskId);
+    }
+
     const taskOutputs: TaskOutputs | undefined = outputs
       ? {
           summary: outputs.summary,

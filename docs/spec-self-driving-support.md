@@ -75,16 +75,16 @@ The `OptimisticIntegrationStrategy.land()` pushes changes and emits a `validatio
 
 Rather than requiring `--team` on every invocation, the active team is stored in macro-agent project-level configuration.
 
-**Decision**: Add a `team` field to `.macro-agent/config.json` (new file, alongside existing `.macro-agent/roles.json`). The CLI `--team` flag overrides the config. When neither is set, no team is loaded (existing behavior).
+**Decision**: Add a `team` field to `.multiagent/config.json` (new file, alongside existing `.multiagent/roles.json`). The CLI `--team` flag overrides the config. When neither is set, no team is loaded (existing behavior).
 
 ```json
-// .macro-agent/config.json
+// .multiagent/config.json
 {
   "team": "self-driving"
 }
 ```
 
-**Loading priority**: CLI `--team` flag > `.macro-agent/config.json` > no team (default)
+**Loading priority**: CLI `--team` flag > `.multiagent/config.json` > no team (default)
 
 ### RD7: YAML library
 
@@ -112,7 +112,7 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 
 | | |
 |---|---|
-| **What** | Read `.macro-agent/config.json` for project-level settings (starting with `team` field) |
+| **What** | Read `.multiagent/config.json` for project-level settings (starting with `team` field) |
 | **Where** | New: `src/config/project-config.ts` |
 | **Schema** | `{ team?: string, [key: string]: unknown }` |
 | **Loading** | On CLI start/chat, read config file. CLI flags override. Missing file = empty config |
@@ -136,7 +136,7 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 
 | | |
 |---|---|
-| **What** | Reads `.macro-agent/teams/<name>/` directory, parses and validates team.yaml, resolves role inheritance, loads prompts, loads MCP server configs |
+| **What** | Reads `.multiagent/teams/<name>/` directory, parses and validates team.yaml, resolves role inheritance, loads prompts, loads MCP server configs |
 | **Where** | New: `src/teams/team-loader.ts` |
 | **Interface** | `TeamLoader.load(teamName: string, basePath?: string): Promise<TeamManifest>` |
 | **Dependencies** | `js-yaml` (new), `zod` (existing), `RoleRegistry` (for resolving `extends` chains) |
@@ -188,11 +188,11 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 
 | | |
 |---|---|
-| **What** | Add `--team <name>` CLI flag, read `.macro-agent/config.json`, initialize TeamRuntime in start/chat flows |
+| **What** | Add `--team <name>` CLI flag, read `.multiagent/config.json`, initialize TeamRuntime in start/chat flows |
 | **Where** | Modified: `src/cli/index.ts` |
 | **Flow** | 1. Read project config (P0.2) 2. Determine team name (CLI flag > config > none) 3. If team: load via TeamLoader, create TeamRuntime, initialize, then bootstrap after server starts |
 | **Constraint** | Chat command also supports team loading (interactive mode with team agents) |
-| **Success** | `multiagent-cli start --team self-driving` loads team, bootstraps agents. `multiagent-cli start` with `.macro-agent/config.json` containing `"team": "self-driving"` does the same |
+| **Success** | `multiagent-cli start --team self-driving` loads team, bootstraps agents. `multiagent-cli start` with `.multiagent/config.json` containing `"team": "self-driving"` does the same |
 | **Test** | Integration test: CLI start with team flag, verify agents spawned with correct roles |
 
 #### P1.7: MCP subprocess team context
@@ -222,7 +222,7 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 | | |
 |---|---|
 | **What** | Complete team template for the self-driving pattern |
-| **Where** | New: `.macro-agent/teams/self-driving/` with team.yaml, roles/*.yaml, prompts/*.md |
+| **Where** | New: `.multiagent/teams/self-driving/` with team.yaml, roles/*.yaml, prompts/*.md |
 | **Roles** | planner (extends coordinator), grinder (extends worker), judge (extends monitor) |
 | **Topology** | Root: planner. Companions: judge. spawn_rules: planner→[grinder,planner], others→[] |
 | **Communication** | Channels: task_updates, work_coordination, health. Peer routes: judge↔planner |
@@ -379,7 +379,7 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 | | |
 |---|---|
 | **What** | Finalize self-driving and structured reference templates. Add docs. Run E2E test |
-| **Where** | `.macro-agent/teams/self-driving/`, `.macro-agent/teams/structured/`, `docs/teams.md` |
+| **Where** | `.multiagent/teams/self-driving/`, `.multiagent/teams/structured/`, `docs/teams.md` |
 | **E2E test** | Full cycle: load self-driving team → planner creates tasks → grinders claim and complete → judge monitors → trunk integration |
 | **Success** | E2E test passes. Documentation covers schema reference, custom strategy guide, examples |
 
@@ -391,7 +391,7 @@ Rather than requiring `--team` on every invocation, the active team is stored in
 
 | Phase | Criterion |
 |-------|-----------|
-| **P0** | `done()` works with any role that has `lifecycle.done` capability. `.macro-agent/config.json` is read on startup |
+| **P0** | `done()` works with any role that has `lifecycle.done` capability. `.multiagent/config.json` is read on startup |
 | **P1** | `multiagent-cli start --team self-driving` loads a team, registers roles, spawns root + companions, agents have correct prompts and topics. MCP subprocess picks up team config from EventStore. Existing behavior without `--team` is unchanged |
 | **P2** | Worker `done()` dispatches to configured integration strategy. `queue` strategy produces identical behavior to current merge queue. `trunk` strategy pushes directly. Existing merge queue tests pass |
 | **P3** | Agents with `task.claim` capability can `claim_task()` → `done()` → `claim_task()` in a loop. Idle timeout triggers graceful exit |

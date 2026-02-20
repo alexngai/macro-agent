@@ -38,7 +38,7 @@ Team templates are directories of YAML configuration files that compose roles, d
 - **Programmatic API**: Define teams in TypeScript. More flexible but requires code changes for each team shape. Rejected — config is more accessible and shareable.
 - **Single monolithic config**: One file per team. Rejected — doesn't compose well with the existing layered role override system.
 
-**Rationale**: The existing `.macro-agent/roles/*.yaml` pattern already supports custom roles with inheritance. Team templates extend this with a `team.yaml` manifest that declares which roles participate, how they're spawned, and what strategies they use. The same role definitions work in both structured and self-driving modes — only the orchestration layer differs.
+**Rationale**: The existing `.multiagent/roles/*.yaml` pattern already supports custom roles with inheritance. Team templates extend this with a `team.yaml` manifest that declares which roles participate, how they're spawned, and what strategies they use. The same role definitions work in both structured and self-driving modes — only the orchestration layer differs.
 
 ### D2: Task Pull via `claim_task` with Optimistic Locking
 
@@ -179,7 +179,7 @@ These are computed from existing events (spawn, terminate, task status changes, 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Team Template                             │
-│  .macro-agent/teams/self-driving/                           │
+│  .multiagent/teams/self-driving/                           │
 │  ├── team.yaml          # Manifest: roles, strategy, config │
 │  ├── roles/             # Role overrides/extensions         │
 │  │   ├── planner.yaml   # extends: coordinator              │
@@ -352,7 +352,7 @@ observability:
 Everything else builds on this. Delivers the modular team loading layer.
 
 - [ ] 1.1 Define `TeamManifest` TypeScript types in `src/teams/types.ts` — covers team.yaml schema: name, description, version, roles, bootstrap, integration, tasks, observability sections
-- [ ] 1.2 Implement `TeamLoader` in `src/teams/team-loader.ts` — reads `.macro-agent/teams/<name>/` directory, parses `team.yaml`, validates schema, reads role YAML files, reads prompt template files
+- [ ] 1.2 Implement `TeamLoader` in `src/teams/team-loader.ts` — reads `.multiagent/teams/<name>/` directory, parses `team.yaml`, validates schema, reads role YAML files, reads prompt template files
 - [ ] 1.3 Implement `TeamRuntime` in `src/teams/team-runtime.ts` — takes a parsed `TeamManifest` and wires it into the system: registers roles into RoleRegistry, selects integration strategy, sets TaskBackend mode, stores active team state
 - [ ] 1.4 Add team context to `AgentManager.spawn()` — propagate `MACRO_TEAM_NAME`, `MACRO_INTEGRATION_STRATEGY`, `MACRO_TASK_MODE` environment variables; include team section in system prompt generation
 - [ ] 1.5 Add `--team <name>` flag to CLI start command — loads team via TeamLoader, initializes TeamRuntime, then proceeds with existing boot flow
@@ -360,7 +360,7 @@ Everything else builds on this. Delivers the modular team loading layer.
 - [ ] 1.7 Add `GET /api/team` endpoint — returns active team config or `{ active: false }`
 - [ ] 1.8 Write unit tests for TeamLoader (manifest parsing, validation, defaults) and TeamRuntime (role registration, config propagation)
 - [ ] 1.9 Write integration test: load a test team template, verify roles registered, agents spawned with correct env vars and prompts
-- [ ] 1.10 Create reference team template `.macro-agent/teams/self-driving/` with team.yaml, planner/grinder/judge role definitions, and prompt templates
+- [ ] 1.10 Create reference team template `.multiagent/teams/self-driving/` with team.yaml, planner/grinder/judge role definitions, and prompt templates
 
 ### Phase 2: Pluggable Integration Strategies (can parallelize with Phase 3)
 

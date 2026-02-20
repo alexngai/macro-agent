@@ -640,7 +640,7 @@ export interface ResolvedTeamRole {
 TeamLoader.load(teamName: string, basePath?: string): Promise<TeamManifest>
 
 Steps:
-1. Resolve directory: basePath ?? cwd / .macro-agent/teams/<teamName>/
+1. Resolve directory: basePath ?? cwd / .multiagent/teams/<teamName>/
 2. Read and parse team.yaml (use yaml library, already in deps or add)
 3. Validate manifest against TeamManifest schema (Zod validation)
 4. For each role name in manifest.roles:
@@ -1050,8 +1050,8 @@ This is the simplest approach — no new event types, no new storage. We build o
 | `src/mcp/tools/claim_task.ts` | claim_task MCP tool |
 | `src/mcp/tools/unclaim_task.ts` | unclaim_task MCP tool |
 | `src/mcp/tools/list_claimable_tasks.ts` | list_claimable_tasks MCP tool |
-| `.macro-agent/teams/self-driving/` | Reference team template (team.yaml, roles/, prompts/) |
-| `.macro-agent/teams/structured/` | Backward-compat structured team template |
+| `.multiagent/teams/self-driving/` | Reference team template (team.yaml, roles/, prompts/) |
+| `.multiagent/teams/structured/` | Backward-compat structured team template |
 
 ### Modified files
 | File | Change |
@@ -1113,7 +1113,7 @@ These questions were resolved during spec review. See `docs/spec-self-driving-su
 
 4. **MCP subprocess team context**: Store `team_config` event in EventStore. MCP subprocess reads it to reconstruct strategy and taskMode (RD2). No HTTP API between processes.
 
-5. **Team selection**: Via `.macro-agent/config.json` (new file), CLI `--team` overrides (RD6).
+5. **Team selection**: Via `.multiagent/config.json` (new file), CLI `--team` overrides (RD6).
 
 6. **spawn_rules vs capabilities**: spawn_rules are syntactic sugar — TeamLoader translates them into capability additions (RD3).
 

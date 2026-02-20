@@ -562,6 +562,82 @@ describe("AgentManager Integration (with mocked acp-factory)", () => {
       expect(cwdEnv.value).toBe("/test/cwd");
     });
 
+    it("should propagate OPENTASKS_SOCKET_PATH from config to child agents", async () => {
+      // Create manager with explicit socket path
+      await agentManager.close();
+      agentManager = createAgentManager(eventStore, messageRouter, {
+        openTasksSocketPath: "/tmp/opentasks.sock",
+        taskBackend: "opentasks",
+      });
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+      const macroAgentMcp = sessionOptions.mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+
+      const socketPathEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "OPENTASKS_SOCKET_PATH"
+      );
+      expect(socketPathEnv).toBeDefined();
+      expect(socketPathEnv.value).toBe("/tmp/opentasks.sock");
+    });
+
+    it("should use setOpenTasksSocketPath to override config value", async () => {
+      // Create manager WITHOUT a socket path (simulates autoStart mode)
+      await agentManager.close();
+      agentManager = createAgentManager(eventStore, messageRouter, {
+        taskBackend: "opentasks",
+        // No openTasksSocketPath — simulating daemon auto-start
+      });
+
+      // Late-bind the runtime socket path (as createTaskBackend would provide)
+      agentManager.setOpenTasksSocketPath("/run/daemon/opentasks.sock");
+
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+      const macroAgentMcp = sessionOptions.mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+
+      const socketPathEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "OPENTASKS_SOCKET_PATH"
+      );
+      expect(socketPathEnv).toBeDefined();
+      expect(socketPathEnv.value).toBe("/run/daemon/opentasks.sock");
+    });
+
+    it("should propagate empty OPENTASKS_SOCKET_PATH when not set", async () => {
+      // Manager with no socket path and no env var
+      await agentManager.spawn({
+        task: "Test task",
+        cwd: "/tmp",
+      });
+
+      const createSessionArgs = mockHandle.createSession.mock.calls[0];
+      const sessionOptions = createSessionArgs[1];
+      const macroAgentMcp = sessionOptions.mcpServers.find(
+        (s: any) => s.name === "macro-agent"
+      );
+
+      const socketPathEnv = macroAgentMcp.env.find(
+        (e: any) => e.name === "OPENTASKS_SOCKET_PATH"
+      );
+      expect(socketPathEnv).toBeDefined();
+      // Should be empty string when nothing is configured
+      expect(socketPathEnv.value).toBe("");
+    });
+
     it("should persist events after spawning for cross-process visibility", async () => {
       // Spy on eventStore.persist
       const persistSpy = vi.spyOn(eventStore, "persist");

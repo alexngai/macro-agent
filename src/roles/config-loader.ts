@@ -2,8 +2,8 @@
  * Role Configuration File Loader
  *
  * Loads role configurations from:
- * - Project-level: .macro-agent/roles.json
- * - User-level: ~/.macro-agent/roles.json
+ * - Project-level: .multiagent/roles.json
+ * - User-level: ~/.multiagent/roles.json
  *
  * Supports layered override with project > user > built-in precedence.
  *
@@ -103,10 +103,10 @@ export interface LoadResult {
 export const CONFIG_FILE_NAME = "roles.json";
 
 /** Project-level config directory */
-export const PROJECT_CONFIG_DIR = ".macro-agent";
+export const PROJECT_CONFIG_DIR = ".multiagent";
 
 /** User-level config directory */
-export const USER_CONFIG_DIR = ".macro-agent";
+export const USER_CONFIG_DIR = ".multiagent";
 
 // =============================================================================
 // Path Resolution
@@ -116,7 +116,7 @@ export const USER_CONFIG_DIR = ".macro-agent";
  * Get the project-level config file path
  *
  * @param projectPath - Project root directory (default: process.cwd())
- * @returns Path to .macro-agent/roles.json
+ * @returns Path to .multiagent/roles.json
  */
 export function getProjectConfigPath(projectPath?: string): string {
   const root = projectPath ?? process.cwd();
@@ -126,7 +126,7 @@ export function getProjectConfigPath(projectPath?: string): string {
 /**
  * Get the user-level config file path
  *
- * @returns Path to ~/.macro-agent/roles.json
+ * @returns Path to ~/.multiagent/roles.json
  */
 export function getUserConfigPath(): string {
   return path.join(os.homedir(), USER_CONFIG_DIR, CONFIG_FILE_NAME);

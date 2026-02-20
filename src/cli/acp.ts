@@ -71,6 +71,7 @@ import type { AgentId, EventId } from "../store/types/index.js";
 
 import { parseArgs } from "./parse-args.js";
 import { getStableInstanceId } from "./stable-instance-id.js";
+import { loadMergedConfig } from "../config/project-config.js";
 
 // Re-export utilities for backwards compatibility
 export { parseArgs, type ACPServerOptions } from "./parse-args.js";
@@ -217,9 +218,91 @@ async function main() {
     wakeHandler: routerWakeHandler,
   });
 
+  // Load merged config (global → project → env vars)
+  const mergedConfig = loadMergedConfig(defaultCwd);
+
+  // Compute server URL for thin-client MCP mode (only in server mode, not stdio ACP)
+  const serverUrl = options.acp
+    ? undefined
+    : `http://${options.host ?? mergedConfig.host ?? "localhost"}:${options.port ?? mergedConfig.port ?? 3001}`;
+
+  // Set up authentication tokens from merged config
+  const noAuth = options.noAuth || mergedConfig.auth?.disabled === true;
+  let serverToken: string | undefined;
+  let agentTokenManager: import("../auth/token.js").AgentTokenManager | undefined;
+
+  if (!noAuth && mergedConfig.auth?.secret) {
+    const { AgentTokenManager } = await import("../auth/token.js");
+    serverToken = mergedConfig.auth.secret;
+    agentTokenManager = new AgentTokenManager();
+  }
+
   // Now create the agentManager with the real router
-  agentManager = createAgentManager(eventStore, messageRouter);
+  agentManager = createAgentManager(eventStore, messageRouter, {
+    serverUrl,
+    serverToken: serverUrl ? serverToken : undefined,
+    agentTokenManager: serverUrl ? agentTokenManager : undefined,
+    taskBackend: mergedConfig.task?.backend,
+    openTasksSocketPath: mergedConfig.task?.opentasks?.socket_path,
+  });
   const taskManager = createTaskManager(eventStore);
+
+  // Create task backend for dynamic task tools (create_task, get_task, etc.)
+  const { createTaskBackend, loadTaskConfigFromMerged } = await import("../task/backend/index.js");
+  const { UnifiedTaskToolProvider } = await import("../task/backend/unified-tool-provider.js");
+
+  let taskBackend: import("../task/backend/types.js").TaskBackend | undefined;
+  let taskToolProvider: import("../task/backend/types.js").TaskToolProvider | undefined;
+  let taskBackendShutdown: (() => Promise<void>) | undefined;
+
+  // Mutable context holder for the task tool provider. Bridge handlers set
+  // this before each tool call so the provider uses the calling agent's ID.
+  // Safe because Node.js is single-threaded.
+  const taskToolContext = { agent_id: "" as string };
+
+  // Connect-on-spawn callback: auto-connect project .opentasks/ dirs to central daemon
+  let connectProject: ((projectPath: string) => Promise<void>) | undefined;
+  let getConnectedProjects: (() => string[]) | undefined;
+
+  try {
+    const taskConfig = loadTaskConfigFromMerged(mergedConfig);
+    const result = await createTaskBackend(taskConfig, eventStore);
+    taskBackend = result.backend;
+    taskBackendShutdown = result.shutdown;
+    connectProject = result.connectProject;
+    getConnectedProjects = result.getConnectedProjects;
+
+    taskToolProvider = new UnifiedTaskToolProvider(
+      taskBackend,
+      () => taskToolContext,
+      result.openTasksClient
+    );
+    console.error(`[acp] Task backend created: ${taskConfig.backend.type}`);
+
+    // Propagate runtime socket path to child agents so they skip daemon discovery
+    if (result.socketPath) {
+      agentManager.setOpenTasksSocketPath(result.socketPath);
+    }
+
+    // Auto-connect the server's own project directory on startup
+    if (connectProject) {
+      connectProject(defaultCwd).catch(() => {});
+    }
+  } catch (err) {
+    // Fall back to in-memory backend if opentasks connection fails
+    console.error(`[acp] Failed to create task backend (${err}), falling back to memory`);
+    try {
+      const fallbackResult = await createTaskBackend({ backend: { type: "memory" } }, eventStore);
+      taskBackend = fallbackResult.backend;
+      taskToolProvider = new UnifiedTaskToolProvider(
+        taskBackend,
+        () => taskToolContext,
+      );
+      console.error(`[acp] Task backend created: memory (fallback)`);
+    } catch (fallbackErr) {
+      console.error(`[acp] Memory fallback also failed: ${fallbackErr}. Task tools will be unavailable.`);
+    }
+  }
 
   // Create ActivityWatcher for event-driven agent waking
   const sessionProvider = createSessionProviderFromAgentManager(agentManager);
@@ -277,9 +360,11 @@ async function main() {
   activityWatcher.start();
 
   // Auto-subscribe Monitor agents to health events when they spawn
+  // and auto-connect project .opentasks/ directories to central daemon
   agentManager.onLifecycleEvent((event) => {
     if (event.type === "spawned") {
       const agent = event.agent;
+
       // Check if this is a Monitor agent
       if (agent.role === "monitor" || agent.role?.startsWith("monitor.")) {
         subscribeAgentToEvents(
@@ -291,23 +376,44 @@ async function main() {
         );
         console.error(`[acp] Auto-subscribed Monitor ${agent.id} to health events`);
       }
+
+      // Connect-on-spawn: auto-connect project .opentasks/ to central daemon
+      if (connectProject && agent.cwd) {
+        connectProject(agent.cwd).catch(() => {
+          // Non-fatal — logged inside connectProject
+        });
+      }
     }
   });
 
   // Combined server (when --ws is enabled)
   let combinedServer: CombinedServer | undefined;
 
-  // Cleanup function
+  // Cleanup function — best-effort, each step isolated
   const cleanup = async () => {
-    // Stop ActivityWatcher
-    activityWatcher.stop();
-
-    // Stop combined server if running
-    if (combinedServer) {
-      await combinedServer.stop();
+    try { activityWatcher.stop(); } catch (err) {
+      console.error(`[cleanup] ActivityWatcher stop failed: ${err}`);
     }
-    await agentManager.close();
-    await eventStore.close();
+
+    if (combinedServer) {
+      try { await combinedServer.stop(); } catch (err) {
+        console.error(`[cleanup] Combined server stop failed: ${err}`);
+      }
+    }
+
+    try { await agentManager.close(); } catch (err) {
+      console.error(`[cleanup] AgentManager close failed: ${err}`);
+    }
+
+    if (taskBackendShutdown) {
+      try { await taskBackendShutdown(); } catch (err) {
+        console.error(`[cleanup] Task backend shutdown failed: ${err}`);
+      }
+    }
+
+    try { await eventStore.close(); } catch (err) {
+      console.error(`[cleanup] EventStore close failed: ${err}`);
+    }
   };
 
   try {
@@ -346,15 +452,22 @@ async function main() {
       await cleanup();
     } else {
       // Full server mode (default): WebSocket ACP + MAP + REST API
-      const host = options.host ?? "localhost";
-      const port = options.port ?? 3001;
+      const host = options.host ?? mergedConfig.host ?? "localhost";
+      const port = options.port ?? mergedConfig.port ?? 3001;
 
       combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher },
-        { port, host, defaultCwd }
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager, getConnectedProjects },
+        { port, host, defaultCwd, serverToken, noAuth }
       );
 
       await combinedServer.start();
+      if (serverToken) {
+        console.error(`[acp] Server token: ${serverToken.substring(0, 8)}...`);
+      } else if (noAuth) {
+        console.error(`[acp] Auth: explicitly disabled`);
+      } else {
+        console.error(`[acp] Auth: off (set auth.secret in config or MACRO_SERVER_SECRET to enable)`);
+      }
 
       // Keep process alive - will exit via SIGINT/SIGTERM handlers
       await new Promise<void>(() => {

@@ -1,7 +1,7 @@
 /**
  * Team Template Loader
  *
- * Reads .macro-agent/teams/<name>/ directories, parses team.yaml,
+ * Reads .multiagent/teams/<name>/ directories, parses team.yaml,
  * resolves role inheritance, loads prompts, and validates communication.
  *
  * @module teams/team-loader
@@ -26,7 +26,7 @@ import {
 // Constants
 // =============================================================================
 
-const TEAMS_DIR = ".macro-agent/teams";
+const TEAMS_DIR = ".multiagent/teams";
 const MANIFEST_FILE = "team.yaml";
 const ROLES_DIR = "roles";
 const PROMPTS_DIR = "prompts";
@@ -40,7 +40,7 @@ const MCP_SERVERS_FILE = "mcp-servers.json";
 /**
  * Load a team template from disk and resolve all references.
  *
- * @param teamName - Team name (directory name under .macro-agent/teams/)
+ * @param teamName - Team name (directory name under .multiagent/teams/)
  * @param roleRegistry - Role registry for resolving extends chains
  * @param basePath - Project root (default: process.cwd())
  * @returns Fully resolved TeamManifest

@@ -29,15 +29,15 @@ Teams define multi-agent topologies as YAML configuration. A team template speci
 # Start with a team template
 npx multiagent --team self-driving
 
-# Or set in project config (.macro-agent/config.json)
-echo '{ "team": "self-driving" }' > .macro-agent/config.json
+# Or set in project config (.multiagent/config.json)
+echo '{ "team": "self-driving" }' > .multiagent/config.json
 npx multiagent
 ```
 
-Teams are stored in `.macro-agent/teams/<name>/`:
+Teams are stored in `.multiagent/teams/<name>/`:
 
 ```
-.macro-agent/teams/self-driving/
+.multiagent/teams/self-driving/
 ├── team.yaml          # Team manifest (topology, communication, strategy)
 ├── roles/
 │   ├── planner.yaml   # Custom role (extends coordinator)
@@ -315,7 +315,7 @@ npx multiagent --acp --cwd /path/to/project
 | `--port <port>` | Server port (default: 3001) |
 | `--host <host>` | Server host (default: localhost) |
 | `--cwd <path>` | Working directory for agents |
-| `--team <name>` | Load team template from `.macro-agent/teams/<name>/` |
+| `--team <name>` | Load team template from `.multiagent/teams/<name>/` |
 | `--acp` | Stdio ACP-only mode (for embedded use with acp-factory) |
 
 ### Multi-Client Architecture

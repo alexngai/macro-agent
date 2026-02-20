@@ -8,6 +8,8 @@
  * @module task/backend/opentasks/client
  */
 
+import { OpenTasksClient as OTClient } from "opentasks";
+
 // =============================================================================
 // OpenTasks Data Types (mirrored from opentasks schema)
 // =============================================================================
@@ -379,8 +381,6 @@ export interface OpenTasksClient {
  * Default OpenTasks client implementation using the opentasks package.
  *
  * Wraps the opentasks client library to implement the OpenTasksClient interface.
- * This uses dynamic imports so the opentasks package is only required at runtime
- * when this backend is actually used.
  */
 export class IPCOpenTasksClient implements OpenTasksClient {
   private client: any = null;
@@ -398,12 +398,7 @@ export class IPCOpenTasksClient implements OpenTasksClient {
     if (this.client?.connected) return;
 
     try {
-      // Dynamic import to avoid hard dependency on opentasks package.
-      // The package must be installed separately when using this backend.
-      const opentasksModule = await import(
-        /* webpackIgnore: true */ "opentasks" + ""
-      ) as { OpenTasksClient: new (opts: any) => any };
-      this.client = new opentasksModule.OpenTasksClient({
+      this.client = new OTClient({
         socketPath: this.config.socketPath,
         autoConnect: false,
         timeout: this.config.timeout,
@@ -607,6 +602,13 @@ export class IPCOpenTasksClient implements OpenTasksClient {
       providers: ProviderSummary[];
     };
     return result.providers ?? [];
+  }
+
+  // ─── Generic IPC Call ──────────────────────────────────────
+
+  async call(method: string, params: Record<string, unknown>): Promise<unknown> {
+    await this.ensureConnected();
+    return this.client.call(method, params);
   }
 }
 
