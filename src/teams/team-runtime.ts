@@ -1,7 +1,7 @@
 /**
  * Team Runtime
  *
- * Wires a loaded TeamManifest into the running system: registers roles,
+ * Wires a loaded team template into the running system: registers roles,
  * sets up integration strategy, configures communication topology,
  * and manages the team lifecycle.
  *
@@ -16,6 +16,7 @@ import type { SpawnAgentOptions } from "../agent/types.js";
 import type { AgentId } from "../store/types/index.js";
 import type {
   TeamManifest,
+  MacroResolvedTemplate,
   McpServerEntry,
   PeerConnection,
 } from "./types.js";
@@ -37,6 +38,45 @@ export interface TeamBootstrapResult {
 }
 
 // =============================================================================
+// Conversion: TeamManifest → MacroResolvedTemplate
+// =============================================================================
+
+/**
+ * Convert a legacy TeamManifest (with _ prefixed fields) to MacroResolvedTemplate.
+ * Used for backward compatibility when TeamRuntime receives a TeamManifest.
+ */
+function manifestToResolved(manifest: TeamManifest): MacroResolvedTemplate {
+  return {
+    template: {
+      manifest: {
+        name: manifest.name,
+        description: manifest.description,
+        version: manifest.version,
+        roles: manifest.roles,
+        topology: manifest.topology,
+        communication: manifest.communication,
+      },
+      roles: new Map(), // Not used — macro-agent uses resolvedRoles
+      prompts: new Map(), // Prompts are in _loadedPrompts
+      mcpServers: manifest._mcpServers,
+      sourcePath: "",
+    },
+    resolvedRoles: manifest._resolvedRoles,
+    macroAgent: manifest.macro_agent,
+  };
+}
+
+/**
+ * Check if input is a MacroResolvedTemplate (has `template` field)
+ * vs a legacy TeamManifest (has `_resolvedRoles` field).
+ */
+function isMacroResolvedTemplate(
+  input: TeamManifest | MacroResolvedTemplate
+): input is MacroResolvedTemplate {
+  return "template" in input && "resolvedRoles" in input;
+}
+
+// =============================================================================
 // TeamRuntime
 // =============================================================================
 
@@ -46,6 +86,12 @@ export class TeamRuntime {
   private roleRegistry: RoleRegistry;
   private lifecycleUnsubscribe?: () => void;
   private integrationStrategy?: IntegrationStrategy;
+
+  /** The resolved template (canonical internal representation) */
+  private readonly resolved: MacroResolvedTemplate;
+
+  /** Legacy loaded prompts map (path → content) for backward compat */
+  private readonly loadedPrompts: Map<string, string>;
 
   /** Role name → spawned agent ID mapping (populated during bootstrap) */
   private roleAgentMap = new Map<string, AgentId>();
@@ -62,11 +108,35 @@ export class TeamRuntime {
   /** Lifecycle unsubscribe for deferred peer wiring */
   private peerWiringUnsubscribe?: () => void;
 
+  /**
+   * Create a TeamRuntime.
+   *
+   * Accepts either a MacroResolvedTemplate (new) or a TeamManifest (legacy).
+   * Internally always uses MacroResolvedTemplate.
+   */
   constructor(
-    private readonly manifest: TeamManifest,
+    input: TeamManifest | MacroResolvedTemplate,
     private readonly services: TeamServices
   ) {
+    this.resolved = isMacroResolvedTemplate(input)
+      ? input
+      : manifestToResolved(input);
+
+    // Extract loaded prompts from legacy manifest if available
+    this.loadedPrompts = !isMacroResolvedTemplate(input)
+      ? input._loadedPrompts
+      : new Map();
+
     this.roleRegistry = services.agentManager.getRoleRegistry();
+  }
+
+  // Convenience accessors
+  private get manifest() {
+    return this.resolved.template.manifest;
+  }
+
+  private get communication() {
+    return (this.manifest.communication ?? {}) as NonNullable<typeof this.manifest.communication>;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -84,19 +154,19 @@ export class TeamRuntime {
     const { agentManager, eventStore } = this.services;
 
     // 1. Register team roles into RoleRegistry (custom layer, highest priority)
-    for (const [, resolved] of this.manifest._resolvedRoles) {
+    for (const [, resolved] of this.resolved.resolvedRoles) {
       this.roleRegistry.registerRole(resolved.roleDefinition);
     }
 
     // 2. Store team config in EventStore for cross-process access (RD2)
-    const taskMode = this.manifest.macro_agent.task_assignment?.mode ?? "push";
-    const strategyName = this.manifest.macro_agent.integration?.strategy ?? "queue";
-    const strategyConfig = this.manifest.macro_agent.integration?.config ?? {};
-    const enforcement = this.manifest.communication.enforcement ?? "permissive";
+    const taskMode = this.resolved.macroAgent.task_assignment?.mode ?? "push";
+    const strategyName = this.resolved.macroAgent.integration?.strategy ?? "queue";
+    const strategyConfig = this.resolved.macroAgent.integration?.config ?? {};
+    const enforcement = this.communication.enforcement ?? "permissive";
 
     // Serialize resolved roles for MCP subprocess capability checks
     const serializedRoles: Record<string, { name: string; capabilities: string[]; tools?: object; lifecycle?: object; description?: string }> = {};
-    for (const [name, resolved] of this.manifest._resolvedRoles) {
+    for (const [name, resolved] of this.resolved.resolvedRoles) {
       const rd = resolved.roleDefinition;
       serializedRoles[name] = {
         name: rd.name,
@@ -120,8 +190,8 @@ export class TeamRuntime {
           taskMode,
           enforcement,
           roles: serializedRoles,
-          peerRoutes: this.manifest.communication.routing?.peers ?? [],
-          emissions: this.manifest.communication.emissions ?? {},
+          peerRoutes: this.communication.routing?.peers ?? [],
+          emissions: this.communication.emissions ?? {},
         },
       },
     });
@@ -245,17 +315,31 @@ export class TeamRuntime {
 
   /** Get task assignment mode */
   getTaskMode(): "push" | "pull" {
-    return this.manifest.macro_agent.task_assignment?.mode ?? "push";
+    return this.resolved.macroAgent.task_assignment?.mode ?? "push";
   }
 
   /** Get integration strategy name */
   getStrategyName(): string {
-    return this.manifest.macro_agent.integration?.strategy ?? "queue";
+    return this.resolved.macroAgent.integration?.strategy ?? "queue";
   }
 
   /** Get the active manifest (for API) */
   getManifest(): TeamManifest {
-    return this.manifest;
+    // Build a backward-compatible TeamManifest from the resolved template
+    return {
+      ...this.manifest,
+      description: this.manifest.description ?? "",
+      communication: this.communication,
+      macro_agent: this.resolved.macroAgent,
+      _resolvedRoles: this.resolved.resolvedRoles,
+      _loadedPrompts: this.loadedPrompts,
+      _mcpServers: this.resolved.template.mcpServers,
+    } as TeamManifest;
+  }
+
+  /** Get the resolved template */
+  getResolvedTemplate(): MacroResolvedTemplate {
+    return this.resolved;
   }
 
   /** Get root agent ID (after bootstrap) */
@@ -289,7 +373,7 @@ export class TeamRuntime {
    * lifecycle config enables continuations, automatically spawn a continuation.
    */
   private monitorContinuations(): void {
-    const lifecycleConfig = this.manifest.macro_agent.lifecycle;
+    const lifecycleConfig = this.resolved.macroAgent.lifecycle;
     if (!lifecycleConfig?.continuations?.enabled) return;
 
     const { agentManager } = this.services;
@@ -341,7 +425,7 @@ export class TeamRuntime {
       const roleName = options.role;
       if (!roleName) return options;
 
-      const resolved = this.manifest._resolvedRoles.get(roleName);
+      const resolved = this.resolved.resolvedRoles.get(roleName);
       if (!resolved) return options; // Unknown role — pass through
 
       // Compute topics from communication topology
@@ -406,7 +490,7 @@ export class TeamRuntime {
    */
   private getTopicsForRole(roleName: string): string[] {
     const topics: string[] = [];
-    const subs = this.manifest.communication.subscriptions?.[roleName] ?? [];
+    const subs = this.communication.subscriptions?.[roleName] ?? [];
 
     for (const sub of subs) {
       // Channel name becomes the topic name
@@ -422,16 +506,16 @@ export class TeamRuntime {
    * Get MCP servers configured for a role.
    */
   private getMcpServersForRole(roleName: string): McpServerEntry[] {
-    return this.manifest._mcpServers.get(roleName) ?? [];
+    return this.resolved.template.mcpServers.get(roleName) ?? [];
   }
 
   /**
    * Get the loaded prompt content for a role.
    */
   private getPromptForRole(roleName: string): string | undefined {
-    const resolved = this.manifest._resolvedRoles.get(roleName);
+    const resolved = this.resolved.resolvedRoles.get(roleName);
     if (!resolved?.prompt) return undefined;
-    return this.manifest._loadedPrompts.get(resolved.prompt);
+    return this.loadedPrompts.get(resolved.prompt);
   }
 
   /**
@@ -442,7 +526,7 @@ export class TeamRuntime {
   ): string | undefined {
     // Prefer topology-level prompt reference
     if (node.prompt) {
-      return this.manifest._loadedPrompts.get(node.prompt);
+      return this.loadedPrompts.get(node.prompt);
     }
     // Fall back to role-level prompt
     return this.getPromptForRole(node.role);
@@ -456,7 +540,7 @@ export class TeamRuntime {
     const taskMode = this.getTaskMode();
 
     if (taskMode === "pull") {
-      const pullConfig = this.manifest.macro_agent.task_assignment?.pull;
+      const pullConfig = this.resolved.macroAgent.task_assignment?.pull;
       const idleTimeout = pullConfig?.idle_timeout_s ?? 300;
 
       patterns.push(`## Task Claiming
@@ -510,7 +594,7 @@ Focus on correctness — your changes go live immediately.`);
     // If a role has any subscription without a signals filter, it receives all signals.
     const roleAllowedSignals = new Map<string, Set<string> | "all">();
 
-    for (const [roleName, subs] of Object.entries(this.manifest.communication.subscriptions ?? {})) {
+    for (const [roleName, subs] of Object.entries(this.communication.subscriptions ?? {})) {
       let allowed: Set<string> | "all" = new Set<string>();
 
       for (const sub of subs) {
@@ -564,8 +648,8 @@ Focus on correctness — your changes go live immediately.`);
    */
   private installEmissionValidator(): void {
     const { messageRouter } = this.services;
-    const emissions = this.manifest.communication.emissions;
-    const enforcement = this.manifest.communication.enforcement ?? "permissive";
+    const emissions = this.communication.emissions;
+    const enforcement = this.communication.enforcement ?? "permissive";
 
     // No emissions config — nothing to enforce
     if (!emissions || Object.keys(emissions).length === 0) return;
@@ -610,7 +694,7 @@ Focus on correctness — your changes go live immediately.`);
    * Falls back to legacy bidirectional subtree subs when no peers config exists.
    */
   private wirePeerRoutes(): void {
-    const peers = this.manifest.communication.routing?.peers;
+    const peers = this.communication.routing?.peers;
 
     if (!peers || peers.length === 0) {
       // Fallback: hardcoded mutual subtree subscriptions (backwards compat)

@@ -1,25 +1,26 @@
 /**
  * Team Template Loader
  *
- * Reads .multiagent/teams/<name>/ directories, parses team.yaml,
- * resolves role inheritance, loads prompts, and validates communication.
+ * Thin wrapper around openteams TemplateLoader that maps the result
+ * into macro-agent's TeamManifest format with enforcement-enriched roles.
  *
  * @module teams/team-loader
  */
 
-import * as fs from "fs";
 import * as path from "path";
-import yaml from "js-yaml";
+import { TemplateLoader } from "openteams";
+import type {
+  ResolvedRole,
+  TeamManifest as OpenTeamsManifest,
+} from "openteams";
 import type { RoleRegistry, RoleDefinition, Capability } from "../roles/types.js";
 import {
   TeamLoadError,
   type TeamManifest,
-  type TeamTopology,
-  type TeamCommunication,
+  type TeamRoleMacroAgent,
   type MacroAgentExtensions,
-  type TeamRoleDefinition,
   type ResolvedTeamRole,
-  type McpServerEntry,
+  type CommunicationConfig,
 } from "./types.js";
 
 // =============================================================================
@@ -27,11 +28,6 @@ import {
 // =============================================================================
 
 const TEAMS_DIR = ".multiagent/teams";
-const MANIFEST_FILE = "team.yaml";
-const ROLES_DIR = "roles";
-const PROMPTS_DIR = "prompts";
-const TOOLS_DIR = "tools";
-const MCP_SERVERS_FILE = "mcp-servers.json";
 
 // =============================================================================
 // TeamLoader
@@ -39,6 +35,10 @@ const MCP_SERVERS_FILE = "mcp-servers.json";
 
 /**
  * Load a team template from disk and resolve all references.
+ *
+ * Delegates to openteams TemplateLoader for YAML parsing, role resolution,
+ * prompt loading, and MCP server config. Enriches the result with macro-agent
+ * specific enforcement (workspace, lifecycle, spawn rules).
  *
  * @param teamName - Team name (directory name under .multiagent/teams/)
  * @param roleRegistry - Role registry for resolving extends chains
@@ -53,248 +53,196 @@ export async function loadTeam(
   const root = basePath ?? process.cwd();
   const teamDir = path.join(root, TEAMS_DIR, teamName);
 
-  // 1. Check team directory exists
-  if (!fs.existsSync(teamDir)) {
-    throw new TeamLoadError(
-      `Team directory not found: ${teamDir}`,
-      "MANIFEST_NOT_FOUND",
-      teamName
-    );
-  }
-
-  // 2. Read and parse team.yaml
-  const manifestPath = path.join(teamDir, MANIFEST_FILE);
-  if (!fs.existsSync(manifestPath)) {
-    throw new TeamLoadError(
-      `Team manifest not found: ${manifestPath}`,
-      "MANIFEST_NOT_FOUND",
-      teamName
-    );
-  }
-
-  const raw = fs.readFileSync(manifestPath, "utf-8");
-  let parsed: Record<string, unknown>;
+  // 1. Load via openteams TemplateLoader with hooks
+  let template;
   try {
-    parsed = yaml.load(raw) as Record<string, unknown>;
+    template = await TemplateLoader.loadAsync(teamDir, {
+      resolveExternalRole: (name) => mapRegistryRole(roleRegistry, name),
+      postProcessRole: (role, manifest) =>
+        enrichRoleWithSpawnRules(role, manifest),
+    });
   } catch (err) {
-    throw new TeamLoadError(
-      `Failed to parse ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`,
-      "INVALID_MANIFEST",
-      teamName
-    );
+    throw mapToTeamLoadError(err, teamName, teamDir);
   }
 
-  // 3. Validate required fields
-  validateManifest(parsed, teamName);
+  const manifest = template.manifest;
+  const communication = (manifest.communication ?? {}) as CommunicationConfig;
+  const macroAgent = parseMacroAgentExtensions(manifest.macro_agent);
 
-  const topology = parsed.topology as TeamTopology;
-  const communication = (parsed.communication ?? {}) as TeamCommunication;
-  const macroAgent = (parsed.macro_agent ?? {}) as MacroAgentExtensions;
-  const roleNames = parsed.roles as string[];
-
-  // 4. Resolve roles
+  // 2. Build enforcement-enriched roles
   const resolvedRoles = new Map<string, ResolvedTeamRole>();
-  const spawnRules = topology.spawn_rules ?? {};
-
-  for (const roleName of roleNames) {
-    const resolved = resolveTeamRole(
+  for (const [roleName, openteamsRole] of template.roles) {
+    resolvedRoles.set(
       roleName,
-      teamDir,
-      roleRegistry,
-      spawnRules
+      buildResolvedTeamRole(roleName, openteamsRole, roleRegistry)
     );
-    resolvedRoles.set(roleName, resolved);
   }
 
-  // 5. Load prompts
+  // 3. Build loaded prompts map (backward compat: path → assembled content)
+  //    Assembles multi-file prompts (primary + additional sections) into a single
+  //    string so the runtime can use it transparently.
   const loadedPrompts = new Map<string, string>();
+  for (const [roleName, resolvedPrompts] of template.prompts) {
+    if (!resolvedPrompts.primary) continue;
+    const role = template.roles.get(roleName);
 
-  // Load prompts from topology nodes
-  const promptRefs = collectPromptRefs(topology, resolvedRoles);
-  for (const promptPath of promptRefs) {
-    const fullPath = path.join(teamDir, promptPath);
-    if (!fs.existsSync(fullPath)) {
-      throw new TeamLoadError(
-        `Prompt file not found: ${fullPath}`,
-        "PROMPT_NOT_FOUND",
-        teamName
-      );
+    // Assemble full prompt: primary + additional sections
+    let fullPrompt = resolvedPrompts.primary;
+    for (const section of resolvedPrompts.additional) {
+      fullPrompt += `\n\n## ${section.name}\n\n${section.content}`;
     }
-    loadedPrompts.set(promptPath, fs.readFileSync(fullPath, "utf-8"));
+
+    // Store under role's promptFile key (used by getPromptForRole)
+    if (role?.promptFile) {
+      loadedPrompts.set(role.promptFile, fullPrompt);
+    }
+
+    // Store under topology node prompt keys (used by getPromptForTopologyNode)
+    if (manifest.topology.root.role === roleName && manifest.topology.root.prompt) {
+      loadedPrompts.set(manifest.topology.root.prompt, fullPrompt);
+    }
+    for (const comp of manifest.topology.companions ?? []) {
+      if (comp.role === roleName && comp.prompt) {
+        loadedPrompts.set(comp.prompt, fullPrompt);
+      }
+    }
+
+    // Convention fallback key
+    if (!role?.promptFile) {
+      loadedPrompts.set(`prompts/${roleName}.md`, fullPrompt);
+    }
   }
 
-  // 6. Load MCP server configs
-  const mcpServers = loadMcpServers(teamDir);
-
-  // 7. Validate communication topology
-  validateCommunication(communication, roleNames, teamName);
+  // 4. Validate communication topology
+  validateCommunication(communication, manifest.roles, teamName);
 
   return {
-    name: parsed.name as string,
-    description: (parsed.description as string) ?? "",
-    version: (parsed.version as number) ?? 1,
-    roles: roleNames,
-    topology,
+    name: manifest.name,
+    description: (manifest.description as string) ?? "",
+    version: manifest.version ?? 1,
+    roles: manifest.roles,
+    topology: manifest.topology,
     communication,
     macro_agent: macroAgent,
     _resolvedRoles: resolvedRoles,
     _loadedPrompts: loadedPrompts,
-    _mcpServers: mcpServers,
+    _mcpServers: template.mcpServers,
   };
 }
 
 // =============================================================================
-// Manifest Validation
+// Hook: Map RoleRegistry → openteams ResolvedRole
 // =============================================================================
 
-function validateManifest(
-  parsed: Record<string, unknown>,
-  teamName: string
-): void {
-  if (!parsed || typeof parsed !== "object") {
-    throw new TeamLoadError(
-      "Team manifest must be a YAML object",
-      "INVALID_MANIFEST",
-      teamName
-    );
-  }
-
-  if (!parsed.name || typeof parsed.name !== "string") {
-    throw new TeamLoadError(
-      "Team manifest requires a 'name' string field",
-      "INVALID_MANIFEST",
-      teamName
-    );
-  }
-
-  if (!Array.isArray(parsed.roles) || parsed.roles.length === 0) {
-    throw new TeamLoadError(
-      "Team manifest requires a non-empty 'roles' array",
-      "INVALID_MANIFEST",
-      teamName
-    );
-  }
-
-  if (!parsed.topology || typeof parsed.topology !== "object") {
-    throw new TeamLoadError(
-      "Team manifest requires a 'topology' object",
-      "INVALID_MANIFEST",
-      teamName
-    );
-  }
-
-  const topology = parsed.topology as Record<string, unknown>;
-  if (!topology.root || typeof topology.root !== "object") {
-    throw new TeamLoadError(
-      "Team topology requires a 'root' object",
-      "INVALID_MANIFEST",
-      teamName
-    );
+/**
+ * Convert a macro-agent RoleRegistry entry to an openteams ResolvedRole.
+ * Used as the resolveExternalRole hook for TemplateLoader.
+ */
+function mapRegistryRole(
+  roleRegistry: RoleRegistry,
+  name: string
+): ResolvedRole | null {
+  try {
+    const rd = roleRegistry.resolveRole(name);
+    return {
+      name: rd.name,
+      displayName: rd.displayName ?? rd.name,
+      description: rd.description ?? `Role: ${rd.name}`,
+      capabilities: [...rd.capabilities],
+      raw: { name: rd.name, capabilities: [...rd.capabilities] },
+    };
+  } catch {
+    return null;
   }
 }
 
 // =============================================================================
-// Role Resolution
+// Hook: Enrich roles with spawn_rules capabilities
 // =============================================================================
 
 /**
- * Resolve a single team role: load YAML if present, resolve extends,
- * compute capabilities, translate spawn rules.
+ * Translate team topology spawn_rules into agent.spawn.* capabilities.
+ * Used as the postProcessRole hook for TemplateLoader.
  */
-function resolveTeamRole(
-  roleName: string,
-  teamDir: string,
-  roleRegistry: RoleRegistry,
-  spawnRules: Record<string, string[]>
-): ResolvedTeamRole {
-  // Try to load role YAML from team directory
-  const roleFilePath = path.join(teamDir, ROLES_DIR, `${roleName}.yaml`);
-  let teamRoleDef: TeamRoleDefinition | null = null;
+function enrichRoleWithSpawnRules(
+  role: ResolvedRole,
+  manifest: OpenTeamsManifest
+): ResolvedRole {
+  const spawnRules = manifest.topology.spawn_rules;
+  if (!spawnRules) return role;
 
-  if (fs.existsSync(roleFilePath)) {
-    const raw = fs.readFileSync(roleFilePath, "utf-8");
-    try {
-      teamRoleDef = yaml.load(raw) as TeamRoleDefinition;
-    } catch (err) {
-      throw new TeamLoadError(
-        `Failed to parse role file ${roleFilePath}: ${err instanceof Error ? err.message : String(err)}`,
-        "INVALID_ROLE",
-        roleName
-      );
+  const allowedSpawns = spawnRules[role.name];
+  if (!allowedSpawns || allowedSpawns.length === 0) return role;
+
+  const capabilities = [...role.capabilities];
+  for (const target of allowedSpawns) {
+    const cap = `agent.spawn.${target}`;
+    if (!capabilities.includes(cap)) {
+      capabilities.push(cap);
     }
   }
 
-  // Determine base role
-  const baseRoleName = teamRoleDef?.extends ?? roleName;
+  return { ...role, capabilities };
+}
+
+// =============================================================================
+// Build ResolvedTeamRole
+// =============================================================================
+
+/**
+ * Build a macro-agent ResolvedTeamRole from an openteams ResolvedRole.
+ * Enriches with enforcement-specific fields (workspace, lifecycle, tools, etc.)
+ * from the parent RoleDefinition and macro_agent overrides from role YAML.
+ */
+function buildResolvedTeamRole(
+  roleName: string,
+  openteamsRole: ResolvedRole,
+  roleRegistry: RoleRegistry
+): ResolvedTeamRole {
+  const baseRoleName = openteamsRole.extends ?? roleName;
+
   let parentRole: RoleDefinition;
   try {
     parentRole = roleRegistry.resolveRole(baseRoleName);
   } catch {
-    throw new TeamLoadError(
-      `Base role '${baseRoleName}' not found for team role '${roleName}'`,
-      "ROLE_NOT_FOUND",
-      roleName
-    );
+    // Fallback for roles without a registry parent
+    parentRole = {
+      name: baseRoleName,
+      displayName: baseRoleName,
+      description: `Role: ${baseRoleName}`,
+      capabilities: [],
+    } as RoleDefinition;
   }
 
-  // Compute capabilities
-  let capabilities: Capability[];
-  if (teamRoleDef?.capabilities) {
-    // Full replacement
-    capabilities = teamRoleDef.capabilities as Capability[];
-  } else if (teamRoleDef?.capabilities_add || teamRoleDef?.capabilities_remove) {
-    // Additive/subtractive
-    const base = new Set(parentRole.capabilities);
-    for (const cap of teamRoleDef.capabilities_add ?? []) {
-      base.add(cap as Capability);
-    }
-    for (const cap of teamRoleDef.capabilities_remove ?? []) {
-      base.delete(cap as Capability);
-    }
-    capabilities = Array.from(base);
-  } else {
-    // Inherit parent capabilities
-    capabilities = [...parentRole.capabilities];
-  }
+  const macroAgent = openteamsRole.raw.macro_agent as TeamRoleMacroAgent | undefined;
+  const capabilities = openteamsRole.capabilities as Capability[];
 
-  // Translate spawn_rules into capability additions (RD3)
-  const allowedSpawns = spawnRules[roleName];
-  if (allowedSpawns) {
-    for (const targetRole of allowedSpawns) {
-      const spawnCap = `agent.spawn.${targetRole}` as Capability;
-      if (!capabilities.includes(spawnCap)) {
-        capabilities.push(spawnCap);
-      }
-    }
-  }
-
-  // Build the resolved RoleDefinition for registry
   const roleDefinition: RoleDefinition = {
     name: roleName,
-    displayName: teamRoleDef?.display_name ?? parentRole.displayName,
-    description: teamRoleDef?.description ?? parentRole.description,
+    displayName: openteamsRole.displayName,
+    description: openteamsRole.description,
     capabilities,
-    workspace: teamRoleDef?.macro_agent?.workspace
+    workspace: macroAgent?.workspace
       ? {
-          type: (teamRoleDef.macro_agent.workspace.type ?? "own") as "own" | "shared" | "mount" | "none",
-          branchPattern: teamRoleDef.macro_agent.workspace.branch_pattern,
-          cleanupOnTerminate: teamRoleDef.macro_agent.workspace.cleanup_on_terminate,
+          type: (macroAgent.workspace.type ?? "own") as "own" | "shared" | "mount" | "none",
+          branchPattern: macroAgent.workspace.branch_pattern,
+          cleanupOnTerminate: macroAgent.workspace.cleanup_on_terminate,
         }
       : parentRole.workspace,
-    lifecycle: teamRoleDef?.macro_agent?.lifecycle
+    lifecycle: macroAgent?.lifecycle
       ? {
-          type: (teamRoleDef.macro_agent.lifecycle.type ?? "ephemeral") as "ephemeral" | "persistent" | "daemon" | "event-driven",
-          cascadeTerminate: teamRoleDef.macro_agent.lifecycle.cascade_terminate,
-          selfCleanup: teamRoleDef.macro_agent.lifecycle.self_cleanup,
-          taskBound: teamRoleDef.macro_agent.lifecycle.task_bound,
-          parentBound: teamRoleDef.macro_agent.lifecycle.parent_bound,
-          maxDurationMs: teamRoleDef.macro_agent.lifecycle.max_duration_ms,
+          type: (macroAgent.lifecycle.type ?? "ephemeral") as "ephemeral" | "persistent" | "daemon" | "event-driven",
+          cascadeTerminate: macroAgent.lifecycle.cascade_terminate,
+          selfCleanup: macroAgent.lifecycle.self_cleanup,
+          taskBound: macroAgent.lifecycle.task_bound,
+          parentBound: macroAgent.lifecycle.parent_bound,
+          maxDurationMs: macroAgent.lifecycle.max_duration_ms,
         }
       : parentRole.lifecycle,
     tools: parentRole.tools,
     protocol: parentRole.protocol,
     permissions: parentRole.permissions,
-    extends: teamRoleDef?.extends,
+    extends: openteamsRole.extends,
     systemPrompt: parentRole.systemPrompt,
   };
 
@@ -302,69 +250,77 @@ function resolveTeamRole(
     name: roleName,
     baseRole: baseRoleName,
     capabilities,
-    prompt: teamRoleDef?.prompt,
+    prompt: openteamsRole.promptFile,
     roleDefinition,
   };
 }
 
 // =============================================================================
-// Prompt Collection
+// Parse macro_agent extensions
 // =============================================================================
 
 /**
- * Collect all prompt file paths referenced by topology and roles.
+ * Parse the opaque macro_agent field from the manifest into typed extensions.
  */
-function collectPromptRefs(
-  topology: TeamTopology,
-  resolvedRoles: Map<string, ResolvedTeamRole>
-): Set<string> {
-  const refs = new Set<string>();
-
-  // From topology nodes
-  if (topology.root.prompt) refs.add(topology.root.prompt);
-  for (const companion of topology.companions ?? []) {
-    if (companion.prompt) refs.add(companion.prompt);
-  }
-
-  // From role definitions
-  for (const resolved of resolvedRoles.values()) {
-    if (resolved.prompt) refs.add(resolved.prompt);
-  }
-
-  return refs;
+function parseMacroAgentExtensions(
+  raw: Record<string, unknown> | undefined
+): MacroAgentExtensions {
+  if (!raw) return {};
+  return raw as MacroAgentExtensions;
 }
 
 // =============================================================================
-// MCP Server Loading
+// Error Mapping
 // =============================================================================
 
 /**
- * Load tools/mcp-servers.json if it exists.
- * Returns a map of role name → MCP server entries.
+ * Map openteams loader errors to macro-agent TeamLoadError for backward compat.
  */
-function loadMcpServers(
+function mapToTeamLoadError(
+  err: unknown,
+  teamName: string,
   teamDir: string
-): Map<string, McpServerEntry[]> {
-  const result = new Map<string, McpServerEntry[]>();
-  const mcpPath = path.join(teamDir, TOOLS_DIR, MCP_SERVERS_FILE);
+): TeamLoadError {
+  const message = err instanceof Error ? err.message : String(err);
 
-  if (!fs.existsSync(mcpPath)) {
-    return result;
+  if (message.includes("not found") || message.includes("not exist")) {
+    return new TeamLoadError(
+      `Team directory or manifest not found: ${teamDir}`,
+      "MANIFEST_NOT_FOUND",
+      teamName
+    );
   }
 
-  const raw = fs.readFileSync(mcpPath, "utf-8");
-  const parsed = JSON.parse(raw) as Record<
-    string,
-    { servers: McpServerEntry[] }
-  >;
-
-  for (const [roleName, config] of Object.entries(parsed)) {
-    if (config.servers && Array.isArray(config.servers)) {
-      result.set(roleName, config.servers);
-    }
+  if (message.includes("parse") || message.includes("YAML")) {
+    return new TeamLoadError(
+      `Failed to parse team manifest: ${message}`,
+      "INVALID_MANIFEST",
+      teamName
+    );
   }
 
-  return result;
+  if (message.includes("role") && message.includes("not in")) {
+    return new TeamLoadError(
+      message,
+      "INVALID_MANIFEST",
+      teamName
+    );
+  }
+
+  if (message.includes("Circular")) {
+    return new TeamLoadError(
+      message,
+      "INVALID_ROLE",
+      teamName
+    );
+  }
+
+  // Default: treat as invalid manifest
+  return new TeamLoadError(
+    `Failed to load team '${teamName}': ${message}`,
+    "INVALID_MANIFEST",
+    teamName
+  );
 }
 
 // =============================================================================
@@ -375,7 +331,7 @@ function loadMcpServers(
  * Validate communication topology references.
  */
 function validateCommunication(
-  communication: TeamCommunication,
+  communication: CommunicationConfig,
   roleNames: string[],
   teamName: string
 ): void {

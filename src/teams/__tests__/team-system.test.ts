@@ -17,6 +17,8 @@ import type { MessageRouter } from "../../router/message-router.js";
 import type { EventStore } from "../../store/event-store.js";
 import type { SpawnAgentOptions } from "../../agent/types.js";
 import type { AgentId, Event } from "../../store/types/index.js";
+import { TeamLoadError } from "../types.js";
+import type { MacroResolvedTemplate, ResolvedTeamRole, McpServerEntry } from "../types.js";
 
 // =============================================================================
 // Helpers
@@ -1276,5 +1278,582 @@ describe("Metrics Module", () => {
 
     expect(metrics.totalErrors).toBe(0);
     expect(metrics.recentErrors).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Tests: openteams Migration — Loader Hooks & Error Mapping
+// =============================================================================
+
+describe("openteams Migration: Team Loader", () => {
+  let roleRegistry: DefaultRoleRegistry;
+
+  beforeEach(() => {
+    roleRegistry = new DefaultRoleRegistry();
+  });
+
+  describe("buildResolvedTeamRole — enforcement fields", () => {
+    it("maps macro_agent.workspace from role YAML to RoleDefinition", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // judge.yaml has workspace config
+      const judge = manifest._resolvedRoles.get("judge")!;
+      expect(judge.roleDefinition.workspace).toEqual({
+        type: "own",
+        branchPattern: "judge/{agent-id}",
+        cleanupOnTerminate: true,
+      });
+    });
+
+    it("maps macro_agent.lifecycle from role YAML to RoleDefinition", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // planner.yaml has lifecycle: type: daemon, cascade_terminate: true
+      const planner = manifest._resolvedRoles.get("planner")!;
+      expect(planner.roleDefinition.lifecycle).toEqual({
+        type: "daemon",
+        cascadeTerminate: true,
+      });
+
+      // grinder.yaml has lifecycle: type: ephemeral, task_bound: false, max_duration_ms, self_cleanup
+      const grinder = manifest._resolvedRoles.get("grinder")!;
+      expect(grinder.roleDefinition.lifecycle).toEqual({
+        type: "ephemeral",
+        taskBound: false,
+        maxDurationMs: 3600000,
+        selfCleanup: true,
+      });
+    });
+
+    it("falls back to parent role workspace/lifecycle when no macro_agent override", async () => {
+      const manifest = await loadTeam("structured", roleRegistry, PROJECT_ROOT);
+
+      // structured roles don't have macro_agent workspace/lifecycle in their YAML
+      // so they inherit from parent role definitions
+      const developer = manifest._resolvedRoles.get("developer")!;
+      // Worker parent has workspace config
+      const parentWorker = roleRegistry.resolveRole("worker");
+      expect(developer.roleDefinition.workspace).toEqual(parentWorker.workspace);
+    });
+
+    it("preserves parent role tools and protocol", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const grinder = manifest._resolvedRoles.get("grinder")!;
+      const parentWorker = roleRegistry.resolveRole("worker");
+      expect(grinder.roleDefinition.tools).toEqual(parentWorker.tools);
+      expect(grinder.roleDefinition.protocol).toEqual(parentWorker.protocol);
+    });
+
+    it("sets correct baseRole from extends chain", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // All roles should reference their base role
+      expect(manifest._resolvedRoles.get("planner")!.baseRole).toBe("coordinator");
+      expect(manifest._resolvedRoles.get("grinder")!.baseRole).toBe("worker");
+      expect(manifest._resolvedRoles.get("judge")!.baseRole).toBe("monitor");
+    });
+
+    it("stores prompt file path in resolved role", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const planner = manifest._resolvedRoles.get("planner")!;
+      expect(planner.prompt).toBe("prompts/planner.md");
+
+      const grinder = manifest._resolvedRoles.get("grinder")!;
+      expect(grinder.prompt).toBe("prompts/grinder.md");
+    });
+  });
+
+  describe("enrichRoleWithSpawnRules hook", () => {
+    it("adds agent.spawn.* capabilities from spawn_rules", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // planner: [grinder, planner]
+      const planner = manifest._resolvedRoles.get("planner")!;
+      expect(planner.capabilities).toContain("agent.spawn.grinder");
+      expect(planner.capabilities).toContain("agent.spawn.planner");
+    });
+
+    it("does not duplicate existing spawn capabilities", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const planner = manifest._resolvedRoles.get("planner")!;
+      const spawnGrinderCount = planner.capabilities.filter(
+        (c) => c === "agent.spawn.grinder"
+      ).length;
+      expect(spawnGrinderCount).toBe(1);
+    });
+
+    it("does not add spawn capabilities for roles with empty spawn_rules", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // judge: [] in spawn_rules — should not have spawn caps added by enrichRoleWithSpawnRules
+      // (judge extends monitor which has no spawn caps)
+      const judge = manifest._resolvedRoles.get("judge")!;
+      const spawnCaps = judge.capabilities.filter((c) => c.startsWith("agent.spawn."));
+      expect(spawnCaps).toEqual([]);
+
+      // grinder: [] in spawn_rules — grinder extends worker which has agent.spawn.worker
+      // from parent, but enrichRoleWithSpawnRules should NOT add any additional spawn caps
+      const grinder = manifest._resolvedRoles.get("grinder")!;
+      const grinderSpawnCaps = grinder.capabilities.filter((c) => c.startsWith("agent.spawn."));
+      // Only has parent-inherited spawn caps, not new ones from spawn_rules
+      expect(grinderSpawnCaps).not.toContain("agent.spawn.grinder");
+      expect(grinderSpawnCaps).not.toContain("agent.spawn.planner");
+    });
+  });
+
+  describe("mapRegistryRole hook", () => {
+    it("resolves known registry roles for extends chains", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // planner extends coordinator — coordinator should be resolvable
+      const planner = manifest._resolvedRoles.get("planner")!;
+      expect(planner.baseRole).toBe("coordinator");
+
+      // Coordinator capabilities should be in the planner's set (minus removals, plus additions)
+      const coordinatorRole = roleRegistry.resolveRole("coordinator");
+      // planner should have coordinator capabilities minus removed ones
+      for (const cap of coordinatorRole.capabilities) {
+        if (cap !== "agent.spawn.integrator" && cap !== "agent.spawn.monitor") {
+          expect(planner.capabilities).toContain(cap);
+        }
+      }
+    });
+  });
+
+  describe("prompt loading and assembly", () => {
+    it("loads prompts keyed by role promptFile path", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Prompts should be stored under the role's promptFile key
+      expect(manifest._loadedPrompts.has("prompts/planner.md")).toBe(true);
+      expect(manifest._loadedPrompts.has("prompts/grinder.md")).toBe(true);
+      expect(manifest._loadedPrompts.has("prompts/judge.md")).toBe(true);
+    });
+
+    it("loads prompts keyed by topology node prompt path", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Root topology node has prompt: prompts/planner.md
+      // It should also be stored under that topology key
+      expect(manifest._loadedPrompts.get("prompts/planner.md")).toBeDefined();
+      expect(manifest._loadedPrompts.get("prompts/planner.md")!.length).toBeGreaterThan(0);
+    });
+
+    it("prompt content matches actual file content", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const plannerPrompt = manifest._loadedPrompts.get("prompts/planner.md")!;
+      // Should contain the role name from the actual prompt file
+      expect(plannerPrompt).toContain("Planner");
+    });
+  });
+
+  describe("MCP server loading", () => {
+    it("provides _mcpServers map (even if empty)", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      expect(manifest._mcpServers).toBeDefined();
+      expect(manifest._mcpServers).toBeInstanceOf(Map);
+    });
+  });
+
+  describe("error mapping", () => {
+    it("throws MANIFEST_NOT_FOUND for non-existent team", async () => {
+      await expect(
+        loadTeam("nonexistent-team", roleRegistry, PROJECT_ROOT)
+      ).rejects.toThrow(TeamLoadError);
+
+      try {
+        await loadTeam("nonexistent-team", roleRegistry, PROJECT_ROOT);
+      } catch (e) {
+        const err = e as TeamLoadError;
+        expect(err.code).toBe("MANIFEST_NOT_FOUND");
+        expect(err.teamName).toBe("nonexistent-team");
+      }
+    });
+
+    it("includes team name in error", async () => {
+      try {
+        await loadTeam("does-not-exist", roleRegistry, PROJECT_ROOT);
+      } catch (e) {
+        expect(e).toBeInstanceOf(TeamLoadError);
+        expect((e as TeamLoadError).teamName).toBe("does-not-exist");
+      }
+    });
+  });
+
+  describe("communication validation", () => {
+    it("validates self-driving team communication topology", async () => {
+      // Should not throw — well-formed communication config
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      expect(manifest.communication).toBeDefined();
+      expect(manifest.communication.channels).toBeDefined();
+      expect(manifest.communication.subscriptions).toBeDefined();
+      expect(manifest.communication.emissions).toBeDefined();
+      expect(manifest.communication.routing).toBeDefined();
+    });
+
+    it("validates structured team communication topology", async () => {
+      const manifest = await loadTeam("structured", roleRegistry, PROJECT_ROOT);
+      expect(manifest.communication.channels).toBeDefined();
+      expect(Object.keys(manifest.communication.channels!)).toContain("task_updates");
+      expect(Object.keys(manifest.communication.channels!)).toContain("merge_flow");
+      expect(Object.keys(manifest.communication.channels!)).toContain("review_flow");
+    });
+  });
+});
+
+// =============================================================================
+// Tests: openteams Migration — TeamRuntime Type Detection
+// =============================================================================
+
+describe("openteams Migration: TeamRuntime", () => {
+  let roleRegistry: DefaultRoleRegistry;
+  let agentManager: AgentManager;
+  let messageRouter: MessageRouter;
+  let eventStore: EventStore & { _events: Event[] };
+  let services: TeamServices;
+
+  beforeEach(() => {
+    roleRegistry = new DefaultRoleRegistry();
+    eventStore = createMockEventStore() as EventStore & { _events: Event[] };
+    messageRouter = createMockMessageRouter();
+    agentManager = createMockAgentManager(roleRegistry);
+    services = { agentManager, messageRouter, eventStore };
+  });
+
+  describe("MacroResolvedTemplate input", () => {
+    it("accepts MacroResolvedTemplate directly", async () => {
+      // Build a MacroResolvedTemplate from a loaded manifest
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      // Should not throw
+      const runtime = new TeamRuntime(resolved, services);
+      expect(runtime.getTaskMode()).toBe("pull");
+      expect(runtime.getStrategyName()).toBe("trunk");
+    });
+
+    it("getResolvedTemplate() returns the resolved template", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      const result = runtime.getResolvedTemplate();
+
+      expect(result).toBe(resolved);
+      expect(result.resolvedRoles).toBe(manifest._resolvedRoles);
+      expect(result.macroAgent).toBe(manifest.macro_agent);
+    });
+
+    it("initializes and bootstraps with MacroResolvedTemplate", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      expect(result.rootId).toBeDefined();
+      expect(result.companionIds).toHaveLength(1);
+      expect(agentManager.spawn).toHaveBeenCalledTimes(2);
+    });
+
+    it("emits team_config event with MacroResolvedTemplate", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      await runtime.initialize();
+
+      expect(eventStore.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "status",
+          payload: expect.objectContaining({
+            team_config: expect.objectContaining({
+              teamName: "self-driving",
+              strategy: "trunk",
+              taskMode: "pull",
+            }),
+          }),
+        })
+      );
+    });
+  });
+
+  describe("manifestToResolved conversion", () => {
+    it("converts legacy TeamManifest to MacroResolvedTemplate internally", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Pass TeamManifest (legacy path)
+      const runtime = new TeamRuntime(manifest, services);
+      const resolved = runtime.getResolvedTemplate();
+
+      // Should have been converted internally
+      expect(resolved.template.manifest.name).toBe("self-driving");
+      expect(resolved.resolvedRoles).toBe(manifest._resolvedRoles);
+      expect(resolved.macroAgent).toBe(manifest.macro_agent);
+      expect(resolved.template.mcpServers).toBe(manifest._mcpServers);
+    });
+
+    it("preserves topology and communication in conversion", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const runtime = new TeamRuntime(manifest, services);
+      const resolved = runtime.getResolvedTemplate();
+
+      expect(resolved.template.manifest.topology).toBe(manifest.topology);
+      expect(resolved.template.manifest.communication).toBe(manifest.communication);
+    });
+  });
+
+  describe("getManifest() backward compatibility", () => {
+    it("reconstructs TeamManifest from MacroResolvedTemplate", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      const backCompat = runtime.getManifest();
+
+      expect(backCompat.name).toBe("self-driving");
+      expect(backCompat._resolvedRoles).toBe(manifest._resolvedRoles);
+      expect(backCompat._mcpServers).toBe(manifest._mcpServers);
+      expect(backCompat.macro_agent).toBe(manifest.macro_agent);
+    });
+
+    it("reconstructs TeamManifest from legacy TeamManifest input", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const runtime = new TeamRuntime(manifest, services);
+      const backCompat = runtime.getManifest();
+
+      expect(backCompat.name).toBe("self-driving");
+      expect(backCompat._resolvedRoles).toBe(manifest._resolvedRoles);
+      expect(backCompat._loadedPrompts).toBe(manifest._loadedPrompts);
+    });
+  });
+
+  describe("spawn interceptor with MacroResolvedTemplate", () => {
+    it("injects team context when using MacroResolvedTemplate", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers: manifest._mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      // Spawn a grinder through the interceptor
+      await agentManager.spawn({
+        task: "test grinder task",
+        role: "grinder",
+        parent: "agent_0",
+      });
+
+      const lastOpts = interceptedSpawnOptions.at(-1)!;
+      expect(lastOpts.config?.env?.MACRO_TEAM_NAME).toBe("self-driving");
+      expect(lastOpts.config?.env?.MACRO_TASK_MODE).toBe("pull");
+      expect(lastOpts.topics).toContain("work_coordination");
+    });
+
+    it("resolves MCP servers from MacroResolvedTemplate", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+
+      // Add a mock MCP server for grinder
+      const mcpServers = new Map<string, McpServerEntry[]>();
+      mcpServers.set("grinder", [{
+        name: "test-server",
+        command: "node",
+        args: ["test.js"],
+      }]);
+
+      const resolved: MacroResolvedTemplate = {
+        template: {
+          manifest: {
+            name: manifest.name,
+            description: manifest.description,
+            version: manifest.version,
+            roles: manifest.roles,
+            topology: manifest.topology,
+            communication: manifest.communication,
+          },
+          roles: new Map(),
+          prompts: new Map(),
+          mcpServers,
+          sourcePath: "",
+        },
+        resolvedRoles: manifest._resolvedRoles,
+        macroAgent: manifest.macro_agent,
+      };
+
+      const runtime = new TeamRuntime(resolved, services);
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      // Spawn a grinder
+      await agentManager.spawn({
+        task: "test task",
+        role: "grinder",
+        parent: "agent_0",
+      });
+
+      const lastOpts = interceptedSpawnOptions.at(-1)!;
+      expect(lastOpts.config?.mcpServers).toBeDefined();
+      expect(lastOpts.config?.mcpServers!.length).toBeGreaterThanOrEqual(1);
+      expect(lastOpts.config?.mcpServers!.some((s: any) => s.name === "test-server")).toBe(true);
+    });
+  });
+
+  describe("serialized roles in team_config", () => {
+    it("serializes resolved roles with capabilities", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      const emitCall = vi.mocked(eventStore.emit).mock.calls[0][0] as any;
+      const serializedRoles = emitCall.payload.team_config.roles;
+
+      expect(serializedRoles.planner).toBeDefined();
+      expect(serializedRoles.planner.name).toBe("planner");
+      expect(serializedRoles.planner.capabilities).toContain("task.claim");
+      expect(serializedRoles.planner.capabilities).toContain("agent.spawn.grinder");
+
+      expect(serializedRoles.grinder).toBeDefined();
+      expect(serializedRoles.grinder.name).toBe("grinder");
+      expect(serializedRoles.grinder.capabilities).toContain("task.claim");
+      expect(serializedRoles.grinder.capabilities).toContain("git.push");
+
+      expect(serializedRoles.judge).toBeDefined();
+      expect(serializedRoles.judge.name).toBe("judge");
+    });
+
+    it("includes lifecycle and description in serialized roles", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      const emitCall = vi.mocked(eventStore.emit).mock.calls[0][0] as any;
+      const serializedRoles = emitCall.payload.team_config.roles;
+
+      // planner has lifecycle config
+      expect(serializedRoles.planner.lifecycle).toBeDefined();
+
+      // All roles have descriptions
+      expect(serializedRoles.planner.description).toBeDefined();
+      expect(serializedRoles.grinder.description).toBeDefined();
+      expect(serializedRoles.judge.description).toBeDefined();
+    });
   });
 });
