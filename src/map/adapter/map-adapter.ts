@@ -318,6 +318,9 @@ export class MAPAdapterImpl implements MAPAdapter {
           in_progress: "task_assigned",
           completed: "task_completed",
           failed: "task_failed",
+          // OpenTasks statuses (defensive — normally mapped before reaching here)
+          closed: "task_completed",
+          open: "task_created",
         };
         const mapEventType = eventTypeMap[task.status];
         if (mapEventType) {

@@ -335,6 +335,16 @@ export interface TaskBackend {
   /** Get agent assignment history for a task */
   getAgentHistory(taskId: TaskId): Promise<AgentHistoryEntry[]>;
 
+  // ─── External Sync ──────────────────────────────────────────
+  /**
+   * Sync a task transition that happened externally (e.g., via opentasks daemon).
+   * Updates the internal store without re-syncing to the external system.
+   * @param externalId - The external system's task ID (e.g., opentasks issue ID)
+   * @param action - The transition action (e.g., "complete", "start", "close")
+   * @param agentId - The agent that performed the transition
+   */
+  syncExternalTransition?(externalId: string, action: string, agentId?: string): Promise<void>;
+
   // ─── Event Subscriptions ─────────────────────────────────────
   /** Subscribe to all task changes */
   onTaskChange(callback: TaskChangeCallback): Unsubscribe;

@@ -884,7 +884,10 @@ function createTaskToolBridge(
     // `params` envelope that the thin-client MCP server wraps them in)
     const toolParams = (args as Record<string, unknown>).params ?? args;
 
-    return tool.handler(toolParams);
+    // The tool handler now calls backend.syncExternalTransition() internally
+    // after successful opentasks transitions, which updates the EventStore
+    // and triggers MAP events via onTaskChange.
+    return await tool.handler(toolParams);
   };
 }
 

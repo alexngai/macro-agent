@@ -448,6 +448,25 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
           if (!result.success) {
             throw new Error(result.error ?? "Transition failed");
           }
+
+          // Sync the transition back to the EventStore so MAP events are emitted
+          // and the TUI task board stays in sync. The opentasks daemon already
+          // processed the transition, so syncExternalTransition only updates the
+          // EventStore without re-syncing to opentasks.
+          if (this.backend.syncExternalTransition) {
+            try {
+              await this.backend.syncExternalTransition(
+                args.transition.id,
+                args.transition.action,
+                getContext().agent_id,
+              );
+            } catch (err) {
+              console.warn(
+                `[UnifiedTaskToolProvider] syncExternalTransition failed for ${args.transition.id}: ${err}`
+              );
+            }
+          }
+
           return result.data;
         }
 
@@ -465,6 +484,22 @@ export class UnifiedTaskToolProvider implements TaskToolProvider {
           if (!result.success) {
             throw new Error(result.error ?? "Assignment failed");
           }
+
+          // Sync assignment back to EventStore
+          if (this.backend.syncExternalTransition) {
+            try {
+              await this.backend.syncExternalTransition(
+                args.assign.id,
+                "assign",
+                assignee,
+              );
+            } catch (err) {
+              console.warn(
+                `[UnifiedTaskToolProvider] syncExternalTransition (assign) failed for ${args.assign.id}: ${err}`
+              );
+            }
+          }
+
           return result.data;
         }
 
