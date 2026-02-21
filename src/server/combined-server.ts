@@ -51,6 +51,7 @@ import {
   secureCompare,
 } from "../auth/token.js";
 import { TaskBackend, TaskToolProvider } from "../task/backend/types.js";
+import type { TeamManager } from "../teams/team-manager.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -77,6 +78,8 @@ export interface CombinedServerServices {
   getConnectedProjects?: () => string[];
   /** Optional stream extension services for git-cascade stream/checkpoint/merge-queue features */
   streamExtensions?: StreamExtensionServices;
+  /** Optional team manager for dynamic team management */
+  teamManager?: TeamManager;
 }
 
 export interface CombinedServerConfig {
@@ -262,7 +265,7 @@ export function createCombinedServer(
   // Create Express app with API routes (include mail services)
   const app = createAPIApp(
     { ...services, mailService, conversationMap },
-    { cors, serverToken: resolvedServerToken },
+    { cors, serverToken: resolvedServerToken, defaultCwd },
   );
 
   // Create HTTP server with Express

@@ -74,6 +74,9 @@ export interface SpawnAgentOptions {
    */
   role?: string;
 
+  /** Team instance ID this agent belongs to (set by TeamManager interceptor) */
+  team_instance?: string;
+
   /**
    * Stream ID to join (for workers and integrators).
    * Required for workers and integrators when using workspace isolation.

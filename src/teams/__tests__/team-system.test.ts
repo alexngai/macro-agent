@@ -285,11 +285,22 @@ describe("TeamRuntime", () => {
       );
     });
 
-    it("sets spawn interceptor on agent manager", async () => {
+    it("does not install spawn interceptor directly (TeamManager responsibility)", async () => {
       const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+
+      // initialize() no longer installs interceptor — that's TeamManager's job
+      expect(agentManager.setSpawnInterceptor).not.toHaveBeenCalled();
+    });
+
+    it("installOnServices() sets spawn interceptor on agent manager", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      runtime.installOnServices();
 
       expect(agentManager.setSpawnInterceptor).toHaveBeenCalledWith(
         expect.any(Function)
@@ -403,6 +414,7 @@ describe("TeamRuntime", () => {
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
 
       // Now spawn a grinder through the interceptor
@@ -424,6 +436,7 @@ describe("TeamRuntime", () => {
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
 
       // Spawn a grinder
@@ -444,6 +457,7 @@ describe("TeamRuntime", () => {
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
 
       const customPrompt = "My custom prompt";
@@ -481,13 +495,32 @@ describe("TeamRuntime", () => {
   });
 
   describe("teardown()", () => {
-    it("clears spawn interceptor", async () => {
+    it("does not clear interceptor directly (caller responsibility)", async () => {
       const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+      runtime.installOnServices();
+      await runtime.bootstrap();
+
+      // Reset mock to track only teardown-related calls
+      vi.mocked(agentManager.setSpawnInterceptor).mockClear();
+
+      await runtime.teardown();
+
+      // teardown() no longer clears interceptor — that's the caller's responsibility
+      expect(agentManager.setSpawnInterceptor).not.toHaveBeenCalled();
+    });
+
+    it("uninstallFromServices() clears spawn interceptor", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
       await runtime.teardown();
+      runtime.uninstallFromServices();
 
       expect(agentManager.setSpawnInterceptor).toHaveBeenLastCalledWith(null);
     });
@@ -681,13 +714,17 @@ describe("TeamRuntime", () => {
   });
 
   describe("signal filtering", () => {
-    it("installs signal filter on message router after bootstrap", async () => {
+    it("installOnServices() installs signal filter on message router", async () => {
       const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
+      // bootstrap/initialize alone should NOT install filter
       await runtime.bootstrap();
+      expect(messageRouter.setSignalFilter).not.toHaveBeenCalled();
 
+      // installOnServices() installs the filter
+      runtime.installOnServices();
       expect(messageRouter.setSignalFilter).toHaveBeenCalledTimes(1);
       expect(messageRouter.setSignalFilter).toHaveBeenCalledWith(expect.any(Function));
     });
@@ -698,6 +735,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       // Extract the installed filter
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
@@ -718,6 +756,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
         from: string, to: string, signal: string | undefined
@@ -736,6 +775,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
         from: string, to: string, signal: string | undefined
@@ -754,6 +794,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
         from: string, to: string, signal: string | undefined
@@ -775,6 +816,7 @@ describe("TeamRuntime", () => {
       const runtime2 = new TeamRuntime(manifest, services);
       await runtime2.initialize();
       const result2 = await runtime2.bootstrap();
+      runtime2.installOnServices();
 
       // Simulate grinder spawn via lifecycle event
       const deferredCallback = vi.mocked(agentManager.onLifecycleEvent).mock.calls.at(-2)![0];
@@ -801,6 +843,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
         from: string, to: string, signal: string | undefined
@@ -819,6 +862,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const filterFn = vi.mocked(messageRouter.setSignalFilter).mock.calls[0][0] as (
         from: string, to: string, signal: string | undefined
@@ -835,13 +879,17 @@ describe("TeamRuntime", () => {
   });
 
   describe("emission validation", () => {
-    it("installs emission validator on message router after bootstrap", async () => {
+    it("installOnServices() installs emission validator on message router", async () => {
       const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
       const runtime = new TeamRuntime(manifest, services);
 
       await runtime.initialize();
       await runtime.bootstrap();
+      // bootstrap alone should NOT install validator
+      expect(messageRouter.setEmissionValidator).not.toHaveBeenCalled();
 
+      // installOnServices() installs the validator
+      runtime.installOnServices();
       expect(messageRouter.setEmissionValidator).toHaveBeenCalledTimes(1);
       expect(messageRouter.setEmissionValidator).toHaveBeenCalledWith(expect.any(Function));
     });
@@ -852,6 +900,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -871,6 +920,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -892,6 +942,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -911,6 +962,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -930,6 +982,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       const result = await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -947,6 +1000,7 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       await runtime.bootstrap();
+      runtime.installOnServices();
 
       const validatorFn = vi.mocked(messageRouter.setEmissionValidator).mock.calls[0][0] as (
         agentId: string, signal: string | undefined
@@ -963,7 +1017,9 @@ describe("TeamRuntime", () => {
 
       await runtime.initialize();
       await runtime.bootstrap();
+      runtime.installOnServices();
 
+      // createEmissionValidator() returns null when no emissions → setEmissionValidator not called
       expect(messageRouter.setEmissionValidator).not.toHaveBeenCalled();
     });
 
@@ -987,6 +1043,119 @@ describe("TeamRuntime", () => {
           }),
         })
       );
+    });
+  });
+
+  describe("exposed factory methods (for TeamManager)", () => {
+    it("createSpawnInterceptor() returns a function", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      const interceptor = runtime.createSpawnInterceptor();
+      expect(interceptor).toBeInstanceOf(Function);
+    });
+
+    it("createSpawnInterceptor() injects team context", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+
+      const interceptor = runtime.createSpawnInterceptor();
+      const result = interceptor({
+        task: "test",
+        role: "grinder",
+        parent: "agent_0",
+      });
+
+      expect(result.config?.env?.MACRO_TEAM_NAME).toBe("self-driving");
+      expect(result.config?.env?.MACRO_TASK_MODE).toBe("pull");
+      expect(result.topics).toContain("work_coordination");
+    });
+
+    it("createSignalFilter() returns a function", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      const filter = runtime.createSignalFilter();
+      expect(filter).toBeInstanceOf(Function);
+    });
+
+    it("createEmissionValidator() returns a function when emissions exist", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      const validator = runtime.createEmissionValidator();
+      expect(validator).toBeInstanceOf(Function);
+    });
+
+    it("createEmissionValidator() returns null when no emissions", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      manifest.communication.emissions = undefined;
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      const validator = runtime.createEmissionValidator();
+      expect(validator).toBeNull();
+    });
+
+    it("getAgentRoleMap() returns role mappings after bootstrap", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      const roleMap = runtime.getAgentRoleMap();
+      expect(roleMap.get(result.rootId as AgentId)).toBe("planner");
+      expect(roleMap.get(result.companionIds[0] as AgentId)).toBe("judge");
+    });
+
+    it("registerAgent() adds agent to role map", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      runtime.registerAgent("new_agent" as AgentId, "grinder");
+
+      const roleMap = runtime.getAgentRoleMap();
+      expect(roleMap.get("new_agent" as AgentId)).toBe("grinder");
+    });
+
+    it("hasAgent() returns true for known agents", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      expect(runtime.hasAgent(result.rootId)).toBe(true);
+      expect(runtime.hasAgent(result.companionIds[0])).toBe(true);
+      expect(runtime.hasAgent("unknown_agent")).toBe(false);
+    });
+
+    it("hasAgent() includes dynamically registered agents", async () => {
+      const manifest = await loadTeam("self-driving", roleRegistry, PROJECT_ROOT);
+      const runtime = new TeamRuntime(manifest, services);
+
+      await runtime.initialize();
+      await runtime.bootstrap();
+
+      expect(runtime.hasAgent("dynamic_agent")).toBe(false);
+      runtime.registerAgent("dynamic_agent" as AgentId, "grinder");
+      expect(runtime.hasAgent("dynamic_agent")).toBe(true);
     });
   });
 
@@ -1751,6 +1920,7 @@ describe("openteams Migration: TeamRuntime", () => {
 
       const runtime = new TeamRuntime(resolved, services);
       await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
 
       // Spawn a grinder through the interceptor
@@ -1798,6 +1968,7 @@ describe("openteams Migration: TeamRuntime", () => {
 
       const runtime = new TeamRuntime(resolved, services);
       await runtime.initialize();
+      runtime.installOnServices();
       await runtime.bootstrap();
 
       // Spawn a grinder

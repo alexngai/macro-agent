@@ -253,12 +253,18 @@ async function startLegacy() {
     }
   });
 
-  // Read team config from EventStore
+  // Read team config from EventStore (scoped by MACRO_TEAM_NAME for multi-team)
   let teamTaskMode: string | undefined;
+  const myTeamName = process.env.MACRO_TEAM_NAME;
   const teamEvents = eventStore.query({ type: "status", limit: 50 });
-  const teamConfigEvent = teamEvents.find(
-    (e) => e.payload?.team_config != null
-  );
+  const teamConfigEvent = teamEvents.find((e) => {
+    const tc = e.payload?.team_config as Record<string, unknown> | undefined;
+    if (!tc) return false;
+    // If agent has a team name, find that specific team's config
+    if (myTeamName) return tc.teamName === myTeamName;
+    // Fallback: first team_config found (backward compat)
+    return true;
+  });
   if (teamConfigEvent?.payload?.team_config) {
     const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
     teamTaskMode = tc.taskMode as string | undefined;

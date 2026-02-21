@@ -1,5 +1,6 @@
 export { loadTeam } from "./team-loader.js";
 export { TeamRuntime, type TeamServices, type TeamBootstrapResult } from "./team-runtime.js";
+export { TeamManager, type TeamInstance } from "./team-manager.js";
 export {
   TeamLoadError,
   // Core types

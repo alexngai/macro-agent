@@ -577,6 +577,7 @@ export function createAgentManager(
       interactionPatterns,
       // Workspace-related fields (Phase 2)
       role,
+      team_instance,
       streamId,
       streamConfig,
       dataplaneTaskId,
@@ -674,6 +675,7 @@ export function createAgentManager(
         task_id: taskId,
         parent: parent ?? null,
         role: role ?? undefined,
+        team_instance: team_instance ?? undefined,
         config: agentConfig ?? {},
         cwd,
       },
@@ -1258,6 +1260,7 @@ export function createAgentManager(
         task_id: taskId,
         parent: sourceAgent.parent ?? null,
         role: sourceAgent.role ?? undefined,
+        team_instance: sourceAgent.team_instance ?? undefined,
         config: {},
         cwd,
         metadata: { fork_of: sourceAgentId },

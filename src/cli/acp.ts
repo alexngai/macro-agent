@@ -48,6 +48,7 @@ import { createAgentManager } from "../agent/agent-manager.js";
 import { createTaskManager } from "../task/task-manager.js";
 import { createMessageRouter } from "../router/message-router.js";
 import { MacroAgent } from "../acp/macro-agent.js";
+import { TeamManager } from "../teams/team-manager.js";
 import {
   createCombinedServer,
   type CombinedServer,
@@ -304,6 +305,38 @@ async function main() {
     }
   }
 
+  // Create TeamManager for dynamic team loading (server mode only)
+  const teamManager = new TeamManager({ agentManager, messageRouter, eventStore });
+  teamManager.install(); // Composite interceptor/filter/validator
+
+  // Auto-start teams from config
+  if (!options.acp) {
+    // Default team (backward compat)
+    if (mergedConfig.team) {
+      try {
+        const instance = await teamManager.startTeam(mergedConfig.team, defaultCwd);
+        console.error(`[acp] Team '${mergedConfig.team}' started (${instance.id}): root=${instance.result.rootId}, companions=[${instance.result.companionIds.join(", ")}]`);
+      } catch (err) {
+        console.error(`[acp] Failed to start team '${mergedConfig.team}': ${err}`);
+      }
+    }
+
+    // Additional teams with autoStart (skip if already started as default team)
+    if (mergedConfig.teams) {
+      for (const [name, entry] of Object.entries(mergedConfig.teams)) {
+        if (!entry.autoStart) continue;
+        const template = entry.template ?? name;
+        if (template === mergedConfig.team) continue; // Already started above
+        try {
+          const instance = await teamManager.startTeam(template, defaultCwd);
+          console.error(`[acp] Team '${template}' started (${instance.id}): root=${instance.result.rootId}, companions=[${instance.result.companionIds.join(", ")}]`);
+        } catch (err) {
+          console.error(`[acp] Failed to start team '${template}': ${err}`);
+        }
+      }
+    }
+  }
+
   // Create ActivityWatcher for event-driven agent waking
   const sessionProvider = createSessionProviderFromAgentManager(agentManager);
   const wakeHandler = createWakeHandler(sessionProvider, agentManager);
@@ -401,6 +434,10 @@ async function main() {
       }
     }
 
+    try { await teamManager.teardownAll(); } catch (err) {
+      console.error(`[cleanup] TeamManager teardown failed: ${err}`);
+    }
+
     try { await agentManager.close(); } catch (err) {
       console.error(`[cleanup] AgentManager close failed: ${err}`);
     }
@@ -456,7 +493,7 @@ async function main() {
       const port = options.port ?? mergedConfig.port ?? 3001;
 
       combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager, getConnectedProjects },
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager, getConnectedProjects, teamManager },
         { port, host, defaultCwd, serverToken, noAuth }
       );
 

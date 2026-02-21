@@ -170,6 +170,9 @@ program
       }
 
       // Determine team name: CLI flag > merged config
+      if (options.team) {
+        console.warn(chalk.yellow("[DEPRECATED] --team flag on multiagent-cli start is deprecated. Use 'multiagent' with .multiagent/config.json instead."));
+      }
       const teamName = options.team ?? mergedConfig.team;
 
       // Load and initialize team if specified

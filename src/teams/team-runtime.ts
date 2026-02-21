@@ -11,6 +11,11 @@
 import type { EventStore } from "../store/event-store.js";
 import type { MessageRouter } from "../router/message-router.js";
 import type { AgentManager, SpawnInterceptor } from "../agent/agent-manager.js";
+import type {
+  SignalFilter,
+  EmissionValidator,
+  EmissionValidatorResult,
+} from "../router/message-router.js";
 import type { RoleRegistry } from "../roles/types.js";
 import type { SpawnAgentOptions } from "../agent/types.js";
 import type { AgentId } from "../store/types/index.js";
@@ -105,6 +110,9 @@ export class TeamRuntime {
   /** Reverse mapping: agent ID → role name (for signal filter lookups) */
   private agentRoleMap = new Map<AgentId, string>();
 
+  /** Pre-computed per-role allowed signals from channel subscriptions */
+  private roleAllowedSignals = new Map<string, Set<string> | "all">();
+
   /** Lifecycle unsubscribe for deferred peer wiring */
   private peerWiringUnsubscribe?: () => void;
 
@@ -148,14 +156,30 @@ export class TeamRuntime {
    *
    * 1. Register team roles into RoleRegistry
    * 2. Store team_config event in EventStore (for MCP subprocess discovery)
-   * 3. Register spawn interceptor on AgentManager
+   * 3. Instantiate integration strategy
+   *
+   * Note: Does NOT install spawn interceptor, signal filter, or emission
+   * validator on services. Call installOnServices() for standalone use,
+   * or let TeamManager handle composite installation.
    */
-  async initialize(): Promise<void> {
-    const { agentManager, eventStore } = this.services;
+  async initialize(options?: { teamInstanceId?: string }): Promise<void> {
+    const { eventStore } = this.services;
 
     // 1. Register team roles into RoleRegistry (custom layer, highest priority)
     for (const [, resolved] of this.resolved.resolvedRoles) {
-      this.roleRegistry.registerRole(resolved.roleDefinition);
+      const rd = resolved.roleDefinition;
+      const existing = this.roleRegistry.getRole(rd.name);
+      if (existing) {
+        const existingCaps = [...existing.capabilities].sort();
+        const newCaps = [...rd.capabilities].sort();
+        if (existingCaps.length !== newCaps.length || existingCaps.some((c, i) => c !== newCaps[i])) {
+          console.warn(
+            `[TeamRuntime] Role '${rd.name}' conflict: team '${this.manifest.name}' re-registers with different capabilities. ` +
+            `Existing: [${existingCaps.join(", ")}], New: [${newCaps.join(", ")}]`
+          );
+        }
+      }
+      this.roleRegistry.registerRole(rd);
     }
 
     // 2. Store team config in EventStore for cross-process access (RD2)
@@ -185,6 +209,7 @@ export class TeamRuntime {
         summary: `Team '${this.manifest.name}' initialized`,
         team_config: {
           teamName: this.manifest.name,
+          ...(options?.teamInstanceId && { team_instance: options.teamInstanceId }),
           strategy: strategyName,
           strategyConfig,
           taskMode,
@@ -198,7 +223,7 @@ export class TeamRuntime {
 
     await eventStore.persist();
 
-    // 2b. Instantiate integration strategy and call lifecycle hook
+    // 3. Instantiate integration strategy and call lifecycle hook
     try {
       const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
       this.integrationStrategy = defaultStrategyRegistry.get(strategyName, strategyConfig as Record<string, unknown>);
@@ -208,9 +233,6 @@ export class TeamRuntime {
     } catch {
       // Strategy instantiation is best-effort — queue strategy needs merge queue set later
     }
-
-    // 3. Register spawn interceptor
-    agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -219,9 +241,13 @@ export class TeamRuntime {
 
   /**
    * Spawn root and companion agents per the team topology.
+   *
+   * Populates internal state (agentRoleMap, peerSignalFilters) used by
+   * createSignalFilter() and createEmissionValidator(). Call installOnServices()
+   * after bootstrap for standalone use, or let TeamManager handle installation.
    */
   async bootstrap(): Promise<TeamBootstrapResult> {
-    const { agentManager, messageRouter } = this.services;
+    const { agentManager } = this.services;
     const { topology } = this.manifest;
 
     // 1. Spawn root agent
@@ -267,13 +293,10 @@ export class TeamRuntime {
     }
     this.wirePeerRoutes();
 
-    // 4. Install signal filter on message router
-    this.installSignalFilter();
+    // 4. Pre-compute role allowed signals (used by createSignalFilter)
+    this.computeRoleAllowedSignals();
 
-    // 5. Install emission validator on message router
-    this.installEmissionValidator();
-
-    // 6. Set up continuation monitoring for daemon agents (P4.2)
+    // 5. Set up continuation monitoring for daemon agents (P4.2)
     this.monitorContinuations();
 
     return {
@@ -287,10 +310,13 @@ export class TeamRuntime {
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Tear down team: remove spawn interceptor, stop continuation monitoring.
+   * Tear down team: stop continuation monitoring, clean up strategy.
+   *
+   * Note: Does NOT clear spawn interceptor or filters on services.
+   * The caller (TeamManager or standalone code) is responsible for
+   * removing the interceptor/filters from shared services.
    */
   async teardown(): Promise<void> {
-    this.services.agentManager.setSpawnInterceptor(null);
     if (this.lifecycleUnsubscribe) {
       this.lifecycleUnsubscribe();
       this.lifecycleUnsubscribe = undefined;
@@ -362,6 +388,22 @@ export class TeamRuntime {
     return this.peerSignalFilters;
   }
 
+  /** Get the agent → role mapping (for TeamManager agent-team lookups) */
+  getAgentRoleMap(): ReadonlyMap<AgentId, string> {
+    return this.agentRoleMap;
+  }
+
+  /** Register an agent's role mapping (for TeamManager to track dynamically spawned agents) */
+  registerAgent(agentId: AgentId, roleName: string): void {
+    this.agentRoleMap.set(agentId, roleName);
+    this.roleAgentMap.set(roleName, agentId);
+  }
+
+  /** Check if this team owns a given agent */
+  hasAgent(agentId: string): boolean {
+    return this.agentRoleMap.has(agentId as AgentId);
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Continuation Monitoring (P4.2)
   // ─────────────────────────────────────────────────────────────
@@ -418,9 +460,9 @@ export class TeamRuntime {
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Create the spawn interceptor that injects team context into spawn options.
+   * Internal: Create the spawn interceptor that injects team context into spawn options.
    */
-  private createSpawnInterceptor(): SpawnInterceptor {
+  private _createSpawnInterceptor(): SpawnInterceptor {
     return (options: SpawnAgentOptions): SpawnAgentOptions => {
       const roleName = options.role;
       if (!roleName) return options;
@@ -574,25 +616,140 @@ Focus on correctness — your changes go live immediately.`);
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Signal Filtering
+  // Exposed Interceptor / Filter / Validator Factories
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Install a signal filter on the message router.
+   * Create the spawn interceptor for this team.
+   *
+   * Returns a function that injects team context (topics, MCP servers,
+   * env vars, prompt, interaction patterns) into spawn options.
+   * The caller (TeamManager or installOnServices) is responsible for
+   * installing it on AgentManager.
+   */
+  createSpawnInterceptor(): SpawnInterceptor {
+    return this._createSpawnInterceptor();
+  }
+
+  /**
+   * Create the signal filter for this team.
    *
    * Combines two filter sources:
-   * 1. Channel subscription filters (per-role, per-topic): from communication.subscriptions
-   * 2. Peer connection filters (per-agent-pair): from communication.routing.peers
+   * 1. Channel subscription filters (per-role, per-topic)
+   * 2. Peer connection filters (per-agent-pair)
    *
-   * Status events with no details.signal always pass through (backwards compat).
+   * Must be called after bootstrap() so that agentRoleMap and
+   * peerSignalFilters are populated. Returns null if no filtering needed.
    */
-  private installSignalFilter(): void {
-    const { messageRouter } = this.services;
+  createSignalFilter(): SignalFilter | null {
+    return (from: AgentId, to: AgentId, signal: string | undefined): boolean => {
+      // Untagged status events always pass through
+      if (!signal) return true;
 
-    // Pre-compute per-role allowed signals from channel subscriptions.
-    // Key: role name, Value: Set of allowed signal names.
-    // If a role has any subscription without a signals filter, it receives all signals.
-    const roleAllowedSignals = new Map<string, Set<string> | "all">();
+      // Check peer connection filter (directional: from→to)
+      const peerFilter = this.peerSignalFilters.get(`${from}→${to}`);
+      if (peerFilter) {
+        return peerFilter.includes(signal);
+      }
+
+      // Check channel subscription filter for recipient's role
+      const recipientRole = this.agentRoleMap.get(to);
+      if (recipientRole) {
+        const allowed = this.roleAllowedSignals.get(recipientRole);
+        if (allowed && allowed !== "all") {
+          return allowed.has(signal);
+        }
+      }
+
+      // No filter configured — allow delivery
+      return true;
+    };
+  }
+
+  /**
+   * Create the emission validator for this team.
+   *
+   * Checks whether an agent's emitted signal is in its role's allowed
+   * emissions list. Behavior depends on enforcement mode.
+   * Returns null if no emissions config exists.
+   */
+  createEmissionValidator(): EmissionValidator | null {
+    const emissions = this.communication.emissions;
+    const enforcement = this.communication.enforcement ?? "permissive";
+
+    // No emissions config — nothing to enforce
+    if (!emissions || Object.keys(emissions).length === 0) return null;
+
+    return (agentId: AgentId, signal: string | undefined): EmissionValidatorResult => {
+      // Untagged status events are always allowed
+      if (!signal) return { action: "allow" };
+
+      const role = this.agentRoleMap.get(agentId);
+      if (!role) return { action: "allow" };
+
+      const allowedSignals = emissions[role];
+      if (!allowedSignals) return { action: "allow" };
+
+      if (allowedSignals.includes(signal)) {
+        return { action: "allow" };
+      }
+
+      // Signal not in allowed list — enforce
+      const message = `Agent '${agentId}' (role: ${role}) emitted disallowed signal '${signal}'. Allowed: [${allowedSignals.join(", ")}]`;
+
+      switch (enforcement) {
+        case "strict":
+          return { action: "reject", message };
+        case "audit":
+          return { action: "audit", message };
+        case "permissive":
+        default:
+          return { action: "warn", message };
+      }
+    };
+  }
+
+  /**
+   * Convenience method: install interceptor, signal filter, and emission
+   * validator directly on the shared services.
+   *
+   * Use this for standalone operation (without TeamManager).
+   * TeamManager uses the individual create* methods for composite dispatch.
+   */
+  installOnServices(): void {
+    const { agentManager, messageRouter } = this.services;
+
+    agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
+
+    const signalFilter = this.createSignalFilter();
+    if (signalFilter && messageRouter.setSignalFilter) {
+      messageRouter.setSignalFilter(signalFilter);
+    }
+
+    const emissionValidator = this.createEmissionValidator();
+    if (emissionValidator && messageRouter.setEmissionValidator) {
+      messageRouter.setEmissionValidator(emissionValidator);
+    }
+  }
+
+  /**
+   * Convenience method: uninstall interceptor and filters from services.
+   * Use on teardown for standalone operation.
+   */
+  uninstallFromServices(): void {
+    this.services.agentManager.setSpawnInterceptor(null);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Internal: Pre-compute role allowed signals
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Pre-compute per-role allowed signals from channel subscriptions.
+   * Called during bootstrap() so createSignalFilter() can use the result.
+   */
+  private computeRoleAllowedSignals(): void {
+    this.roleAllowedSignals.clear();
 
     for (const [roleName, subs] of Object.entries(this.communication.subscriptions ?? {})) {
       let allowed: Set<string> | "all" = new Set<string>();
@@ -608,80 +765,7 @@ Focus on correctness — your changes go live immediately.`);
         }
       }
 
-      roleAllowedSignals.set(roleName, allowed);
-    }
-
-    if (messageRouter.setSignalFilter) {
-      messageRouter.setSignalFilter((from, to, signal) => {
-        // Untagged status events always pass through
-        if (!signal) return true;
-
-        // Check peer connection filter (directional: from→to)
-        const peerFilter = this.peerSignalFilters.get(`${from}→${to}`);
-        if (peerFilter) {
-          return peerFilter.includes(signal);
-        }
-
-        // Check channel subscription filter for recipient's role
-        const recipientRole = this.agentRoleMap.get(to);
-        if (recipientRole) {
-          const allowed = roleAllowedSignals.get(recipientRole);
-          if (allowed && allowed !== "all") {
-            return allowed.has(signal);
-          }
-        }
-
-        // No filter configured — allow delivery
-        return true;
-      });
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Emission Validation
-  // ─────────────────────────────────────────────────────────────
-
-  /**
-   * Install emission validator on the message router.
-   * Checks whether an agent's emitted signal is in its role's allowed emissions list.
-   * Behavior depends on enforcement mode: strict (reject), permissive (warn), audit (record).
-   */
-  private installEmissionValidator(): void {
-    const { messageRouter } = this.services;
-    const emissions = this.communication.emissions;
-    const enforcement = this.communication.enforcement ?? "permissive";
-
-    // No emissions config — nothing to enforce
-    if (!emissions || Object.keys(emissions).length === 0) return;
-
-    if (messageRouter.setEmissionValidator) {
-      messageRouter.setEmissionValidator((agentId, signal) => {
-        // Untagged status events are always allowed
-        if (!signal) return { action: "allow" };
-
-        const role = this.agentRoleMap.get(agentId);
-        if (!role) return { action: "allow" };
-
-        const allowedSignals = emissions[role];
-        if (!allowedSignals) return { action: "allow" };
-
-        if (allowedSignals.includes(signal)) {
-          return { action: "allow" };
-        }
-
-        // Signal not in allowed list — enforce
-        const message = `Agent '${agentId}' (role: ${role}) emitted disallowed signal '${signal}'. Allowed: [${allowedSignals.join(", ")}]`;
-
-        switch (enforcement) {
-          case "strict":
-            return { action: "reject", message };
-          case "audit":
-            return { action: "audit", message };
-          case "permissive":
-          default:
-            return { action: "warn", message };
-        }
-      });
+      this.roleAllowedSignals.set(roleName, allowed);
     }
   }
 
