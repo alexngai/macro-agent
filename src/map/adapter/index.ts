@@ -155,4 +155,9 @@ export {
   registerResumeExtension,
   unregisterResumeExtension,
   type ResumeExtensionServices,
+  // Stream/checkpoint/diffStack/mergeQueue
+  registerStreamExtensions,
+  unregisterStreamExtensions,
+  STREAM_EXTENSION_METHODS,
+  type StreamExtensionServices,
 } from "./extensions/index.js";

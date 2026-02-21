@@ -31,9 +31,11 @@ import {
   registerTaskExtensions,
   registerResumeExtension,
   registerAgentLifecycleExtensions,
+  registerStreamExtensions,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
+  type StreamExtensionServices,
 } from "../map/adapter/index.js";
 import type { Agent, AgentId } from "../store/types/index.js";
 import type { Address, SendOptions } from "../map/types.js";
@@ -73,6 +75,8 @@ export interface CombinedServerServices {
   agentTokenManager?: AgentTokenManager;
   /** Get connected opentasks project paths (for health endpoint) */
   getConnectedProjects?: () => string[];
+  /** Optional stream extension services for git-cascade stream/checkpoint/merge-queue features */
+  streamExtensions?: StreamExtensionServices;
 }
 
 export interface CombinedServerConfig {
@@ -368,6 +372,11 @@ export function createCombinedServer(
       taskToolContext: services.taskToolContext,
       agentTokenManager: services.agentTokenManager,
     });
+
+    // Register stream/checkpoint/diffStack/mergeQueue extensions
+    if (services.streamExtensions) {
+      registerStreamExtensions(mapAdapter, services.streamExtensions);
+    }
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);
   }
