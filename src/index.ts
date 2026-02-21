@@ -292,3 +292,19 @@ export {
   type WakeSessionProvider,
   type WakeAgentOptions,
 } from './agent/wake.js';
+
+// Cognitive - Atlas compute backend
+export {
+  MacroAgentBackend,
+  createMacroAgentBackend,
+  AnalystRole,
+  convertUpdatesToSession,
+  updateSessionFromEvent,
+  type MacroAgentBackendConfig,
+  type CognitiveAgentSession,
+  type CognitiveAgentMessage,
+  type CognitiveToolCall,
+  type CognitiveTask,
+  type CognitiveAgentState,
+  type CognitiveAgentSpawnConfig,
+} from './cognitive/index.js';
