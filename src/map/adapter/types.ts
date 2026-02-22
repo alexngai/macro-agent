@@ -175,7 +175,9 @@ export type MAPEventType =
   | "diffstack.created"
   | "diffstack.updated"
   | "merge_request.created"
-  | "merge_request.updated";
+  | "merge_request.updated"
+  // Cognitive session events
+  | "session.complete";
 
 /**
  * Filter for event subscriptions.

@@ -136,8 +136,24 @@ export interface MacroAgentExtensions {
   /** Observability configuration */
   observability?: ObservabilityConfig;
 
+  /** Atlas cognitive learning configuration */
+  atlas?: AtlasConfig;
+
   /** Allow extension fields for interop with openteams Record<string, unknown> */
   [key: string]: unknown;
+}
+
+/**
+ * Atlas configuration from team YAML.
+ * When enabled, initCognitiveTeam() will attempt to auto-initialize Atlas.
+ */
+export interface AtlasConfig {
+  /** Enable Atlas for this team. Default: false */
+  enabled: boolean;
+  /** Working directory for Atlas data. Default: '.atlas' relative to project root */
+  workDir?: string;
+  /** Analysis mode: 'heuristic' (no LLM) or 'agentic' (LLM-assisted). Default: 'heuristic' */
+  analysisMode?: string;
 }
 
 export interface TaskAssignmentConfig {

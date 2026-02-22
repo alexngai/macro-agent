@@ -83,6 +83,14 @@ export {
   type StreamExtensionServices,
 } from "./streams.js";
 
+// Cognitive extensions
+export {
+  registerCognitiveExtensions,
+  unregisterCognitiveExtensions,
+  COGNITIVE_EXTENSION_METHODS,
+  type CognitiveExtensionServices,
+} from "./cognitive.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
@@ -94,6 +102,7 @@ import type { UpdateMetadataExtensionServices } from "./update-metadata.js";
 import type { MCPBridgeServices } from "./mcp-bridge.js";
 import type { AgentLifecycleExtensionServices } from "./agent-lifecycle.js";
 import type { StreamExtensionServices } from "./streams.js";
+import type { CognitiveExtensionServices } from "./cognitive.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
@@ -104,6 +113,7 @@ import { registerUpdateMetadataExtension } from "./update-metadata.js";
 import { registerMCPBridgeExtensions, unregisterMCPBridgeExtensions, MCP_BRIDGE_METHODS } from "./mcp-bridge.js";
 import { registerAgentLifecycleExtensions, unregisterAgentLifecycleExtensions, AGENT_LIFECYCLE_METHODS } from "./agent-lifecycle.js";
 import { registerStreamExtensions, unregisterStreamExtensions, STREAM_EXTENSION_METHODS } from "./streams.js";
+import { registerCognitiveExtensions, unregisterCognitiveExtensions, COGNITIVE_EXTENSION_METHODS } from "./cognitive.js";
 
 // =============================================================================
 // Combined Registration
@@ -123,6 +133,7 @@ export interface MacroExtensionServices {
   mcpBridge?: MCPBridgeServices;
   agentLifecycle?: AgentLifecycleExtensionServices;
   streams?: StreamExtensionServices;
+  cognitive?: CognitiveExtensionServices;
 }
 
 /**
@@ -199,6 +210,10 @@ export function registerMacroExtensions(
   if (services.streams) {
     registerStreamExtensions(adapter, services.streams);
   }
+
+  if (services.cognitive) {
+    registerCognitiveExtensions(adapter, services.cognitive);
+  }
 }
 
 /**
@@ -233,6 +248,8 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
   unregisterAgentLifecycleExtensions(adapter);
   // Also unregister stream/checkpoint/diffStack/mergeQueue extensions
   unregisterStreamExtensions(adapter);
+  // Also unregister cognitive extensions
+  unregisterCognitiveExtensions(adapter);
 }
 
 // =============================================================================
@@ -271,6 +288,8 @@ export const MACRO_EXTENSION_METHODS = [
   ...AGENT_LIFECYCLE_METHODS,
   // Stream/checkpoint/diffStack/mergeQueue extensions
   ...STREAM_EXTENSION_METHODS,
+  // Cognitive extensions
+  ...COGNITIVE_EXTENSION_METHODS,
 ] as const;
 
 /**
@@ -313,4 +332,8 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   // MergeQueue extensions
   "_macro/mergeQueue/status": "canQuery",
   "_macro/mergeQueue/get": "canQuery",
+  // Cognitive extensions
+  "_macro/cognitive/command": "canManageTasks",
+  "_macro/cognitive/status": "canQuery",
+  "_macro/cognitive/query": "canQuery",
 };

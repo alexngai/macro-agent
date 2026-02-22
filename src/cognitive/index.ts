@@ -16,6 +16,17 @@ export type {
   CognitiveAgentSpawnConfig,
   MacroAgentBackendConfig,
   MacroSessionState,
+  CognitiveBatchConfig,
+  CognitiveBatchHandle,
+  CognitiveBatchResult,
+  CognitiveBatchTaskResult,
+  CognitiveTrajectory,
+  CognitiveStep,
+  CognitiveOutcome,
+  AtlasInstance,
+  CognitiveOperation,
+  SessionCompleteEvent,
+  SessionEventEmitter,
 } from "./types.js";
 
 // Backend
@@ -32,6 +43,9 @@ export {
   convertUpdatesToSession,
   updateSessionFromEvent,
 } from "./session-converter.js";
+
+// Trajectory extraction
+export { extractTrajectory } from "./trajectory-extractor.js";
 
 // Team lifecycle (Phase 2)
 export {
