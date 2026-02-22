@@ -288,15 +288,23 @@ async function startLegacy() {
 
     const strategyName = tc.strategy as string | undefined;
     if (strategyName) {
-      try {
-        const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
-        integrationStrategy = defaultStrategyRegistry.get(
-          strategyName,
-          tc.strategyConfig as Record<string, unknown> | undefined
-        );
-        debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
-      } catch (err) {
-        debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
+      // Queue strategy requires merge queue which is only available in the main process.
+      // Skip it so the worker handler falls through to MERGE_REQUEST signal emission,
+      // which the main server's TeamRuntime polls for and submits to the real merge queue.
+      if (strategyName === "queue") {
+        debugLog(`[MCP] Skipping queue strategy in subprocess (no merge queue available). ` +
+          `Worker done() will emit MERGE_REQUEST signal for main process to handle.`);
+      } else {
+        try {
+          const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
+          integrationStrategy = defaultStrategyRegistry.get(
+            strategyName,
+            tc.strategyConfig as Record<string, unknown> | undefined
+          );
+          debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
+        } catch (err) {
+          debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
+        }
       }
     }
   }

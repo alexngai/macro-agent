@@ -211,7 +211,7 @@ describe("Team Template Loading", () => {
     const manifest = await loadTeam("structured", roleRegistry, PROJECT_ROOT);
 
     expect(manifest.name).toBe("structured");
-    expect(manifest.roles).toEqual(["lead", "developer", "reviewer"]);
+    expect(manifest.roles).toEqual(["lead", "developer", "reviewer", "merger"]);
     expect(manifest.macro_agent.task_assignment?.mode).toBe("push");
     expect(manifest.macro_agent.integration?.strategy).toBe("queue");
   });
@@ -1304,9 +1304,9 @@ describe("TeamRuntime", () => {
       await runtime.initialize();
       const result = await runtime.bootstrap();
 
-      // Root (lead) + 1 companion (reviewer)
-      expect(agentManager.spawn).toHaveBeenCalledTimes(2);
-      expect(result.companionIds).toHaveLength(1);
+      // Root (lead) + 2 companions (reviewer, merger)
+      expect(agentManager.spawn).toHaveBeenCalledTimes(3);
+      expect(result.companionIds).toHaveLength(2);
 
       // Verify no pull-mode interaction patterns injected
       const rootCall = vi.mocked(agentManager.spawn).mock.calls[0][0];
@@ -2026,5 +2026,538 @@ describe("openteams Migration: TeamRuntime", () => {
       expect(serializedRoles.grinder.description).toBeDefined();
       expect(serializedRoles.judge.description).toBeDefined();
     });
+  });
+});
+
+// =============================================================================
+// Tests: Auto-Scaling
+// =============================================================================
+
+describe("TeamRuntime auto-scaling", () => {
+  let roleRegistry: DefaultRoleRegistry;
+  let agentManager: AgentManager;
+  let messageRouter: MessageRouter;
+  let eventStore: EventStore;
+
+  beforeEach(() => {
+    roleRegistry = new DefaultRoleRegistry();
+    eventStore = createMockEventStore();
+    messageRouter = createMockMessageRouter();
+    agentManager = createMockAgentManager(roleRegistry);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createScalingTemplate(scalingConfig: {
+    min_workers?: number;
+    max_workers?: number;
+    scale_on?: "task_queue_depth" | "manual";
+    idle_drain?: boolean;
+  }): MacroResolvedTemplate {
+    const workerRole: ResolvedTeamRole = {
+      name: "grinder",
+      baseRole: "worker",
+      capabilities: ["file.read", "file.write", "task.claim", "lifecycle.done"],
+      roleDefinition: {
+        name: "grinder",
+        capabilities: ["file.read", "file.write", "task.claim", "lifecycle.done"],
+      },
+    };
+
+    const plannerRole: ResolvedTeamRole = {
+      name: "planner",
+      baseRole: "coordinator",
+      capabilities: ["*"],
+      roleDefinition: {
+        name: "planner",
+        capabilities: ["*"],
+      },
+    };
+
+    return {
+      template: {
+        manifest: {
+          name: "test-scaling",
+          version: 1,
+          roles: ["planner", "grinder"],
+          topology: {
+            root: { role: "planner", prompt: "prompts/planner.md" },
+            spawn_rules: { planner: ["grinder"], grinder: [] },
+          },
+        },
+        roles: new Map(),
+        prompts: new Map(),
+        mcpServers: new Map<string, McpServerEntry[]>(),
+        sourcePath: "",
+      },
+      resolvedRoles: new Map<string, ResolvedTeamRole>([
+        ["planner", plannerRole],
+        ["grinder", workerRole],
+      ]),
+      macroAgent: {
+        task_assignment: { mode: "pull" as const },
+        lifecycle: { scaling: scalingConfig },
+      },
+    };
+  }
+
+  it("spawns worker when task queue depth exceeds active workers", async () => {
+    const mockTaskBackend = {
+      listClaimable: vi.fn().mockResolvedValue([
+        { id: "t1", title: "Task 1" },
+        { id: "t2", title: "Task 2" },
+      ]),
+    };
+
+    // No active workers initially
+    vi.mocked(agentManager.list).mockReturnValue([]);
+
+    const services: TeamServices = {
+      agentManager, messageRouter, eventStore,
+      taskBackend: mockTaskBackend as any,
+    };
+
+    const resolved = createScalingTemplate({
+      max_workers: 5,
+      scale_on: "task_queue_depth",
+    });
+    const runtime = new TeamRuntime(resolved, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    // Advance timer to trigger scaling check (5s interval)
+    await vi.advanceTimersByTimeAsync(5_100);
+
+    // Should have spawned a grinder as child of root
+    const spawnCalls = vi.mocked(agentManager.spawn).mock.calls;
+    const scalingSpawn = spawnCalls.find(
+      call => call[0].role === "grinder" && call[0].parent !== null && call[0].task?.includes("auto-scaled")
+    );
+    expect(scalingSpawn).toBeDefined();
+
+    await runtime.teardown();
+  });
+
+  it("respects max_workers cap", async () => {
+    const mockTaskBackend = {
+      listClaimable: vi.fn().mockResolvedValue([
+        { id: "t1", title: "Task 1" },
+        { id: "t2", title: "Task 2" },
+      ]),
+    };
+
+    // Already at max workers
+    vi.mocked(agentManager.list).mockReturnValue([
+      { id: "w1", role: "grinder", state: "running" } as any,
+      { id: "w2", role: "grinder", state: "running" } as any,
+    ]);
+
+    const services: TeamServices = {
+      agentManager, messageRouter, eventStore,
+      taskBackend: mockTaskBackend as any,
+    };
+
+    const resolved = createScalingTemplate({
+      max_workers: 2,
+      scale_on: "task_queue_depth",
+    });
+    const runtime = new TeamRuntime(resolved, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    // Register the workers in the runtime's agentRoleMap
+    runtime.registerAgent("w1" as AgentId, "grinder");
+    runtime.registerAgent("w2" as AgentId, "grinder");
+
+    const spawnCountBefore = vi.mocked(agentManager.spawn).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5_100);
+
+    // No additional spawns — already at max
+    const scalingSpawns = vi.mocked(agentManager.spawn).mock.calls.slice(spawnCountBefore).filter(
+      call => call[0].task?.includes("auto-scaled")
+    );
+    expect(scalingSpawns).toHaveLength(0);
+
+    await runtime.teardown();
+  });
+
+  it("does not spawn when scale_on is not task_queue_depth", async () => {
+    const mockTaskBackend = {
+      listClaimable: vi.fn().mockResolvedValue([
+        { id: "t1", title: "Task 1" },
+      ]),
+    };
+
+    const services: TeamServices = {
+      agentManager, messageRouter, eventStore,
+      taskBackend: mockTaskBackend as any,
+    };
+
+    const resolved = createScalingTemplate({
+      max_workers: 5,
+      scale_on: "manual",
+    });
+    const runtime = new TeamRuntime(resolved, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    const spawnCountBefore = vi.mocked(agentManager.spawn).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // No scaling spawns
+    const scalingSpawns = vi.mocked(agentManager.spawn).mock.calls.slice(spawnCountBefore).filter(
+      call => call[0].task?.includes("auto-scaled")
+    );
+    expect(scalingSpawns).toHaveLength(0);
+
+    // listClaimable should not have been called
+    expect(mockTaskBackend.listClaimable).not.toHaveBeenCalled();
+
+    await runtime.teardown();
+  });
+
+  it("respects cooldown between scale-up actions", async () => {
+    const mockTaskBackend = {
+      listClaimable: vi.fn().mockResolvedValue([
+        { id: "t1" }, { id: "t2" }, { id: "t3" },
+      ]),
+    };
+
+    vi.mocked(agentManager.list).mockReturnValue([]);
+
+    const services: TeamServices = {
+      agentManager, messageRouter, eventStore,
+      taskBackend: mockTaskBackend as any,
+    };
+
+    const resolved = createScalingTemplate({
+      max_workers: 10,
+      scale_on: "task_queue_depth",
+    });
+    const runtime = new TeamRuntime(resolved, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    const spawnCountBefore = vi.mocked(agentManager.spawn).mock.calls.length;
+
+    // First tick at 5s — should spawn
+    await vi.advanceTimersByTimeAsync(5_100);
+    const afterFirst = vi.mocked(agentManager.spawn).mock.calls.slice(spawnCountBefore).filter(
+      call => call[0].task?.includes("auto-scaled")
+    );
+    expect(afterFirst).toHaveLength(1);
+
+    // Second tick at 10s — cooldown (10s from first spawn) not elapsed
+    await vi.advanceTimersByTimeAsync(5_000);
+    const afterSecond = vi.mocked(agentManager.spawn).mock.calls.slice(spawnCountBefore).filter(
+      call => call[0].task?.includes("auto-scaled")
+    );
+    expect(afterSecond).toHaveLength(1); // Still just 1
+
+    // Third tick at 15s — cooldown elapsed, should spawn again
+    await vi.advanceTimersByTimeAsync(5_100);
+    const afterThird = vi.mocked(agentManager.spawn).mock.calls.slice(spawnCountBefore).filter(
+      call => call[0].task?.includes("auto-scaled")
+    );
+    expect(afterThird).toHaveLength(2);
+
+    await runtime.teardown();
+  });
+});
+
+// =============================================================================
+// Tests: Workspace Isolation (Capability-Based)
+// =============================================================================
+
+describe("Workspace Isolation", () => {
+  let roleRegistry: DefaultRoleRegistry;
+  let agentManager: AgentManager;
+  let messageRouter: MessageRouter;
+  let eventStore: EventStore;
+
+  beforeEach(() => {
+    roleRegistry = new DefaultRoleRegistry();
+    agentManager = createMockAgentManager(roleRegistry);
+    messageRouter = createMockMessageRouter();
+    eventStore = createMockEventStore();
+  });
+
+  function createWorkspaceTemplate(): MacroResolvedTemplate {
+    const resolvedRoles = new Map<string, ResolvedTeamRole>();
+    resolvedRoles.set("lead", {
+      name: "lead",
+      baseRole: "coordinator",
+      capabilities: [
+        "file.read", "file.write", "task.create", "task.assign",
+        "agent.spawn.worker", "agent.terminate", "workspace.stream",
+      ],
+      roleDefinition: roleRegistry.resolveRole("coordinator"),
+    });
+    resolvedRoles.set("developer", {
+      name: "developer",
+      baseRole: "worker",
+      capabilities: [
+        "file.read", "file.write", "git.commit", "lifecycle.done",
+        "workspace.worktree",
+      ],
+      roleDefinition: roleRegistry.resolveRole("worker"),
+    });
+    resolvedRoles.set("merger", {
+      name: "merger",
+      baseRole: "integrator",
+      capabilities: [
+        "file.read", "file.write", "git.merge", "lifecycle.done",
+        "workspace.integrate",
+      ],
+      roleDefinition: roleRegistry.resolveRole("integrator"),
+    });
+    resolvedRoles.set("watcher", {
+      name: "watcher",
+      baseRole: "monitor",
+      capabilities: ["file.read", "msg.send"],
+      roleDefinition: roleRegistry.resolveRole("monitor"),
+    });
+
+    return {
+      template: {
+        manifest: {
+          name: "workspace-test",
+          version: 1,
+          roles: ["lead", "developer", "merger", "watcher"],
+          topology: {
+            root: { role: "lead" },
+            companions: [{ role: "merger" }],
+          },
+          communication: {},
+        },
+        roles: new Map(),
+        prompts: new Map(),
+        mcpServers: new Map<string, McpServerEntry[]>(),
+        sourcePath: "",
+      },
+      resolvedRoles,
+      macroAgent: {
+        integration: { strategy: "queue" },
+        task_assignment: { mode: "push" as const },
+      },
+    };
+  }
+
+  it("spawn interceptor injects streamId for role with workspace.worktree", async () => {
+    const template = createWorkspaceTemplate();
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-1"),
+      getMergeQueue: vi.fn().mockReturnValue(null),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    // Now spawn a developer (extends worker) through the interceptor
+    const interceptor = runtime.createSpawnInterceptor();
+    const result = interceptor({
+      task: "implement feature",
+      role: "developer",
+      parent: "agent_0",
+    });
+
+    expect(result.streamId).toBe("stream-1");
+    expect(result.dataplaneTaskId).toBeDefined();
+    expect(result.capabilities).toContain("workspace.worktree");
+
+    await runtime.teardown();
+  });
+
+  it("spawn interceptor injects streamId for role with workspace.integrate", async () => {
+    const template = createWorkspaceTemplate();
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-1"),
+      getMergeQueue: vi.fn().mockReturnValue(null),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    const interceptor = runtime.createSpawnInterceptor();
+    const result = interceptor({
+      task: "merge changes",
+      role: "merger",
+      parent: "agent_0",
+    });
+
+    expect(result.streamId).toBe("stream-1");
+    expect(result.dataplaneTaskId).toBeUndefined(); // Integrators don't get dataplaneTaskId
+    expect(result.capabilities).toContain("workspace.integrate");
+
+    await runtime.teardown();
+  });
+
+  it("spawn interceptor does NOT inject workspace fields for role without workspace capability", async () => {
+    const template = createWorkspaceTemplate();
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-1"),
+      getMergeQueue: vi.fn().mockReturnValue(null),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    const interceptor = runtime.createSpawnInterceptor();
+    const result = interceptor({
+      task: "monitor health",
+      role: "watcher",
+      parent: "agent_0",
+    });
+
+    // Monitor role has no workspace capabilities
+    expect(result.streamId).toBeUndefined();
+    expect(result.streamConfig).toBeUndefined();
+    expect(result.dataplaneTaskId).toBeUndefined();
+
+    await runtime.teardown();
+  });
+
+  it("spawn interceptor does not overwrite explicit workspace values", async () => {
+    const template = createWorkspaceTemplate();
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-1"),
+      getMergeQueue: vi.fn().mockReturnValue(null),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    const interceptor = runtime.createSpawnInterceptor();
+    const result = interceptor({
+      task: "implement feature",
+      role: "developer",
+      parent: "agent_0",
+      streamId: "custom-stream",
+      dataplaneTaskId: "custom-task",
+    });
+
+    // Explicit values should NOT be overwritten
+    expect(result.streamId).toBe("custom-stream");
+    expect(result.dataplaneTaskId).toBe("custom-task");
+
+    await runtime.teardown();
+  });
+
+  it("merge queue mr:submitted event wakes integrator agent", async () => {
+    const template = createWorkspaceTemplate();
+    let mergeQueueCallback: ((event: any) => void) | null = null;
+    const mockMergeQueue = {
+      onEvent: vi.fn((cb: (event: any) => void) => {
+        mergeQueueCallback = cb;
+        return () => { mergeQueueCallback = null; };
+      }),
+    };
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-1"),
+      getMergeQueue: vi.fn().mockReturnValue(mockMergeQueue),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    // Verify merge queue subscription was set up
+    expect(mockMergeQueue.onEvent).toHaveBeenCalled();
+    expect(mergeQueueCallback).not.toBeNull();
+
+    // Simulate a merge request submission
+    mergeQueueCallback!({
+      type: "mr:submitted",
+      data: {
+        mrId: "mr-123",
+        workerAgentId: "worker-1",
+        workerBranch: "worker/dev-1/task-1@123",
+      },
+    });
+
+    // Should have prompted the merger agent (companion, agent_1)
+    expect(agentManager.prompt).toHaveBeenCalledWith(
+      "agent_1", // merger is the companion agent
+      expect.stringContaining("mr-123"),
+    );
+
+    await runtime.teardown();
+  });
+
+  it("creates integration stream during bootstrap when workspaceManager is available", async () => {
+    const template = createWorkspaceTemplate();
+    const mockWorkspaceManager = {
+      createIntegrationStream: vi.fn().mockReturnValue("stream-42"),
+      getMergeQueue: vi.fn().mockReturnValue(null),
+      getWorkspace: vi.fn(),
+    };
+
+    const services: TeamServices = {
+      agentManager,
+      messageRouter,
+      eventStore,
+      workspaceManager: mockWorkspaceManager as any,
+    };
+
+    const runtime = new TeamRuntime(template, services);
+    await runtime.initialize();
+    await runtime.bootstrap();
+
+    expect(mockWorkspaceManager.createIntegrationStream).toHaveBeenCalledWith(
+      "agent_0", // root agent ID
+      { name: "workspace-test", forkFrom: "main" },
+    );
+    expect(runtime.getTeamStreamId()).toBe("stream-42");
+
+    await runtime.teardown();
   });
 });

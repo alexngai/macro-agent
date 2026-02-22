@@ -1752,6 +1752,37 @@ describe("handlers", () => {
 
       expect(handler).toBeDefined();
     });
+
+    it("should return worker handler for team role with workspace.worktree capability", () => {
+      const deps = createMockDeps();
+      const registry = createHandlerRegistry(deps as any);
+
+      // "developer" extends "worker" — gets workspace.worktree capability
+      const handler = getHandler("developer", registry, deps as any, ["workspace.worktree"]);
+
+      // Should be the worker handler, not generic
+      expect(handler).toBe(registry.get("worker"));
+    });
+
+    it("should return integrator handler for team role with workspace.integrate capability", () => {
+      const deps = createMockDeps();
+      const registry = createHandlerRegistry(deps as any);
+
+      const handler = getHandler("merger", registry, deps as any, ["workspace.integrate"]);
+
+      expect(handler).toBe(registry.get("integrator"));
+    });
+
+    it("should return generic handler when capabilities have no workspace match", () => {
+      const deps = createMockDeps();
+      const registry = createHandlerRegistry(deps as any);
+
+      const handler = getHandler("watcher", registry, deps as any, ["msg.send", "file.read"]);
+
+      // No workspace capability → falls through to generic
+      expect(handler).not.toBe(registry.get("worker"));
+      expect(handler).not.toBe(registry.get("integrator"));
+    });
   });
 
   describe("dispatchDone", () => {
@@ -1793,6 +1824,28 @@ describe("handlers", () => {
 
       expect(result.shouldTerminate).toBe(true);
       expect(result.signalsEmitted).toContain("STATUS");
+    });
+
+    it("should dispatch team role with workspace.worktree to worker handler", async () => {
+      const deps = createMockDeps();
+      const context: LifecycleContext = {
+        agentId: "developer-1",
+        role: "developer",
+        capabilities: ["workspace.worktree", "lifecycle.done", "file.read"],
+      };
+      const args: DoneArgs = { status: "completed" };
+      const cleanupStatus: CleanupStatus = { ready: true };
+
+      const result = await dispatchDone(
+        context,
+        args,
+        cleanupStatus,
+        deps as any,
+      );
+
+      // Should have gone through the worker handler path
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.signalsEmitted).toContain("WORKER_DONE");
     });
 
     it("should use custom registry when provided", async () => {

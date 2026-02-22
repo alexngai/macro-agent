@@ -80,6 +80,8 @@ export interface CombinedServerServices {
   streamExtensions?: StreamExtensionServices;
   /** Optional team manager for dynamic team management */
   teamManager?: TeamManager;
+  /** Optional workspace manager for workspace isolation and merge queue */
+  workspaceManager?: import("../workspace/types.js").WorkspaceManager;
 }
 
 export interface CombinedServerConfig {

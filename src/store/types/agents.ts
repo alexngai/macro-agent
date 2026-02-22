@@ -64,4 +64,6 @@ export interface AgentMetadataUpdate {
   plan?: Array<{ content: string; priority: string; status: string }>;
   metadata?: Record<string, unknown>;
   team_instance?: string;
+  /** Override the agent's working directory (e.g., to workspace worktree path) */
+  cwd?: string;
 }

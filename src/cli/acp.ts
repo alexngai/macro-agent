@@ -238,6 +238,24 @@ async function main() {
     agentTokenManager = new AgentTokenManager();
   }
 
+  // Create WorkspaceManager for workspace isolation (optional — requires git repo)
+  let workspaceManager: import("../workspace/types.js").WorkspaceManager | undefined;
+  try {
+    const { createWorkspaceManager } = await import("../workspace/workspace-manager.js");
+    const poolSize = parseInt(process.env.MACRO_WORKSPACE_POOL_SIZE ?? "10", 10);
+    workspaceManager = createWorkspaceManager({
+      enabled: true,
+      repoPath: defaultCwd,
+      pool: {
+        enabled: poolSize > 0,
+        maxSize: poolSize,
+      },
+    });
+    console.error(`[acp] WorkspaceManager created (pool: ${poolSize})`);
+  } catch (err) {
+    console.error(`[acp] WorkspaceManager not available: ${err instanceof Error ? err.message : err}`);
+  }
+
   // Now create the agentManager with the real router
   agentManager = createAgentManager(eventStore, messageRouter, {
     serverUrl,
@@ -245,6 +263,7 @@ async function main() {
     agentTokenManager: serverUrl ? agentTokenManager : undefined,
     taskBackend: mergedConfig.task?.backend,
     openTasksSocketPath: mergedConfig.task?.opentasks?.socket_path,
+    workspaceManager,
   });
   const taskManager = createTaskManager(eventStore);
 
@@ -306,7 +325,7 @@ async function main() {
   }
 
   // Create TeamManager for dynamic team loading (server mode only)
-  const teamManager = new TeamManager({ agentManager, messageRouter, eventStore });
+  const teamManager = new TeamManager({ agentManager, messageRouter, eventStore, workspaceManager, taskBackend });
   teamManager.install(); // Composite interceptor/filter/validator
 
   // Auto-start teams from config
@@ -493,7 +512,7 @@ async function main() {
       const port = options.port ?? mergedConfig.port ?? 3001;
 
       combinedServer = createCombinedServer(
-        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager, getConnectedProjects, teamManager },
+        { eventStore, agentManager, taskManager, messageRouter, activityWatcher, taskBackend, taskToolProvider, taskToolContext, agentTokenManager, getConnectedProjects, teamManager, workspaceManager },
         { port, host, defaultCwd, serverToken, noAuth }
       );
 

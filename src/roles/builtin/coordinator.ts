@@ -11,6 +11,7 @@ import {
   TASK_CAPABILITIES,
   AGENT_CAPABILITIES,
   MSG_CAPABILITIES,
+  WORKSPACE_CAPABILITIES,
 } from "../capabilities.js";
 
 /**
@@ -42,6 +43,7 @@ export const CoordinatorRole: RoleDefinition = {
     MSG_CAPABILITIES.SEND,
     MSG_CAPABILITIES.BROADCAST,
     MSG_CAPABILITIES.SUBSCRIBE,
+    WORKSPACE_CAPABILITIES.STREAM,
     // Note: lifecycle.done is optional, configured per-coordinator
   ],
 

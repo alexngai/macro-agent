@@ -26,6 +26,7 @@ import type {
   PeerConnection,
 } from "./types.js";
 import type { IntegrationStrategy } from "../workspace/strategies/types.js";
+import { WORKSPACE_CAPABILITIES } from "../roles/capabilities.js";
 
 // =============================================================================
 // Types
@@ -35,6 +36,10 @@ export interface TeamServices {
   agentManager: AgentManager;
   messageRouter: MessageRouter;
   eventStore: EventStore;
+  /** Optional workspace manager for merge queue wiring */
+  workspaceManager?: import("../workspace/types.js").WorkspaceManager;
+  /** Optional task backend for auto-scaling queue depth checks */
+  taskBackend?: import("../task/backend/types.js").TaskBackend;
 }
 
 export interface TeamBootstrapResult {
@@ -91,6 +96,12 @@ export class TeamRuntime {
   private roleRegistry: RoleRegistry;
   private lifecycleUnsubscribe?: () => void;
   private integrationStrategy?: IntegrationStrategy;
+  private scalingTimer?: ReturnType<typeof setInterval>;
+  private lastScaleUpTime = 0;
+  private teamStreamId?: string;
+  private mergeQueueUnsub?: () => void;
+  private mergeRequestPollTimer?: ReturnType<typeof setInterval>;
+  private lastMergeRequestSeen = 0;
 
   /** The resolved template (canonical internal representation) */
   private readonly resolved: MacroResolvedTemplate;
@@ -230,6 +241,16 @@ export class TeamRuntime {
       if (this.integrationStrategy.initialize) {
         await this.integrationStrategy.initialize();
       }
+
+      // Wire merge queue to queue strategy if workspace manager is available
+      if (
+        this.services.workspaceManager &&
+        strategyName === "queue" &&
+        "setMergeQueue" in this.integrationStrategy
+      ) {
+        const mergeQueue = this.services.workspaceManager.getMergeQueue();
+        (this.integrationStrategy as { setMergeQueue(q: typeof mergeQueue): void }).setMergeQueue(mergeQueue);
+      }
     } catch {
       // Strategy instantiation is best-effort — queue strategy needs merge queue set later
     }
@@ -266,6 +287,10 @@ export class TeamRuntime {
     });
     this.rootAgentId = root.id;
 
+    // 1b. Set up workspace integration BEFORE companions spawn,
+    // so the spawn interceptor has teamStreamId for workspace injection
+    this.setupWorkspaceIntegration(root.id as AgentId);
+
     // 2. Spawn companions (peers, not children)
     const companionIds: string[] = [];
     for (const companion of topology.companions ?? []) {
@@ -299,6 +324,9 @@ export class TeamRuntime {
     // 5. Set up continuation monitoring for daemon agents (P4.2)
     this.monitorContinuations();
 
+    // 6. Set up auto-scaling monitoring
+    this.monitorScaling();
+
     return {
       rootId: root.id,
       companionIds,
@@ -324,6 +352,18 @@ export class TeamRuntime {
     if (this.peerWiringUnsubscribe) {
       this.peerWiringUnsubscribe();
       this.peerWiringUnsubscribe = undefined;
+    }
+    if (this.scalingTimer) {
+      clearInterval(this.scalingTimer);
+      this.scalingTimer = undefined;
+    }
+    if (this.mergeQueueUnsub) {
+      this.mergeQueueUnsub();
+      this.mergeQueueUnsub = undefined;
+    }
+    if (this.mergeRequestPollTimer) {
+      clearInterval(this.mergeRequestPollTimer);
+      this.mergeRequestPollTimer = undefined;
     }
     // Call strategy lifecycle close hook
     if (this.integrationStrategy?.close) {
@@ -381,6 +421,11 @@ export class TeamRuntime {
   /** Get the instantiated integration strategy (after initialize) */
   getIntegrationStrategy(): IntegrationStrategy | undefined {
     return this.integrationStrategy;
+  }
+
+  /** Get team-wide integration stream ID (after bootstrap) */
+  getTeamStreamId(): string | undefined {
+    return this.teamStreamId;
   }
 
   /** Get signal filters for peer connections (for use by signal filtering - i-3o8g) */
@@ -456,6 +501,239 @@ export class TeamRuntime {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Auto-Scaling
+  // ─────────────────────────────────────────────────────────────
+
+  /** Minimum interval between scale-up actions (ms) */
+  private static readonly SCALE_COOLDOWN_MS = 10_000;
+
+  /** Default scaling check interval (ms) */
+  private static readonly SCALE_CHECK_INTERVAL_MS = 5_000;
+
+  /**
+   * Monitor task queue depth and auto-scale workers.
+   *
+   * Follows the same lifecycle pattern as monitorContinuations().
+   * Only active when `scaling.scale_on === "task_queue_depth"` and
+   * a task backend is available.
+   */
+  private monitorScaling(): void {
+    const scalingConfig = this.resolved.macroAgent.lifecycle?.scaling;
+    if (!scalingConfig || scalingConfig.scale_on !== "task_queue_depth") return;
+
+    const { taskBackend } = this.services;
+    if (!taskBackend?.listClaimable) return; // Need claimable task counting
+
+    const maxWorkers = scalingConfig.max_workers ?? Infinity;
+    const minWorkers = scalingConfig.min_workers ?? 0;
+
+    // Determine which role names are worker-derived (for counting active workers)
+    const workerRoleNames = new Set<string>();
+    for (const [name, resolved] of this.resolved.resolvedRoles) {
+      if (resolved.baseRole === "worker") {
+        workerRoleNames.add(name);
+      }
+    }
+    if (workerRoleNames.size === 0) return; // No worker roles to scale
+
+    // Pick the first worker role for spawning (most common pattern: single worker role)
+    const spawnRole = [...workerRoleNames][0];
+
+    this.scalingTimer = setInterval(async () => {
+      try {
+        // Count claimable tasks
+        const claimable = await taskBackend.listClaimable!();
+        const pendingCount = claimable.length;
+
+        // Count active workers in this team
+        const allAgents = this.services.agentManager.list({ state: "running" });
+        let activeWorkers = 0;
+        for (const agent of allAgents) {
+          if (agent.role && workerRoleNames.has(agent.role) && this.agentRoleMap.has(agent.id as AgentId)) {
+            activeWorkers++;
+          }
+        }
+
+        // Scale up: more pending tasks than active workers, under max cap
+        if (pendingCount > activeWorkers && activeWorkers < maxWorkers) {
+          const now = Date.now();
+          if (now - this.lastScaleUpTime < TeamRuntime.SCALE_COOLDOWN_MS) {
+            return; // Cooldown not elapsed
+          }
+
+          if (!this.rootAgentId) return; // No root to spawn from
+
+          try {
+            await this.services.agentManager.spawn({
+              task: `[${this.manifest.name}] auto-scaled ${spawnRole}`,
+              role: spawnRole,
+              parent: this.rootAgentId,
+            });
+            this.lastScaleUpTime = now;
+
+            // Emit scaling event for observability
+            this.services.eventStore.emit({
+              type: "status",
+              source: { agent_id: "system" },
+              payload: {
+                status_type: "scaling",
+                summary: `Auto-scaled: spawned ${spawnRole} (pending=${pendingCount}, active=${activeWorkers}, max=${maxWorkers})`,
+              },
+            });
+          } catch {
+            // Spawn failed — will retry on next tick
+          }
+        }
+
+        // Scale down is handled by idle_drain: workers self-terminate after idle_timeout_s
+        // No active termination needed from the scaling monitor
+      } catch {
+        // Best-effort — don't crash the scaling loop
+      }
+    }, TeamRuntime.SCALE_CHECK_INTERVAL_MS);
+
+    // Ensure timer doesn't prevent process exit
+    if (this.scalingTimer.unref) {
+      this.scalingTimer.unref();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Workspace Integration
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create the team-wide integration stream and subscribe to merge queue events.
+   *
+   * When a worker submits to the merge queue, the integrator agent is
+   * automatically prompted to process it.
+   */
+  private setupWorkspaceIntegration(rootAgentId: AgentId): void {
+    const { workspaceManager } = this.services;
+    if (!workspaceManager || !this.integrationStrategy) return;
+
+    // Create integration stream owned by root agent
+    try {
+      this.teamStreamId = workspaceManager.createIntegrationStream(
+        rootAgentId,
+        { name: this.manifest.name, forkFrom: "main" }
+      );
+    } catch {
+      // Workspace isolation unavailable (e.g., not a git repo)
+      return;
+    }
+
+    // Subscribe to merge queue events — wake integrator on mr:submitted
+    try {
+      const mergeQueue = workspaceManager.getMergeQueue();
+      if (mergeQueue?.onEvent) {
+        this.mergeQueueUnsub = mergeQueue.onEvent((event) => {
+          if (event.type !== "mr:submitted") return;
+
+          // Find agent with workspace.integrate capability in this team
+          for (const [agentId, roleName] of this.agentRoleMap) {
+            const resolved = this.resolved.resolvedRoles.get(roleName);
+            const caps = resolved?.capabilities ?? [];
+            if (caps.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
+              try {
+                this.services.agentManager.prompt(
+                  agentId,
+                  `Merge request ${(event as { data?: Record<string, unknown> }).data?.mrId} submitted ` +
+                  `by worker ${(event as { data?: Record<string, unknown> }).data?.workerAgentId} ` +
+                  `for branch ${(event as { data?: Record<string, unknown> }).data?.workerBranch}. ` +
+                  `Process the merge queue.`
+                );
+              } catch {
+                // Best-effort wake
+              }
+              break;
+            }
+          }
+        });
+      }
+    } catch {
+      // Merge queue not available — workspace isolation without merge queue
+    }
+
+    // Poll EventStore for MERGE_REQUEST signals from worker subprocesses.
+    // Workers in MCP subprocess emit to shared SQLite; main process must reload to see them.
+    this.startMergeRequestPolling();
+  }
+
+  /**
+   * Poll EventStore for MERGE_REQUEST signals emitted by worker subprocesses.
+   *
+   * Workers call done() in their MCP subprocess, which emits MERGE_REQUEST to
+   * the shared EventStore. This polling picks up those signals and submits to
+   * the merge queue on the main server.
+   */
+  private startMergeRequestPolling(): void {
+    const { workspaceManager, eventStore } = this.services;
+    if (!workspaceManager || !this.teamStreamId) return;
+
+    const mergeQueue = workspaceManager.getMergeQueue();
+    if (!mergeQueue) return;
+
+    this.mergeRequestPollTimer = setInterval(async () => {
+      try {
+        // Reload to see events written by subprocesses
+        if (eventStore.reload) {
+          await eventStore.reload();
+        }
+
+        const events = eventStore.query({ type: "status", limit: 100 });
+        for (const event of events) {
+          // Skip already-processed events
+          if (event.timestamp <= this.lastMergeRequestSeen) continue;
+
+          const details = event.payload?.details as Record<string, unknown> | undefined;
+          if (details?.signal !== "MERGE_REQUEST") continue;
+
+          // Check this agent belongs to our team
+          const sourceAgentId = event.source?.agent_id;
+          if (!sourceAgentId) continue;
+
+          // Check if agent is a team member OR a child of a team member
+          const isTeamMember = this.agentRoleMap.has(sourceAgentId as AgentId);
+          const parentAgent = eventStore.getAgent(sourceAgentId);
+          const isChildOfTeamMember = parentAgent?.parent
+            ? this.agentRoleMap.has(parentAgent.parent as AgentId)
+            : false;
+
+          if (!isTeamMember && !isChildOfTeamMember) continue;
+
+          this.lastMergeRequestSeen = event.timestamp;
+
+          // Extract merge request details
+          const sourceBranch = details.sourceBranch as string | undefined;
+          const taskId = details.taskId as string | undefined;
+          const workerId = details.workerId as string | undefined;
+
+          if (!sourceBranch || !workerId) continue;
+
+          // Submit to merge queue
+          try {
+            mergeQueue.submit({
+              streamId: this.teamStreamId!,
+              taskId: taskId ?? `task-${workerId}`,
+              workerBranch: sourceBranch,
+              workerAgentId: workerId,
+            });
+          } catch {
+            // Already submitted or other error — best-effort
+          }
+        }
+      } catch {
+        // Best-effort polling
+      }
+    }, 2000);
+
+    if (this.mergeRequestPollTimer.unref) {
+      this.mergeRequestPollTimer.unref();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Spawn Interceptor
   // ─────────────────────────────────────────────────────────────
 
@@ -491,8 +769,31 @@ export class TeamRuntime {
       // Task backend config is propagated by AgentManager.buildMacroAgentMcp()
       // from its taskBackend/openTasksSocketPath config options.
 
+      // Inject workspace fields based on capabilities (never overwrite explicit values)
+      const capabilities = resolved.capabilities;
+      let streamId = options.streamId;
+      let streamConfig = options.streamConfig;
+      let dataplaneTaskId = options.dataplaneTaskId;
+
+      if (this.teamStreamId && capabilities) {
+        if (capabilities.includes(WORKSPACE_CAPABILITIES.WORKTREE)) {
+          streamId = streamId ?? this.teamStreamId;
+          // Pull-mode workers use agentId as workspace identifier (one worktree per lifetime)
+          dataplaneTaskId = dataplaneTaskId ?? `worker-${Date.now()}`;
+        } else if (capabilities.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
+          streamId = streamId ?? this.teamStreamId;
+        }
+        // workspace.stream: stream creation is managed by TeamRuntime.setupWorkspaceIntegration(),
+        // not auto-injected. Coordinators that need sub-streams pass explicit streamConfig.
+      }
+
       return {
         ...options,
+        // Workspace fields
+        streamId,
+        streamConfig,
+        dataplaneTaskId,
+        capabilities: capabilities ?? options.capabilities,
         // Merge topics
         topics: [
           ...(options.topics ?? []),

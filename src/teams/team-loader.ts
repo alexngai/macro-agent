@@ -215,7 +215,17 @@ function buildResolvedTeamRole(
   }
 
   const macroAgent = openteamsRole.raw.macro_agent as TeamRoleMacroAgent | undefined;
-  const capabilities = openteamsRole.capabilities as Capability[];
+  let capabilities = openteamsRole.capabilities as Capability[];
+
+  // If the role YAML had no capability specification (no capabilities,
+  // capabilities_add, or capabilities_remove), openteams leaves capabilities
+  // empty. In that case, inherit all parent capabilities. Spawn-rule enrichment
+  // may have already added some caps, so merge with parent.
+  const hasExplicitCapabilitySpec = openteamsRole.raw.capabilities !== undefined;
+  if (!hasExplicitCapabilitySpec && parentRole.capabilities.length > 0) {
+    const merged = new Set<string>([...parentRole.capabilities, ...capabilities]);
+    capabilities = [...merged] as Capability[];
+  }
 
   const roleDefinition: RoleDefinition = {
     name: roleName,

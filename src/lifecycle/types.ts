@@ -117,6 +117,9 @@ export interface LifecycleContext {
 
   /** Merge request ID (for resolver workers to track which MR they're resolving) */
   mrId?: string;
+
+  /** Resolved capabilities for the agent's role (for capability-based handler dispatch) */
+  capabilities?: string[];
 }
 
 /**

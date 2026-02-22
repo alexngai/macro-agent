@@ -686,6 +686,75 @@ describe("TeamManager", () => {
     });
   });
 
+  describe("install() — spawn rules defense-in-depth", () => {
+    it("rejects spawn when child role is not in parent's spawn_rules", async () => {
+      const manager = new TeamManager(services);
+      const instance = await manager.startTeam("self-driving", PROJECT_ROOT);
+      manager.install();
+
+      // self-driving spawn_rules: planner: [grinder, planner], judge: [], grinder: []
+      // judge cannot spawn anything — attempt should throw
+      await expect(
+        agentManager.spawn({
+          task: "disallowed child",
+          role: "grinder",
+          parent: instance.result.companionIds[0], // judge
+        })
+      ).rejects.toThrow(/Spawn rules violation: role 'judge' cannot spawn 'grinder'/);
+    });
+
+    it("allows spawn when child role is in parent's spawn_rules", async () => {
+      const manager = new TeamManager(services);
+      const instance = await manager.startTeam("self-driving", PROJECT_ROOT);
+      manager.install();
+
+      // planner can spawn grinder — should succeed
+      await expect(
+        agentManager.spawn({
+          task: "allowed child",
+          role: "grinder",
+          parent: instance.result.rootId, // planner
+        })
+      ).resolves.toBeDefined();
+    });
+
+    it("passes through spawn when parent role has no spawn_rules entry", async () => {
+      const manager = new TeamManager(services);
+      const instance = await manager.startTeam("self-driving", PROJECT_ROOT);
+      manager.install();
+
+      // Simulate a dynamically spawned agent with a role not in spawn_rules
+      const spawnCallback = lifecycleCallbacks.at(-1)!;
+      spawnCallback({
+        type: "spawned",
+        agent: { id: "dynamic_1" as AgentId, parent: instance.result.rootId as AgentId, role: "custom_role", state: "running" },
+      });
+
+      // custom_role is not in spawn_rules — should pass through (no restriction)
+      await expect(
+        agentManager.spawn({
+          task: "dynamic child",
+          role: "some_child",
+          parent: "dynamic_1",
+        })
+      ).resolves.toBeDefined();
+    });
+
+    it("passes through spawn when no role is specified on child", async () => {
+      const manager = new TeamManager(services);
+      const instance = await manager.startTeam("self-driving", PROJECT_ROOT);
+      manager.install();
+
+      // No role specified — spawn rules check is skipped
+      await expect(
+        agentManager.spawn({
+          task: "roleless child",
+          parent: instance.result.rootId,
+        })
+      ).resolves.toBeDefined();
+    });
+  });
+
   describe("role conflict detection", () => {
     it("warns when two teams register the same role name with different capabilities", async () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

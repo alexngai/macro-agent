@@ -217,6 +217,23 @@ export class TeamManager {
       const parentTeam = this.getTeamForAgent(options.parent);
       if (!parentTeam) return options; // Parent not in any team
 
+      // Defense-in-depth: verify spawn rules allow this child role
+      if (options.role) {
+        const spawnRules = parentTeam.runtime.getManifest().topology.spawn_rules;
+        if (spawnRules) {
+          const parentRole = parentTeam.runtime.getAgentRoleMap().get(options.parent as AgentId);
+          if (parentRole && parentRole in spawnRules) {
+            const allowed = spawnRules[parentRole];
+            if (!allowed.includes(options.role)) {
+              throw new Error(
+                `Spawn rules violation: role '${parentRole}' cannot spawn '${options.role}'. ` +
+                `Allowed: [${allowed.join(", ")}]`
+              );
+            }
+          }
+        }
+      }
+
       const interceptor = this.cachedInterceptors.get(parentTeam.id);
       const result = interceptor ? await interceptor(options) : options;
       // Tag spawned agent with team instance for durable tracking

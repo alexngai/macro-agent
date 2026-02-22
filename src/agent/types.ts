@@ -94,6 +94,12 @@ export interface SpawnAgentOptions {
    * If provided, the worker will claim this task and work on it.
    */
   dataplaneTaskId?: string;
+
+  /**
+   * Resolved capabilities for this agent's role.
+   * Injected by TeamRuntime spawn interceptor for capability-based workspace dispatch.
+   */
+  capabilities?: string[];
 }
 
 /**
