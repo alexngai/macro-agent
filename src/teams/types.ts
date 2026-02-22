@@ -1,9 +1,8 @@
 /**
  * Team Template Types
  *
- * TypeScript types for the team manifest schema. Generic multi-agent fields
- * (name, roles, topology, communication) are separated from macro-agent
- * specific extensions under the `macro_agent` namespace for interoperability.
+ * Imports generic multi-agent schema types from openteams and extends them
+ * with macro-agent specific runtime types (extensions, resolved roles, errors).
  *
  * @module teams/types
  */
@@ -11,33 +10,92 @@
 import type { RoleDefinition, Capability } from "../roles/types.js";
 
 // =============================================================================
-// Core Manifest
+// Imports from openteams (canonical schema types)
+// =============================================================================
+
+import type {
+  TeamManifest as OpenTeamsManifest,
+  TopologyConfig,
+  TopologyNode,
+  TopologyNodeConfig,
+  CommunicationConfig,
+  ChannelDefinition,
+  SubscriptionEntry,
+  RoutingConfig,
+  PeerRoute,
+  RoleDefinition as OpenTeamsRoleDefinition,
+  CapabilityComposition,
+  McpServerEntry,
+  ResolvedTemplate,
+  ResolvedRole,
+  ResolvedPrompts,
+  PromptSection,
+} from "openteams";
+
+// =============================================================================
+// Re-exports from openteams
+// =============================================================================
+
+export type {
+  OpenTeamsManifest,
+  TopologyConfig,
+  TopologyNode,
+  TopologyNodeConfig,
+  CommunicationConfig,
+  ChannelDefinition,
+  SubscriptionEntry,
+  RoutingConfig,
+  PeerRoute,
+  OpenTeamsRoleDefinition,
+  CapabilityComposition,
+  McpServerEntry,
+  ResolvedTemplate,
+  ResolvedRole,
+  ResolvedPrompts,
+  PromptSection,
+};
+
+// =============================================================================
+// Backward-Compatible Aliases
+// =============================================================================
+
+/** @deprecated Use TopologyConfig from openteams */
+export type TeamTopology = TopologyConfig;
+
+/** @deprecated Use CommunicationConfig from openteams */
+export type TeamCommunication = CommunicationConfig;
+
+/** @deprecated Use SubscriptionEntry from openteams */
+export type ChannelSubscription = SubscriptionEntry;
+
+/** @deprecated Use RoutingConfig from openteams (now includes "none" status) */
+export type CommunicationRouting = RoutingConfig;
+
+/** @deprecated Use PeerRoute from openteams */
+export type PeerConnection = PeerRoute;
+
+/** Communication enforcement level */
+export type CommunicationEnforcement = "strict" | "permissive" | "audit";
+
+/** @deprecated Use OpenTeamsRoleDefinition from openteams */
+export type TeamRoleDefinition = OpenTeamsRoleDefinition;
+
+// =============================================================================
+// Core Manifest (macro-agent extension of openteams)
 // =============================================================================
 
 /**
- * Fully resolved team manifest.
+ * Fully resolved team manifest for macro-agent.
  *
- * Returned by TeamLoader.load() with all inheritance resolved,
- * capabilities computed, and prompts loaded.
+ * Extends the openteams manifest with typed macro_agent extensions
+ * and resolved state fields populated by TeamLoader.
  */
-export interface TeamManifest {
-  /** Team name (directory name) */
-  name: string;
-
+export interface TeamManifest extends OpenTeamsManifest {
   /** Human-readable description */
   description: string;
 
-  /** Schema version */
-  version: number;
-
-  /** Role names used by this team */
-  roles: string[];
-
-  /** Agent spawn topology */
-  topology: TeamTopology;
-
-  /** Communication topology */
-  communication: TeamCommunication;
+  /** Communication topology (required in macro-agent) */
+  communication: CommunicationConfig;
 
   /** macro-agent specific extensions */
   macro_agent: MacroAgentExtensions;
@@ -54,128 +112,6 @@ export interface TeamManifest {
 
   /** Loaded MCP server configs keyed by role name */
   _mcpServers: Map<string, McpServerEntry[]>;
-}
-
-// =============================================================================
-// Topology
-// =============================================================================
-
-/**
- * Defines the agent spawn graph for the team.
- */
-export interface TeamTopology {
-  /** The initial agent spawned when the team starts */
-  root: TopologyNode;
-
-  /** Agents spawned alongside root (peers, not children) */
-  companions?: TopologyNode[];
-
-  /**
-   * Which roles can spawn which other roles.
-   * Translated into capability additions by TeamLoader (RD3).
-   */
-  spawn_rules?: Record<string, string[]>;
-}
-
-/**
- * A node in the team's spawn topology.
- */
-export interface TopologyNode {
-  /** Role name (must be in manifest.roles) */
-  role: string;
-
-  /** Path to prompt file relative to team directory */
-  prompt?: string;
-
-  /** Agent configuration */
-  config?: TopologyNodeConfig;
-}
-
-export interface TopologyNodeConfig {
-  /** Model to use (e.g., "sonnet", "haiku", "opus") */
-  model?: string;
-
-  /** Additional key-value config passed to agent */
-  [key: string]: unknown;
-}
-
-// =============================================================================
-// Communication
-// =============================================================================
-
-/**
- * Communication topology for the team.
- *
- * Declares channels (signal groups), per-role subscriptions,
- * emission restrictions, and routing rules.
- */
-export interface TeamCommunication {
-  /** Named signal channels */
-  channels?: Record<string, ChannelDefinition>;
-
-  /** Per-role subscription declarations */
-  subscriptions?: Record<string, ChannelSubscription[]>;
-
-  /** Per-role emission declarations (which signals a role can emit) */
-  emissions?: Record<string, string[]>;
-
-  /** Routing configuration */
-  routing?: CommunicationRouting;
-
-  /** Enforcement level for communication rules */
-  enforcement?: CommunicationEnforcement;
-}
-
-export type CommunicationEnforcement = "strict" | "permissive" | "audit";
-
-/**
- * A named channel grouping related signals.
- */
-export interface ChannelDefinition {
-  /** Human-readable description */
-  description?: string;
-
-  /** Signals in this channel */
-  signals: string[];
-}
-
-/**
- * A role's subscription to a channel.
- */
-export interface ChannelSubscription {
-  /** Channel name (must exist in communication.channels) */
-  channel: string;
-
-  /** Specific signals to receive. If omitted, receives all signals in the channel */
-  signals?: string[];
-}
-
-/**
- * Communication routing configuration.
- */
-export interface CommunicationRouting {
-  /** Status flow direction */
-  status?: "upstream";
-
-  /** Explicit peer connections (non-hierarchical) */
-  peers?: PeerConnection[];
-}
-
-/**
- * A peer-to-peer connection between two roles.
- */
-export interface PeerConnection {
-  /** Source role name */
-  from: string;
-
-  /** Target role name */
-  to: string;
-
-  /** Routing mechanism */
-  via: "direct" | "topic" | "scope";
-
-  /** Signals allowed on this connection */
-  signals?: string[];
 }
 
 // =============================================================================
@@ -199,6 +135,9 @@ export interface MacroAgentExtensions {
 
   /** Observability configuration */
   observability?: ObservabilityConfig;
+
+  /** Allow extension fields for interop with openteams Record<string, unknown> */
+  [key: string]: unknown;
 }
 
 export interface TaskAssignmentConfig {
@@ -249,51 +188,8 @@ export interface ObservabilityConfig {
 }
 
 // =============================================================================
-// Team Role Definition
+// Team Role macro-agent Config
 // =============================================================================
-
-/**
- * Role definition as declared in a team template's roles/*.yaml file.
- *
- * Supports both full replacement and additive/subtractive capability composition.
- */
-export interface TeamRoleDefinition {
-  /** Role name */
-  name: string;
-
-  /** Built-in role to extend */
-  extends?: string;
-
-  /** Display name for UI/logs */
-  display_name?: string;
-
-  /** Human-readable description */
-  description?: string;
-
-  /**
-   * Full replacement capability list.
-   * Mutually exclusive with add/remove.
-   */
-  capabilities?: string[];
-
-  /**
-   * Capabilities to add to the parent role's set.
-   * Only valid when `extends` is set.
-   */
-  capabilities_add?: string[];
-
-  /**
-   * Capabilities to remove from the parent role's set.
-   * Only valid when `extends` is set.
-   */
-  capabilities_remove?: string[];
-
-  /** Path to prompt file relative to team directory */
-  prompt?: string;
-
-  /** macro-agent specific role configuration */
-  macro_agent?: TeamRoleMacroAgent;
-}
 
 export interface TeamRoleMacroAgent {
   /** Workspace configuration */
@@ -319,6 +215,24 @@ export interface TeamRoleMacroAgent {
 // =============================================================================
 
 /**
+ * macro-agent's enriched team resolution result.
+ *
+ * Wraps openteams' ResolvedTemplate with enforcement-enriched roles
+ * and typed macro-agent extensions. Produced by loadTeam(), consumed
+ * by TeamRuntime.
+ */
+export interface MacroResolvedTemplate {
+  /** openteams resolved template (manifest + generic roles + prompts + mcpServers) */
+  template: ResolvedTemplate;
+
+  /** Enforcement-enriched roles mapped to macro-agent's RoleDefinition */
+  resolvedRoles: Map<string, ResolvedTeamRole>;
+
+  /** Parsed macro-agent extensions (typed from manifest.macro_agent) */
+  macroAgent: MacroAgentExtensions;
+}
+
+/**
  * A team role with inheritance resolved and capabilities computed.
  */
 export interface ResolvedTeamRole {
@@ -336,21 +250,6 @@ export interface ResolvedTeamRole {
 
   /** Full RoleDefinition for RoleRegistry registration */
   roleDefinition: RoleDefinition;
-}
-
-// =============================================================================
-// MCP Server Config
-// =============================================================================
-
-/**
- * MCP server entry from tools/mcp-servers.json.
- * Follows Claude Code's native format.
- */
-export interface McpServerEntry {
-  name: string;
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
 }
 
 // =============================================================================

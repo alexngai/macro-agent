@@ -75,6 +75,14 @@ export {
   type AgentLifecycleExtensionServices,
 } from "./agent-lifecycle.js";
 
+// Stream/checkpoint/diffStack/mergeQueue extensions
+export {
+  registerStreamExtensions,
+  unregisterStreamExtensions,
+  STREAM_EXTENSION_METHODS,
+  type StreamExtensionServices,
+} from "./streams.js";
+
 import type { MAPAdapter } from "../interface.js";
 import type { TaskExtensionServices } from "./task.js";
 import type { WakeExtensionServices } from "./wake.js";
@@ -85,6 +93,7 @@ import type { AgentDetectionExtensionServices } from "./agent-detection.js";
 import type { UpdateMetadataExtensionServices } from "./update-metadata.js";
 import type { MCPBridgeServices } from "./mcp-bridge.js";
 import type { AgentLifecycleExtensionServices } from "./agent-lifecycle.js";
+import type { StreamExtensionServices } from "./streams.js";
 import { registerTaskExtensions } from "./task.js";
 import { registerWakeExtension } from "./wake.js";
 import { registerWorkspaceExtension } from "./workspace.js";
@@ -94,6 +103,7 @@ import { registerAgentDetectionExtensions } from "./agent-detection.js";
 import { registerUpdateMetadataExtension } from "./update-metadata.js";
 import { registerMCPBridgeExtensions, unregisterMCPBridgeExtensions, MCP_BRIDGE_METHODS } from "./mcp-bridge.js";
 import { registerAgentLifecycleExtensions, unregisterAgentLifecycleExtensions, AGENT_LIFECYCLE_METHODS } from "./agent-lifecycle.js";
+import { registerStreamExtensions, unregisterStreamExtensions, STREAM_EXTENSION_METHODS } from "./streams.js";
 
 // =============================================================================
 // Combined Registration
@@ -112,6 +122,7 @@ export interface MacroExtensionServices {
   updateMetadata?: UpdateMetadataExtensionServices;
   mcpBridge?: MCPBridgeServices;
   agentLifecycle?: AgentLifecycleExtensionServices;
+  streams?: StreamExtensionServices;
 }
 
 /**
@@ -184,6 +195,10 @@ export function registerMacroExtensions(
   if (services.agentLifecycle) {
     registerAgentLifecycleExtensions(adapter, services.agentLifecycle);
   }
+
+  if (services.streams) {
+    registerStreamExtensions(adapter, services.streams);
+  }
 }
 
 /**
@@ -216,6 +231,8 @@ export function unregisterMacroExtensions(adapter: MAPAdapter): void {
   unregisterMCPBridgeExtensions(adapter);
   // Also unregister agent lifecycle extensions
   unregisterAgentLifecycleExtensions(adapter);
+  // Also unregister stream/checkpoint/diffStack/mergeQueue extensions
+  unregisterStreamExtensions(adapter);
 }
 
 // =============================================================================
@@ -252,6 +269,8 @@ export const MACRO_EXTENSION_METHODS = [
   ...MCP_BRIDGE_METHODS,
   // Agent lifecycle extensions
   ...AGENT_LIFECYCLE_METHODS,
+  // Stream/checkpoint/diffStack/mergeQueue extensions
+  ...STREAM_EXTENSION_METHODS,
 ] as const;
 
 /**
@@ -277,4 +296,21 @@ export const EXTENSION_CAPABILITIES: Record<string, string> = {
   "_macro/forkAgent": "canManageLifecycle",
   "_macro/setPermissionMode": "canManageLifecycle",
   "_macro/respondToPermission": "canManageLifecycle",
+  // Stream extensions
+  "_macro/streams/list": "canQuery",
+  "_macro/streams/get": "canQuery",
+  "_macro/streams/hierarchy": "canQuery",
+  "_macro/streams/createPR": "canManageTasks",
+  // Checkpoint extensions
+  "_macro/checkpoints/list": "canQuery",
+  "_macro/checkpoints/get": "canQuery",
+  "_macro/checkpoints/select": "canManageTasks",
+  // DiffStack extensions
+  "_macro/diffStacks/list": "canQuery",
+  "_macro/diffStacks/get": "canQuery",
+  "_macro/diffStacks/create": "canManageTasks",
+  "_macro/diffStacks/createPR": "canManageTasks",
+  // MergeQueue extensions
+  "_macro/mergeQueue/status": "canQuery",
+  "_macro/mergeQueue/get": "canQuery",
 };

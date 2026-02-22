@@ -66,6 +66,13 @@ export const MSG_CAPABILITIES = {
   SUBSCRIBE: "msg.subscribe" as const,
 };
 
+/** Workspace capabilities */
+export const WORKSPACE_CAPABILITIES = {
+  WORKTREE: "workspace.worktree" as const,    // Gets own git worktree; done() submits to merge queue
+  STREAM: "workspace.stream" as const,         // Creates integration stream at spawn
+  INTEGRATE: "workspace.integrate" as const,   // Joins stream; processes merge queue entries
+};
+
 /** Wildcard capability */
 export const WILDCARD_CAPABILITY = "*" as const;
 
@@ -112,6 +119,10 @@ export const ALL_CAPABILITIES: Set<Capability> = new Set([
   MSG_CAPABILITIES.SEND,
   MSG_CAPABILITIES.BROADCAST,
   MSG_CAPABILITIES.SUBSCRIBE,
+  // Workspace
+  WORKSPACE_CAPABILITIES.WORKTREE,
+  WORKSPACE_CAPABILITIES.STREAM,
+  WORKSPACE_CAPABILITIES.INTEGRATE,
   // Wildcard
   WILDCARD_CAPABILITY,
 ]);

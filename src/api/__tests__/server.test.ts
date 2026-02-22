@@ -9,6 +9,7 @@ import type { EventStore } from "../../store/event-store.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { TaskManager } from "../../task/task-manager.js";
 import type { MessageRouter } from "../../router/message-router.js";
+import type { TeamManager, TeamInstance } from "../../teams/team-manager.js";
 import type { Agent, Task, Event } from "../../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
@@ -152,6 +153,41 @@ function createMockMessageRouter(): MessageRouter {
     getSubscribers: vi.fn(() => []),
     setupDefaultSubscriptions: vi.fn(),
   };
+}
+
+function createMockTeamInstance(overrides: Partial<TeamInstance> = {}): TeamInstance {
+  return {
+    id: "test-team-1",
+    templateName: "test-team",
+    runtime: {
+      getTaskMode: vi.fn(() => "push"),
+      getStrategyName: vi.fn(() => "queue"),
+      getManifest: vi.fn(() => ({
+        roles: [{ name: "worker", extends: "worker" }],
+        communication: { channels: [] },
+      })),
+    } as any,
+    result: {
+      rootId: "agent_root1",
+      companionIds: ["agent_comp1"],
+    },
+    ...overrides,
+  };
+}
+
+function createMockTeamManager(): TeamManager {
+  const instance = createMockTeamInstance();
+  return {
+    startTeam: vi.fn(async () => instance),
+    stopTeam: vi.fn(async () => {}),
+    teardownAll: vi.fn(async () => {}),
+    getTeamForAgent: vi.fn(() => undefined),
+    getInstance: vi.fn((id: string) => (id === instance.id ? instance : undefined)),
+    getInstances: vi.fn(() => [instance]),
+    hasActiveTeam: vi.fn(() => true),
+    install: vi.fn(),
+    uninstall: vi.fn(),
+  } as unknown as TeamManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1010,6 +1046,168 @@ describe("API Server", () => {
           from: "__human__",
         })
       );
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Team Management API Endpoints
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("Team Management API", () => {
+    let teamManager: TeamManager;
+
+    beforeEach(() => {
+      teamManager = createMockTeamManager();
+      services = { ...services, teamManager };
+    });
+
+    describe("POST /api/teams", () => {
+      it("should start a team instance", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app)
+          .post("/api/teams")
+          .send({ template: "test-team" });
+
+        expect(res.status).toBe(201);
+        expect(res.body.id).toBe("test-team-1");
+        expect(res.body.templateName).toBe("test-team");
+        expect(res.body.rootAgentId).toBe("agent_root1");
+        expect(res.body.companionAgentIds).toEqual(["agent_comp1"]);
+        expect(res.body.taskMode).toBe("push");
+        expect(res.body.strategy).toBe("queue");
+        expect(teamManager.startTeam).toHaveBeenCalledWith("test-team", expect.any(String));
+      });
+
+      it("should return 400 when template is missing", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app)
+          .post("/api/teams")
+          .send({});
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe("INVALID_REQUEST");
+      });
+
+      it("should allow starting multiple teams", async () => {
+        const secondInstance = createMockTeamInstance({
+          id: "second-team-1",
+          templateName: "second-team",
+        });
+        (teamManager.startTeam as any)
+          .mockResolvedValueOnce(createMockTeamInstance())
+          .mockResolvedValueOnce(secondInstance);
+
+        const server = createTrackedServer();
+
+        const res1 = await request(server.app)
+          .post("/api/teams")
+          .send({ template: "test-team" });
+        expect(res1.status).toBe(201);
+
+        const res2 = await request(server.app)
+          .post("/api/teams")
+          .send({ template: "second-team" });
+        expect(res2.status).toBe(201);
+        expect(res2.body.id).toBe("second-team-1");
+      });
+
+      it("should return 500 on start failure", async () => {
+        (teamManager.startTeam as any).mockRejectedValueOnce(
+          new Error("Template not found")
+        );
+
+        const server = createTrackedServer();
+        const res = await request(server.app)
+          .post("/api/teams")
+          .send({ template: "bad-team" });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe("TEAM_START_FAILED");
+      });
+    });
+
+    describe("GET /api/teams", () => {
+      it("should list running team instances", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app).get("/api/teams");
+
+        expect(res.status).toBe(200);
+        expect(res.body).toHaveLength(1);
+        expect(res.body[0].id).toBe("test-team-1");
+        expect(res.body[0].templateName).toBe("test-team");
+        expect(res.body[0].rootAgentId).toBe("agent_root1");
+      });
+
+      it("should return empty array when no teams running", async () => {
+        (teamManager.getInstances as any).mockReturnValue([]);
+
+        const server = createTrackedServer();
+        const res = await request(server.app).get("/api/teams");
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual([]);
+      });
+    });
+
+    describe("GET /api/teams/:id", () => {
+      it("should return team instance details", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app).get("/api/teams/test-team-1");
+
+        expect(res.status).toBe(200);
+        expect(res.body.id).toBe("test-team-1");
+        expect(res.body.roles).toBeDefined();
+        expect(res.body.communication).toBeDefined();
+      });
+
+      it("should return 404 for unknown team", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app).get("/api/teams/nonexistent");
+
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe("TEAM_NOT_FOUND");
+      });
+    });
+
+    describe("DELETE /api/teams/:id", () => {
+      it("should teardown a team instance", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app).delete("/api/teams/test-team-1");
+
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(teamManager.stopTeam).toHaveBeenCalledWith("test-team-1");
+      });
+
+      it("should return 404 for unknown team", async () => {
+        const server = createTrackedServer();
+        const res = await request(server.app).delete("/api/teams/nonexistent");
+
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe("TEAM_NOT_FOUND");
+      });
+
+      it("should return 500 on stop failure", async () => {
+        (teamManager.stopTeam as any).mockRejectedValueOnce(
+          new Error("Teardown failed")
+        );
+
+        const server = createTrackedServer();
+        const res = await request(server.app).delete("/api/teams/test-team-1");
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe("TEAM_STOP_FAILED");
+      });
+    });
+
+    describe("without teamManager", () => {
+      it("should not register team routes when teamManager is not provided", async () => {
+        const servicesNoTeam = { eventStore, agentManager, taskManager, messageRouter };
+        const server = createTrackedServer(servicesNoTeam);
+
+        const res = await request(server.app).get("/api/teams");
+        expect(res.status).toBe(404);
+      });
     });
   });
 });

@@ -168,7 +168,14 @@ export type MAPEventType =
   | "task.created"
   | "task.assigned"
   | "task.completed"
-  | "task.failed";
+  | "task.failed"
+  // Stream/checkpoint/merge events (git-cascade)
+  | "stream.updated"
+  | "checkpoint.created"
+  | "diffstack.created"
+  | "diffstack.updated"
+  | "merge_request.created"
+  | "merge_request.updated";
 
 /**
  * Filter for event subscriptions.

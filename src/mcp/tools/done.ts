@@ -143,6 +143,13 @@ export function buildLifecycleContext(
     streamId = workspace?.streamId;
   }
 
+  // Fallback: read streamId from env var (set by buildMacroAgentMcp during spawn).
+  // WorkspaceManager is not available in MCP subprocesses, but the streamId is
+  // needed for MERGE_REQUEST signal details so the team runtime can submit to the merge queue.
+  if (!streamId && process.env.MACRO_STREAM_ID) {
+    streamId = process.env.MACRO_STREAM_ID;
+  }
+
   return {
     agentId: toolContext.agent_id,
     role,
@@ -201,6 +208,18 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
       role,
       workspaceManager
     );
+
+    // Resolve capabilities for capability-based handler dispatch (team roles)
+    if (roleRegistry) {
+      try {
+        const resolvedRole = roleRegistry.resolveRole(role);
+        if (resolvedRole?.capabilities) {
+          lifecycleContext.capabilities = [...resolvedRole.capabilities];
+        }
+      } catch {
+        // Role not in registry — capabilities stay undefined
+      }
+    }
 
     const cleanupStatus = detectCleanupStatus(lifecycleContext, {
       messageRouter,

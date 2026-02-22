@@ -74,6 +74,9 @@ export interface SpawnAgentOptions {
    */
   role?: string;
 
+  /** Team instance ID this agent belongs to (set by TeamManager interceptor) */
+  team_instance?: string;
+
   /**
    * Stream ID to join (for workers and integrators).
    * Required for workers and integrators when using workspace isolation.
@@ -91,6 +94,12 @@ export interface SpawnAgentOptions {
    * If provided, the worker will claim this task and work on it.
    */
   dataplaneTaskId?: string;
+
+  /**
+   * Resolved capabilities for this agent's role.
+   * Injected by TeamRuntime spawn interceptor for capability-based workspace dispatch.
+   */
+  capabilities?: string[];
 }
 
 /**

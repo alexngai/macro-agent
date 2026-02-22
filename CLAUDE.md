@@ -159,6 +159,7 @@ src/
 │   ├── types.ts            # TeamManifest, TeamTopology, TeamCommunication
 │   ├── team-loader.ts      # YAML loading, role resolution, validation
 │   ├── team-runtime.ts     # Initialize, bootstrap, peer routing, signal filtering
+│   ├── team-manager.ts     # Multi-team lifecycle, composite dispatch, agent-team mapping
 │   └── index.ts            # Public exports
 │
 └── workspace/           # Workspace isolation
@@ -180,11 +181,15 @@ src/
 
 ### Teams
 
-Teams are declarative YAML configurations that define multi-agent topologies:
+Teams are declarative YAML configurations that define multi-agent topologies. Multiple teams can run concurrently on the same server.
+
 - **TeamLoader** (`team-loader.ts`): Parses `team.yaml`, resolves role inheritance, validates topology
-- **TeamRuntime** (`team-runtime.ts`): Wires team config into running services (roles, spawn interceptor, peer routing, signal filtering, emission validation, continuation monitoring)
+- **TeamRuntime** (`team-runtime.ts`): Per-instance runtime — registers roles, bootstraps root + companions, wires peer routing, signal filtering, emission validation, continuation monitoring
+- **TeamManager** (`team-manager.ts`): Owns all team instances. Installs composite spawn interceptor, signal filter, and emission validator that route to the correct TeamRuntime per agent-to-team mapping
+- **Agent membership**: Bootstrap agents (root + companions) are spawned as a unit. Dynamic children auto-join the parent's team. Standalone agents (no team parent) are unaffected
+- **Cross-team messaging**: Allowed — sender's emission rules and recipient's signal filter both apply independently
 - Teams compose on top of existing primitives — no team loaded = identical behavior to pre-team codebase
-- Team config is shared across processes via EventStore `team_config` event
+- Team config is shared across processes via scoped EventStore `team_config` events (filtered by `MACRO_TEAM_NAME`)
 
 ### Roles
 
@@ -323,6 +328,7 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 | `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | — |
 | `MACRO_WORKSPACE_POOL_SIZE` | Max concurrent workspaces | `10` |
 | `MACRO_MERGE_QUEUE_DB` | Merge queue SQLite path | `:memory:` |
+| `MACRO_TEAMS` | Comma-separated team templates to auto-start on boot | — |
 | `MACRO_TEAM_NAME` | Team name (injected into agent env by team runtime) | — |
 | `MACRO_TASK_MODE` | Task mode: `push` or `pull` (injected by team runtime) | — |
 | `MACRO_INTEGRATION_STRATEGY` | Integration strategy name (injected by team runtime) | — |

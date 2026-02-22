@@ -57,6 +57,7 @@ import {
 } from "../steering/index.js";
 import type { AgentId } from "../store/types/index.js";
 import { secureCompare } from "../auth/token.js";
+import type { TeamManager } from "../teams/team-manager.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Server Configuration
@@ -88,6 +89,8 @@ export interface APIServices {
   mailService?: import("../mail/mail-service.js").MailService;
   /** Optional conversation map for agent-to-conversation tracking */
   conversationMap?: import("../mail/conversation-map.js").ConversationMap;
+  /** Optional team manager for dynamic team management */
+  teamManager?: TeamManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -348,6 +351,113 @@ function registerConversationRoutes(
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Shared Team Routes Helper
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Register team management REST endpoints on an Express app.
+ * Shared between standalone and shared API modes.
+ *
+ * Endpoints:
+ *   POST   /api/teams      — Start a team instance
+ *   GET    /api/teams      — List running team instances
+ *   GET    /api/teams/:id  — Get team instance details
+ *   DELETE /api/teams/:id  — Teardown a team instance
+ */
+function registerTeamRoutes(
+  app: Express,
+  teamManager: TeamManager | undefined,
+  defaultCwd: string,
+  sendError: (res: Response, status: number, code: string, message: string) => void,
+  broadcast?: (channel: string, message: WSMessage) => void,
+): void {
+  if (!teamManager) return;
+
+  // POST /api/teams — Start a team instance
+  app.post("/api/teams", async (req: Request, res: Response) => {
+    const { template } = req.body ?? {};
+    if (!template || typeof template !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: template");
+    }
+
+    try {
+      const instance = await teamManager.startTeam(template, defaultCwd);
+      const result = {
+        id: instance.id,
+        templateName: instance.templateName,
+        rootAgentId: instance.result.rootId,
+        companionAgentIds: instance.result.companionIds,
+        taskMode: instance.runtime.getTaskMode(),
+        strategy: instance.runtime.getStrategyName(),
+      };
+
+      if (broadcast) {
+        broadcast("teams", { type: "team_started", data: result });
+      }
+
+      res.status(201).json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return sendError(res, 500, "TEAM_START_FAILED", message);
+    }
+  });
+
+  // GET /api/teams — List running team instances
+  app.get("/api/teams", (_req: Request, res: Response) => {
+    const instances = teamManager.getInstances();
+    res.json(instances.map((inst) => ({
+      id: inst.id,
+      templateName: inst.templateName,
+      rootAgentId: inst.result.rootId,
+      companionAgentIds: inst.result.companionIds,
+      taskMode: inst.runtime.getTaskMode(),
+      strategy: inst.runtime.getStrategyName(),
+    })));
+  });
+
+  // GET /api/teams/:id — Get team instance details
+  app.get("/api/teams/:id", (req: Request, res: Response) => {
+    const instance = teamManager.getInstance(req.params.id);
+    if (!instance) {
+      return sendError(res, 404, "TEAM_NOT_FOUND", `No team instance '${req.params.id}'`);
+    }
+
+    const manifest = instance.runtime.getManifest();
+    res.json({
+      id: instance.id,
+      templateName: instance.templateName,
+      rootAgentId: instance.result.rootId,
+      companionAgentIds: instance.result.companionIds,
+      taskMode: instance.runtime.getTaskMode(),
+      strategy: instance.runtime.getStrategyName(),
+      roles: manifest.roles,
+      communication: manifest.communication,
+    });
+  });
+
+  // DELETE /api/teams/:id — Teardown a team instance
+  app.delete("/api/teams/:id", async (req: Request, res: Response) => {
+    const instance = teamManager.getInstance(req.params.id);
+    if (!instance) {
+      return sendError(res, 404, "TEAM_NOT_FOUND", `No team instance '${req.params.id}'`);
+    }
+
+    try {
+      await teamManager.stopTeam(req.params.id);
+
+      if (broadcast) {
+        broadcast("teams", { type: "team_stopped", data: { id: req.params.id } });
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return sendError(res, 500, "TEAM_STOP_FAILED", message);
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Create API Server
 // ─────────────────────────────────────────────────────────────────
 
@@ -568,8 +678,11 @@ export function createAPIServer(
     res.json(status);
   });
 
-  // GET /api/team - Get active team info
+  // GET /api/team - Get active team info (DEPRECATED: use GET /api/teams)
   app.get("/api/team", (_req: Request, res: Response) => {
+    res.set("Deprecation", "true");
+    res.set("Link", '</api/teams>; rel="successor-version"');
+
     // Check for team config in EventStore
     const statusEvents = eventStore.query({ type: "status", limit: 50 });
     const teamConfigEvent = statusEvents.find(
@@ -590,6 +703,9 @@ export function createAPIServer(
       enforcement: tc.enforcement,
     });
   });
+
+  // Register dynamic team management routes
+  registerTeamRoutes(app, services.teamManager, process.cwd(), sendError, broadcastToChannel);
 
   // ─────────────────────────────────────────────────────────────────
   // Metrics Endpoints (Phase 5)
@@ -1259,10 +1375,10 @@ export function createAPIServer(
  * @returns Express app
  */
 export function createAPIApp(
-  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter"> & Pick<Partial<APIServices>, "mailService" | "conversationMap">,
-  config: { cors?: boolean; serverToken?: string } = {}
+  services: Pick<APIServices, "eventStore" | "agentManager" | "taskManager" | "messageRouter"> & Pick<Partial<APIServices>, "mailService" | "conversationMap" | "teamManager">,
+  config: { cors?: boolean; serverToken?: string; defaultCwd?: string } = {}
 ): Express {
-  const { cors = true, serverToken } = config;
+  const { cors = true, serverToken, defaultCwd } = config;
   const { agentManager, taskManager, messageRouter } = services;
 
   // Create shared state
@@ -1822,6 +1938,15 @@ export function createAPIApp(
 
   // Register conversation API routes (if mail service available)
   registerConversationRoutes(app, services, sendError);
+
+  // Register dynamic team management routes
+  registerTeamRoutes(
+    app,
+    services.teamManager,
+    defaultCwd ?? process.cwd(),
+    sendError,
+    state.broadcast,
+  );
 
   return app;
 }

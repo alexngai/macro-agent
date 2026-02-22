@@ -40,6 +40,8 @@ export interface Agent {
   task: string;
   task_id?: TaskId;
   role?: string;
+  /** Team instance ID this agent belongs to (set by TeamManager) */
+  team_instance?: string;
   config: AgentConfig;
   cwd: string;
   plan: Array<{ content: string; priority: string; status: string }>;
@@ -61,4 +63,7 @@ export interface AgentMetadataUpdate {
   name?: string;
   plan?: Array<{ content: string; priority: string; status: string }>;
   metadata?: Record<string, unknown>;
+  team_instance?: string;
+  /** Override the agent's working directory (e.g., to workspace worktree path) */
+  cwd?: string;
 }

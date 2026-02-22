@@ -103,6 +103,8 @@ export interface MCPServices {
   integrationStrategy?: import("../workspace/strategies/types.js").IntegrationStrategy;
   /** Optional task backend for pull model tools (claim/unclaim) */
   taskBackend?: import("../task/backend/types.js").TaskBackend;
+  /** Optional workspace manager for workspace isolation */
+  workspaceManager?: import("../workspace/types.js").WorkspaceManager;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1050,6 +1052,7 @@ export function createMCPServer(
         roleRegistry,
         integrationStrategy: services.integrationStrategy,
         taskMode: services.taskMode,
+        workspaceManager: services.workspaceManager,
       });
 
       try {
@@ -1059,6 +1062,14 @@ export function createMCPServer(
           details?: Record<string, unknown>;
           task_id?: string;
         });
+
+        // Persist events emitted by the done handler (MERGE_REQUEST, WORKER_DONE, etc.)
+        // so the main process polling can see them via EventStore reload.
+        try {
+          await eventStore.persist();
+        } catch {
+          // Best-effort — events may still be picked up on next reload
+        }
 
         // If shouldTerminate is true, schedule termination after this tool returns
         // The agent will be terminated after the tool execution completes
@@ -1095,7 +1106,7 @@ export function createMCPServer(
   // Tools: claim_task, unclaim_task, list_claimable_tasks (pull model)
   // ─────────────────────────────────────────────────────────────────
 
-  if (services.taskBackend && shouldRegisterTool("claim_task")) {
+  if (services.taskBackend && services.taskMode === "pull" && shouldRegisterTool("claim_task")) {
     server.registerTool(CLAIM_TASK_TOOL_INFO.name, {
       description: CLAIM_TASK_TOOL_INFO.description,
       inputSchema: ClaimTaskSchema,
@@ -1108,7 +1119,7 @@ export function createMCPServer(
     });
   }
 
-  if (services.taskBackend && shouldRegisterTool("unclaim_task")) {
+  if (services.taskBackend && services.taskMode === "pull" && shouldRegisterTool("unclaim_task")) {
     server.registerTool(UNCLAIM_TASK_TOOL_INFO.name, {
       description: UNCLAIM_TASK_TOOL_INFO.description,
       inputSchema: UnclaimTaskSchema,
@@ -1121,7 +1132,7 @@ export function createMCPServer(
     });
   }
 
-  if (services.taskBackend && shouldRegisterTool("list_claimable_tasks")) {
+  if (services.taskBackend && services.taskMode === "pull" && shouldRegisterTool("list_claimable_tasks")) {
     server.registerTool(LIST_CLAIMABLE_TASKS_TOOL_INFO.name, {
       description: LIST_CLAIMABLE_TASKS_TOOL_INFO.description,
       inputSchema: ListClaimableTasksSchema,

@@ -127,6 +127,79 @@ macro_agent:
     max_duration_ms: number
 ```
 
+## Team Manager
+
+The `TeamManager` (`src/teams/team-manager.ts`) owns team instance lifecycle at the server level. It supports multiple concurrent teams, each running independently with its own runtime, agent membership, and communication rules.
+
+### Starting Teams
+
+Teams can be started in three ways:
+
+1. **Config auto-start**: Set `team` (default) and/or `teams` entries with `autoStart: true` in `.multiagent/config.json`
+2. **REST API**: `POST /api/teams { "template": "self-driving" }`
+3. **Environment**: `MACRO_TEAMS=self-driving,structured` (comma-separated, all auto-start)
+
+```json
+{
+  "team": "self-driving",
+  "teams": {
+    "qa": { "autoStart": false },
+    "monitoring": { "template": "observer-team", "autoStart": true }
+  }
+}
+```
+
+Boot sequence: starts "self-driving" (default) + "monitoring" (autoStart). "qa" is available on demand via the REST API.
+
+### Agent Membership Model
+
+Agents relate to teams in three ways:
+
+**Bootstrap agents** — Spawned as a unit when a team starts. The root agent and all companions defined in `topology` are created together during `teamManager.startTeam()`. They are peers (`parent: null`), not parent-child.
+
+**Dynamic children** — Spawned at runtime by bootstrap agents (or their descendants). The composite spawn interceptor detects that the parent belongs to a team and injects team context: env vars (`MACRO_TEAM_NAME`, `MACRO_TASK_MODE`), topic subscriptions, and MCP servers. A lifecycle listener auto-registers the child in the parent's team. These agents are not pre-declared — they grow the team dynamically based on `spawn_rules`.
+
+**Standalone agents** — Spawned outside any team (e.g., via `POST /api/agents` or direct `agentManager.spawn()` with no team-member parent). No team context is injected, no team filters apply.
+
+```
+startTeam("self-driving")
+  → spawns planner (root)        ← bootstrap
+  → spawns judge (companion)     ← bootstrap
+
+planner spawns grinder            ← dynamic child, auto-joins self-driving
+grinder spawns sub-grinder        ← dynamic child, auto-joins self-driving
+
+POST /api/agents { task: "..." } ← standalone, no team
+```
+
+### Composite Dispatch
+
+When multiple teams run concurrently, the TeamManager installs composite functions on the shared services that route to the correct team's runtime based on agent-to-team membership:
+
+- **Spawn interceptor**: Looks up the parent agent's team, delegates to that team's interceptor to inject role-specific context, and tags the child with `team_instance`.
+- **Signal filter**: Uses the **recipient's** team filter. If the recipient isn't in any team, falls back to the **sender's** team filter. If neither is in a team, the signal is allowed.
+- **Emission validator**: Uses the **sender's** team to check whether the emitted signal is in the role's allowed emissions list.
+
+### Cross-Team Messaging
+
+Agents from different teams can communicate via explicit addressing. Both the sender's emission rules and the recipient's signal filter apply independently:
+
+- Emission validator checks whether the sender is allowed to emit the signal (sender's team rules)
+- Signal filter checks whether the recipient is allowed to receive the signal (recipient's team rules)
+
+### Team Instance Tracking
+
+Each team instance gets a unique ID (format: `{templateName}-{counter}`, e.g., `self-driving-1`). Every agent is tagged with its `team_instance` in the EventStore for durable tracking. Each team also emits a scoped `team_config` event with its `team_instance` field, which MCP subprocesses use to discover the correct team configuration via the `MACRO_TEAM_NAME` environment variable.
+
+### REST API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/teams` | Start a team instance (`{ "template": "name" }`) |
+| `GET` | `/api/teams` | List all running team instances |
+| `GET` | `/api/teams/:id` | Get team instance details |
+| `DELETE` | `/api/teams/:id` | Teardown a team instance |
+
 ## Task Assignment Modes
 
 ### Push Mode

@@ -1,7 +1,7 @@
 /**
  * Team Runtime
  *
- * Wires a loaded TeamManifest into the running system: registers roles,
+ * Wires a loaded team template into the running system: registers roles,
  * sets up integration strategy, configures communication topology,
  * and manages the team lifecycle.
  *
@@ -11,15 +11,22 @@
 import type { EventStore } from "../store/event-store.js";
 import type { MessageRouter } from "../router/message-router.js";
 import type { AgentManager, SpawnInterceptor } from "../agent/agent-manager.js";
+import type {
+  SignalFilter,
+  EmissionValidator,
+  EmissionValidatorResult,
+} from "../router/message-router.js";
 import type { RoleRegistry } from "../roles/types.js";
 import type { SpawnAgentOptions } from "../agent/types.js";
 import type { AgentId } from "../store/types/index.js";
 import type {
   TeamManifest,
+  MacroResolvedTemplate,
   McpServerEntry,
   PeerConnection,
 } from "./types.js";
 import type { IntegrationStrategy } from "../workspace/strategies/types.js";
+import { WORKSPACE_CAPABILITIES } from "../roles/capabilities.js";
 
 // =============================================================================
 // Types
@@ -29,11 +36,54 @@ export interface TeamServices {
   agentManager: AgentManager;
   messageRouter: MessageRouter;
   eventStore: EventStore;
+  /** Optional workspace manager for merge queue wiring */
+  workspaceManager?: import("../workspace/types.js").WorkspaceManager;
+  /** Optional task backend for auto-scaling queue depth checks */
+  taskBackend?: import("../task/backend/types.js").TaskBackend;
 }
 
 export interface TeamBootstrapResult {
   rootId: string;
   companionIds: string[];
+}
+
+// =============================================================================
+// Conversion: TeamManifest → MacroResolvedTemplate
+// =============================================================================
+
+/**
+ * Convert a legacy TeamManifest (with _ prefixed fields) to MacroResolvedTemplate.
+ * Used for backward compatibility when TeamRuntime receives a TeamManifest.
+ */
+function manifestToResolved(manifest: TeamManifest): MacroResolvedTemplate {
+  return {
+    template: {
+      manifest: {
+        name: manifest.name,
+        description: manifest.description,
+        version: manifest.version,
+        roles: manifest.roles,
+        topology: manifest.topology,
+        communication: manifest.communication,
+      },
+      roles: new Map(), // Not used — macro-agent uses resolvedRoles
+      prompts: new Map(), // Prompts are in _loadedPrompts
+      mcpServers: manifest._mcpServers,
+      sourcePath: "",
+    },
+    resolvedRoles: manifest._resolvedRoles,
+    macroAgent: manifest.macro_agent,
+  };
+}
+
+/**
+ * Check if input is a MacroResolvedTemplate (has `template` field)
+ * vs a legacy TeamManifest (has `_resolvedRoles` field).
+ */
+function isMacroResolvedTemplate(
+  input: TeamManifest | MacroResolvedTemplate
+): input is MacroResolvedTemplate {
+  return "template" in input && "resolvedRoles" in input;
 }
 
 // =============================================================================
@@ -46,6 +96,18 @@ export class TeamRuntime {
   private roleRegistry: RoleRegistry;
   private lifecycleUnsubscribe?: () => void;
   private integrationStrategy?: IntegrationStrategy;
+  private scalingTimer?: ReturnType<typeof setInterval>;
+  private lastScaleUpTime = 0;
+  private teamStreamId?: string;
+  private mergeQueueUnsub?: () => void;
+  private mergeRequestPollTimer?: ReturnType<typeof setInterval>;
+  private lastMergeRequestSeen = 0;
+
+  /** The resolved template (canonical internal representation) */
+  private readonly resolved: MacroResolvedTemplate;
+
+  /** Legacy loaded prompts map (path → content) for backward compat */
+  private readonly loadedPrompts: Map<string, string>;
 
   /** Role name → spawned agent ID mapping (populated during bootstrap) */
   private roleAgentMap = new Map<string, AgentId>();
@@ -59,14 +121,41 @@ export class TeamRuntime {
   /** Reverse mapping: agent ID → role name (for signal filter lookups) */
   private agentRoleMap = new Map<AgentId, string>();
 
+  /** Pre-computed per-role allowed signals from channel subscriptions */
+  private roleAllowedSignals = new Map<string, Set<string> | "all">();
+
   /** Lifecycle unsubscribe for deferred peer wiring */
   private peerWiringUnsubscribe?: () => void;
 
+  /**
+   * Create a TeamRuntime.
+   *
+   * Accepts either a MacroResolvedTemplate (new) or a TeamManifest (legacy).
+   * Internally always uses MacroResolvedTemplate.
+   */
   constructor(
-    private readonly manifest: TeamManifest,
+    input: TeamManifest | MacroResolvedTemplate,
     private readonly services: TeamServices
   ) {
+    this.resolved = isMacroResolvedTemplate(input)
+      ? input
+      : manifestToResolved(input);
+
+    // Extract loaded prompts from legacy manifest if available
+    this.loadedPrompts = !isMacroResolvedTemplate(input)
+      ? input._loadedPrompts
+      : new Map();
+
     this.roleRegistry = services.agentManager.getRoleRegistry();
+  }
+
+  // Convenience accessors
+  private get manifest() {
+    return this.resolved.template.manifest;
+  }
+
+  private get communication() {
+    return (this.manifest.communication ?? {}) as NonNullable<typeof this.manifest.communication>;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -78,25 +167,41 @@ export class TeamRuntime {
    *
    * 1. Register team roles into RoleRegistry
    * 2. Store team_config event in EventStore (for MCP subprocess discovery)
-   * 3. Register spawn interceptor on AgentManager
+   * 3. Instantiate integration strategy
+   *
+   * Note: Does NOT install spawn interceptor, signal filter, or emission
+   * validator on services. Call installOnServices() for standalone use,
+   * or let TeamManager handle composite installation.
    */
-  async initialize(): Promise<void> {
-    const { agentManager, eventStore } = this.services;
+  async initialize(options?: { teamInstanceId?: string }): Promise<void> {
+    const { eventStore } = this.services;
 
     // 1. Register team roles into RoleRegistry (custom layer, highest priority)
-    for (const [, resolved] of this.manifest._resolvedRoles) {
-      this.roleRegistry.registerRole(resolved.roleDefinition);
+    for (const [, resolved] of this.resolved.resolvedRoles) {
+      const rd = resolved.roleDefinition;
+      const existing = this.roleRegistry.getRole(rd.name);
+      if (existing) {
+        const existingCaps = [...existing.capabilities].sort();
+        const newCaps = [...rd.capabilities].sort();
+        if (existingCaps.length !== newCaps.length || existingCaps.some((c, i) => c !== newCaps[i])) {
+          console.warn(
+            `[TeamRuntime] Role '${rd.name}' conflict: team '${this.manifest.name}' re-registers with different capabilities. ` +
+            `Existing: [${existingCaps.join(", ")}], New: [${newCaps.join(", ")}]`
+          );
+        }
+      }
+      this.roleRegistry.registerRole(rd);
     }
 
     // 2. Store team config in EventStore for cross-process access (RD2)
-    const taskMode = this.manifest.macro_agent.task_assignment?.mode ?? "push";
-    const strategyName = this.manifest.macro_agent.integration?.strategy ?? "queue";
-    const strategyConfig = this.manifest.macro_agent.integration?.config ?? {};
-    const enforcement = this.manifest.communication.enforcement ?? "permissive";
+    const taskMode = this.resolved.macroAgent.task_assignment?.mode ?? "push";
+    const strategyName = this.resolved.macroAgent.integration?.strategy ?? "queue";
+    const strategyConfig = this.resolved.macroAgent.integration?.config ?? {};
+    const enforcement = this.communication.enforcement ?? "permissive";
 
     // Serialize resolved roles for MCP subprocess capability checks
     const serializedRoles: Record<string, { name: string; capabilities: string[]; tools?: object; lifecycle?: object; description?: string }> = {};
-    for (const [name, resolved] of this.manifest._resolvedRoles) {
+    for (const [name, resolved] of this.resolved.resolvedRoles) {
       const rd = resolved.roleDefinition;
       serializedRoles[name] = {
         name: rd.name,
@@ -115,32 +220,40 @@ export class TeamRuntime {
         summary: `Team '${this.manifest.name}' initialized`,
         team_config: {
           teamName: this.manifest.name,
+          ...(options?.teamInstanceId && { team_instance: options.teamInstanceId }),
           strategy: strategyName,
           strategyConfig,
           taskMode,
           enforcement,
           roles: serializedRoles,
-          peerRoutes: this.manifest.communication.routing?.peers ?? [],
-          emissions: this.manifest.communication.emissions ?? {},
+          peerRoutes: this.communication.routing?.peers ?? [],
+          emissions: this.communication.emissions ?? {},
         },
       },
     });
 
     await eventStore.persist();
 
-    // 2b. Instantiate integration strategy and call lifecycle hook
+    // 3. Instantiate integration strategy and call lifecycle hook
     try {
       const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
       this.integrationStrategy = defaultStrategyRegistry.get(strategyName, strategyConfig as Record<string, unknown>);
       if (this.integrationStrategy.initialize) {
         await this.integrationStrategy.initialize();
       }
+
+      // Wire merge queue to queue strategy if workspace manager is available
+      if (
+        this.services.workspaceManager &&
+        strategyName === "queue" &&
+        "setMergeQueue" in this.integrationStrategy
+      ) {
+        const mergeQueue = this.services.workspaceManager.getMergeQueue();
+        (this.integrationStrategy as { setMergeQueue(q: typeof mergeQueue): void }).setMergeQueue(mergeQueue);
+      }
     } catch {
       // Strategy instantiation is best-effort — queue strategy needs merge queue set later
     }
-
-    // 3. Register spawn interceptor
-    agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -149,9 +262,13 @@ export class TeamRuntime {
 
   /**
    * Spawn root and companion agents per the team topology.
+   *
+   * Populates internal state (agentRoleMap, peerSignalFilters) used by
+   * createSignalFilter() and createEmissionValidator(). Call installOnServices()
+   * after bootstrap for standalone use, or let TeamManager handle installation.
    */
   async bootstrap(): Promise<TeamBootstrapResult> {
-    const { agentManager, messageRouter } = this.services;
+    const { agentManager } = this.services;
     const { topology } = this.manifest;
 
     // 1. Spawn root agent
@@ -169,6 +286,10 @@ export class TeamRuntime {
       interactionPatterns: this.getInteractionPatterns(),
     });
     this.rootAgentId = root.id;
+
+    // 1b. Set up workspace integration BEFORE companions spawn,
+    // so the spawn interceptor has teamStreamId for workspace injection
+    this.setupWorkspaceIntegration(root.id as AgentId);
 
     // 2. Spawn companions (peers, not children)
     const companionIds: string[] = [];
@@ -197,14 +318,14 @@ export class TeamRuntime {
     }
     this.wirePeerRoutes();
 
-    // 4. Install signal filter on message router
-    this.installSignalFilter();
+    // 4. Pre-compute role allowed signals (used by createSignalFilter)
+    this.computeRoleAllowedSignals();
 
-    // 5. Install emission validator on message router
-    this.installEmissionValidator();
-
-    // 6. Set up continuation monitoring for daemon agents (P4.2)
+    // 5. Set up continuation monitoring for daemon agents (P4.2)
     this.monitorContinuations();
+
+    // 6. Set up auto-scaling monitoring
+    this.monitorScaling();
 
     return {
       rootId: root.id,
@@ -217,10 +338,13 @@ export class TeamRuntime {
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Tear down team: remove spawn interceptor, stop continuation monitoring.
+   * Tear down team: stop continuation monitoring, clean up strategy.
+   *
+   * Note: Does NOT clear spawn interceptor or filters on services.
+   * The caller (TeamManager or standalone code) is responsible for
+   * removing the interceptor/filters from shared services.
    */
   async teardown(): Promise<void> {
-    this.services.agentManager.setSpawnInterceptor(null);
     if (this.lifecycleUnsubscribe) {
       this.lifecycleUnsubscribe();
       this.lifecycleUnsubscribe = undefined;
@@ -228,6 +352,18 @@ export class TeamRuntime {
     if (this.peerWiringUnsubscribe) {
       this.peerWiringUnsubscribe();
       this.peerWiringUnsubscribe = undefined;
+    }
+    if (this.scalingTimer) {
+      clearInterval(this.scalingTimer);
+      this.scalingTimer = undefined;
+    }
+    if (this.mergeQueueUnsub) {
+      this.mergeQueueUnsub();
+      this.mergeQueueUnsub = undefined;
+    }
+    if (this.mergeRequestPollTimer) {
+      clearInterval(this.mergeRequestPollTimer);
+      this.mergeRequestPollTimer = undefined;
     }
     // Call strategy lifecycle close hook
     if (this.integrationStrategy?.close) {
@@ -245,17 +381,31 @@ export class TeamRuntime {
 
   /** Get task assignment mode */
   getTaskMode(): "push" | "pull" {
-    return this.manifest.macro_agent.task_assignment?.mode ?? "push";
+    return this.resolved.macroAgent.task_assignment?.mode ?? "push";
   }
 
   /** Get integration strategy name */
   getStrategyName(): string {
-    return this.manifest.macro_agent.integration?.strategy ?? "queue";
+    return this.resolved.macroAgent.integration?.strategy ?? "queue";
   }
 
   /** Get the active manifest (for API) */
   getManifest(): TeamManifest {
-    return this.manifest;
+    // Build a backward-compatible TeamManifest from the resolved template
+    return {
+      ...this.manifest,
+      description: this.manifest.description ?? "",
+      communication: this.communication,
+      macro_agent: this.resolved.macroAgent,
+      _resolvedRoles: this.resolved.resolvedRoles,
+      _loadedPrompts: this.loadedPrompts,
+      _mcpServers: this.resolved.template.mcpServers,
+    } as TeamManifest;
+  }
+
+  /** Get the resolved template */
+  getResolvedTemplate(): MacroResolvedTemplate {
+    return this.resolved;
   }
 
   /** Get root agent ID (after bootstrap) */
@@ -273,9 +423,30 @@ export class TeamRuntime {
     return this.integrationStrategy;
   }
 
+  /** Get team-wide integration stream ID (after bootstrap) */
+  getTeamStreamId(): string | undefined {
+    return this.teamStreamId;
+  }
+
   /** Get signal filters for peer connections (for use by signal filtering - i-3o8g) */
   getPeerSignalFilters(): ReadonlyMap<string, string[]> {
     return this.peerSignalFilters;
+  }
+
+  /** Get the agent → role mapping (for TeamManager agent-team lookups) */
+  getAgentRoleMap(): ReadonlyMap<AgentId, string> {
+    return this.agentRoleMap;
+  }
+
+  /** Register an agent's role mapping (for TeamManager to track dynamically spawned agents) */
+  registerAgent(agentId: AgentId, roleName: string): void {
+    this.agentRoleMap.set(agentId, roleName);
+    this.roleAgentMap.set(roleName, agentId);
+  }
+
+  /** Check if this team owns a given agent */
+  hasAgent(agentId: string): boolean {
+    return this.agentRoleMap.has(agentId as AgentId);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -289,7 +460,7 @@ export class TeamRuntime {
    * lifecycle config enables continuations, automatically spawn a continuation.
    */
   private monitorContinuations(): void {
-    const lifecycleConfig = this.manifest.macro_agent.lifecycle;
+    const lifecycleConfig = this.resolved.macroAgent.lifecycle;
     if (!lifecycleConfig?.continuations?.enabled) return;
 
     const { agentManager } = this.services;
@@ -330,18 +501,251 @@ export class TeamRuntime {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Auto-Scaling
+  // ─────────────────────────────────────────────────────────────
+
+  /** Minimum interval between scale-up actions (ms) */
+  private static readonly SCALE_COOLDOWN_MS = 10_000;
+
+  /** Default scaling check interval (ms) */
+  private static readonly SCALE_CHECK_INTERVAL_MS = 5_000;
+
+  /**
+   * Monitor task queue depth and auto-scale workers.
+   *
+   * Follows the same lifecycle pattern as monitorContinuations().
+   * Only active when `scaling.scale_on === "task_queue_depth"` and
+   * a task backend is available.
+   */
+  private monitorScaling(): void {
+    const scalingConfig = this.resolved.macroAgent.lifecycle?.scaling;
+    if (!scalingConfig || scalingConfig.scale_on !== "task_queue_depth") return;
+
+    const { taskBackend } = this.services;
+    if (!taskBackend?.listClaimable) return; // Need claimable task counting
+
+    const maxWorkers = scalingConfig.max_workers ?? Infinity;
+    const minWorkers = scalingConfig.min_workers ?? 0;
+
+    // Determine which role names are worker-derived (for counting active workers)
+    const workerRoleNames = new Set<string>();
+    for (const [name, resolved] of this.resolved.resolvedRoles) {
+      if (resolved.baseRole === "worker") {
+        workerRoleNames.add(name);
+      }
+    }
+    if (workerRoleNames.size === 0) return; // No worker roles to scale
+
+    // Pick the first worker role for spawning (most common pattern: single worker role)
+    const spawnRole = [...workerRoleNames][0];
+
+    this.scalingTimer = setInterval(async () => {
+      try {
+        // Count claimable tasks
+        const claimable = await taskBackend.listClaimable!();
+        const pendingCount = claimable.length;
+
+        // Count active workers in this team
+        const allAgents = this.services.agentManager.list({ state: "running" });
+        let activeWorkers = 0;
+        for (const agent of allAgents) {
+          if (agent.role && workerRoleNames.has(agent.role) && this.agentRoleMap.has(agent.id as AgentId)) {
+            activeWorkers++;
+          }
+        }
+
+        // Scale up: more pending tasks than active workers, under max cap
+        if (pendingCount > activeWorkers && activeWorkers < maxWorkers) {
+          const now = Date.now();
+          if (now - this.lastScaleUpTime < TeamRuntime.SCALE_COOLDOWN_MS) {
+            return; // Cooldown not elapsed
+          }
+
+          if (!this.rootAgentId) return; // No root to spawn from
+
+          try {
+            await this.services.agentManager.spawn({
+              task: `[${this.manifest.name}] auto-scaled ${spawnRole}`,
+              role: spawnRole,
+              parent: this.rootAgentId,
+            });
+            this.lastScaleUpTime = now;
+
+            // Emit scaling event for observability
+            this.services.eventStore.emit({
+              type: "status",
+              source: { agent_id: "system" },
+              payload: {
+                status_type: "scaling",
+                summary: `Auto-scaled: spawned ${spawnRole} (pending=${pendingCount}, active=${activeWorkers}, max=${maxWorkers})`,
+              },
+            });
+          } catch {
+            // Spawn failed — will retry on next tick
+          }
+        }
+
+        // Scale down is handled by idle_drain: workers self-terminate after idle_timeout_s
+        // No active termination needed from the scaling monitor
+      } catch {
+        // Best-effort — don't crash the scaling loop
+      }
+    }, TeamRuntime.SCALE_CHECK_INTERVAL_MS);
+
+    // Ensure timer doesn't prevent process exit
+    if (this.scalingTimer.unref) {
+      this.scalingTimer.unref();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Workspace Integration
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create the team-wide integration stream and subscribe to merge queue events.
+   *
+   * When a worker submits to the merge queue, the integrator agent is
+   * automatically prompted to process it.
+   */
+  private setupWorkspaceIntegration(rootAgentId: AgentId): void {
+    const { workspaceManager } = this.services;
+    if (!workspaceManager || !this.integrationStrategy) return;
+
+    // Create integration stream owned by root agent
+    try {
+      this.teamStreamId = workspaceManager.createIntegrationStream(
+        rootAgentId,
+        { name: this.manifest.name, forkFrom: "main" }
+      );
+    } catch {
+      // Workspace isolation unavailable (e.g., not a git repo)
+      return;
+    }
+
+    // Subscribe to merge queue events — wake integrator on mr:submitted
+    try {
+      const mergeQueue = workspaceManager.getMergeQueue();
+      if (mergeQueue?.onEvent) {
+        this.mergeQueueUnsub = mergeQueue.onEvent((event) => {
+          if (event.type !== "mr:submitted") return;
+
+          // Find agent with workspace.integrate capability in this team
+          for (const [agentId, roleName] of this.agentRoleMap) {
+            const resolved = this.resolved.resolvedRoles.get(roleName);
+            const caps = resolved?.capabilities ?? [];
+            if (caps.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
+              try {
+                this.services.agentManager.prompt(
+                  agentId,
+                  `Merge request ${(event as { data?: Record<string, unknown> }).data?.mrId} submitted ` +
+                  `by worker ${(event as { data?: Record<string, unknown> }).data?.workerAgentId} ` +
+                  `for branch ${(event as { data?: Record<string, unknown> }).data?.workerBranch}. ` +
+                  `Process the merge queue.`
+                );
+              } catch {
+                // Best-effort wake
+              }
+              break;
+            }
+          }
+        });
+      }
+    } catch {
+      // Merge queue not available — workspace isolation without merge queue
+    }
+
+    // Poll EventStore for MERGE_REQUEST signals from worker subprocesses.
+    // Workers in MCP subprocess emit to shared SQLite; main process must reload to see them.
+    this.startMergeRequestPolling();
+  }
+
+  /**
+   * Poll EventStore for MERGE_REQUEST signals emitted by worker subprocesses.
+   *
+   * Workers call done() in their MCP subprocess, which emits MERGE_REQUEST to
+   * the shared EventStore. This polling picks up those signals and submits to
+   * the merge queue on the main server.
+   */
+  private startMergeRequestPolling(): void {
+    const { workspaceManager, eventStore } = this.services;
+    if (!workspaceManager || !this.teamStreamId) return;
+
+    const mergeQueue = workspaceManager.getMergeQueue();
+    if (!mergeQueue) return;
+
+    this.mergeRequestPollTimer = setInterval(async () => {
+      try {
+        // Reload to see events written by subprocesses
+        if (eventStore.reload) {
+          await eventStore.reload();
+        }
+
+        const events = eventStore.query({ type: "status", limit: 100 });
+        for (const event of events) {
+          // Skip already-processed events
+          if (event.timestamp <= this.lastMergeRequestSeen) continue;
+
+          const details = event.payload?.details as Record<string, unknown> | undefined;
+          if (details?.signal !== "MERGE_REQUEST") continue;
+
+          // Check this agent belongs to our team
+          const sourceAgentId = event.source?.agent_id;
+          if (!sourceAgentId) continue;
+
+          // Check if agent is a team member OR a child of a team member
+          const isTeamMember = this.agentRoleMap.has(sourceAgentId as AgentId);
+          const parentAgent = eventStore.getAgent(sourceAgentId);
+          const isChildOfTeamMember = parentAgent?.parent
+            ? this.agentRoleMap.has(parentAgent.parent as AgentId)
+            : false;
+
+          if (!isTeamMember && !isChildOfTeamMember) continue;
+
+          this.lastMergeRequestSeen = event.timestamp;
+
+          // Extract merge request details
+          const sourceBranch = details.sourceBranch as string | undefined;
+          const taskId = details.taskId as string | undefined;
+          const workerId = details.workerId as string | undefined;
+
+          if (!sourceBranch || !workerId) continue;
+
+          // Submit to merge queue
+          try {
+            mergeQueue.submit({
+              streamId: this.teamStreamId!,
+              taskId: taskId ?? `task-${workerId}`,
+              workerBranch: sourceBranch,
+              workerAgentId: workerId,
+            });
+          } catch {
+            // Already submitted or other error — best-effort
+          }
+        }
+      } catch {
+        // Best-effort polling
+      }
+    }, 2000);
+
+    if (this.mergeRequestPollTimer.unref) {
+      this.mergeRequestPollTimer.unref();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Spawn Interceptor
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Create the spawn interceptor that injects team context into spawn options.
+   * Internal: Create the spawn interceptor that injects team context into spawn options.
    */
-  private createSpawnInterceptor(): SpawnInterceptor {
+  private _createSpawnInterceptor(): SpawnInterceptor {
     return (options: SpawnAgentOptions): SpawnAgentOptions => {
       const roleName = options.role;
       if (!roleName) return options;
 
-      const resolved = this.manifest._resolvedRoles.get(roleName);
+      const resolved = this.resolved.resolvedRoles.get(roleName);
       if (!resolved) return options; // Unknown role — pass through
 
       // Compute topics from communication topology
@@ -365,8 +769,31 @@ export class TeamRuntime {
       // Task backend config is propagated by AgentManager.buildMacroAgentMcp()
       // from its taskBackend/openTasksSocketPath config options.
 
+      // Inject workspace fields based on capabilities (never overwrite explicit values)
+      const capabilities = resolved.capabilities;
+      let streamId = options.streamId;
+      let streamConfig = options.streamConfig;
+      let dataplaneTaskId = options.dataplaneTaskId;
+
+      if (this.teamStreamId && capabilities) {
+        if (capabilities.includes(WORKSPACE_CAPABILITIES.WORKTREE)) {
+          streamId = streamId ?? this.teamStreamId;
+          // Pull-mode workers use agentId as workspace identifier (one worktree per lifetime)
+          dataplaneTaskId = dataplaneTaskId ?? `worker-${Date.now()}`;
+        } else if (capabilities.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
+          streamId = streamId ?? this.teamStreamId;
+        }
+        // workspace.stream: stream creation is managed by TeamRuntime.setupWorkspaceIntegration(),
+        // not auto-injected. Coordinators that need sub-streams pass explicit streamConfig.
+      }
+
       return {
         ...options,
+        // Workspace fields
+        streamId,
+        streamConfig,
+        dataplaneTaskId,
+        capabilities: capabilities ?? options.capabilities,
         // Merge topics
         topics: [
           ...(options.topics ?? []),
@@ -406,7 +833,7 @@ export class TeamRuntime {
    */
   private getTopicsForRole(roleName: string): string[] {
     const topics: string[] = [];
-    const subs = this.manifest.communication.subscriptions?.[roleName] ?? [];
+    const subs = this.communication.subscriptions?.[roleName] ?? [];
 
     for (const sub of subs) {
       // Channel name becomes the topic name
@@ -422,16 +849,16 @@ export class TeamRuntime {
    * Get MCP servers configured for a role.
    */
   private getMcpServersForRole(roleName: string): McpServerEntry[] {
-    return this.manifest._mcpServers.get(roleName) ?? [];
+    return this.resolved.template.mcpServers.get(roleName) ?? [];
   }
 
   /**
    * Get the loaded prompt content for a role.
    */
   private getPromptForRole(roleName: string): string | undefined {
-    const resolved = this.manifest._resolvedRoles.get(roleName);
+    const resolved = this.resolved.resolvedRoles.get(roleName);
     if (!resolved?.prompt) return undefined;
-    return this.manifest._loadedPrompts.get(resolved.prompt);
+    return this.loadedPrompts.get(resolved.prompt);
   }
 
   /**
@@ -442,7 +869,7 @@ export class TeamRuntime {
   ): string | undefined {
     // Prefer topology-level prompt reference
     if (node.prompt) {
-      return this.manifest._loadedPrompts.get(node.prompt);
+      return this.loadedPrompts.get(node.prompt);
     }
     // Fall back to role-level prompt
     return this.getPromptForRole(node.role);
@@ -456,7 +883,7 @@ export class TeamRuntime {
     const taskMode = this.getTaskMode();
 
     if (taskMode === "pull") {
-      const pullConfig = this.manifest.macro_agent.task_assignment?.pull;
+      const pullConfig = this.resolved.macroAgent.task_assignment?.pull;
       const idleTimeout = pullConfig?.idle_timeout_s ?? 300;
 
       patterns.push(`## Task Claiming
@@ -490,27 +917,142 @@ Focus on correctness — your changes go live immediately.`);
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Signal Filtering
+  // Exposed Interceptor / Filter / Validator Factories
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Install a signal filter on the message router.
+   * Create the spawn interceptor for this team.
+   *
+   * Returns a function that injects team context (topics, MCP servers,
+   * env vars, prompt, interaction patterns) into spawn options.
+   * The caller (TeamManager or installOnServices) is responsible for
+   * installing it on AgentManager.
+   */
+  createSpawnInterceptor(): SpawnInterceptor {
+    return this._createSpawnInterceptor();
+  }
+
+  /**
+   * Create the signal filter for this team.
    *
    * Combines two filter sources:
-   * 1. Channel subscription filters (per-role, per-topic): from communication.subscriptions
-   * 2. Peer connection filters (per-agent-pair): from communication.routing.peers
+   * 1. Channel subscription filters (per-role, per-topic)
+   * 2. Peer connection filters (per-agent-pair)
    *
-   * Status events with no details.signal always pass through (backwards compat).
+   * Must be called after bootstrap() so that agentRoleMap and
+   * peerSignalFilters are populated. Returns null if no filtering needed.
    */
-  private installSignalFilter(): void {
-    const { messageRouter } = this.services;
+  createSignalFilter(): SignalFilter | null {
+    return (from: AgentId, to: AgentId, signal: string | undefined): boolean => {
+      // Untagged status events always pass through
+      if (!signal) return true;
 
-    // Pre-compute per-role allowed signals from channel subscriptions.
-    // Key: role name, Value: Set of allowed signal names.
-    // If a role has any subscription without a signals filter, it receives all signals.
-    const roleAllowedSignals = new Map<string, Set<string> | "all">();
+      // Check peer connection filter (directional: from→to)
+      const peerFilter = this.peerSignalFilters.get(`${from}→${to}`);
+      if (peerFilter) {
+        return peerFilter.includes(signal);
+      }
 
-    for (const [roleName, subs] of Object.entries(this.manifest.communication.subscriptions ?? {})) {
+      // Check channel subscription filter for recipient's role
+      const recipientRole = this.agentRoleMap.get(to);
+      if (recipientRole) {
+        const allowed = this.roleAllowedSignals.get(recipientRole);
+        if (allowed && allowed !== "all") {
+          return allowed.has(signal);
+        }
+      }
+
+      // No filter configured — allow delivery
+      return true;
+    };
+  }
+
+  /**
+   * Create the emission validator for this team.
+   *
+   * Checks whether an agent's emitted signal is in its role's allowed
+   * emissions list. Behavior depends on enforcement mode.
+   * Returns null if no emissions config exists.
+   */
+  createEmissionValidator(): EmissionValidator | null {
+    const emissions = this.communication.emissions;
+    const enforcement = this.communication.enforcement ?? "permissive";
+
+    // No emissions config — nothing to enforce
+    if (!emissions || Object.keys(emissions).length === 0) return null;
+
+    return (agentId: AgentId, signal: string | undefined): EmissionValidatorResult => {
+      // Untagged status events are always allowed
+      if (!signal) return { action: "allow" };
+
+      const role = this.agentRoleMap.get(agentId);
+      if (!role) return { action: "allow" };
+
+      const allowedSignals = emissions[role];
+      if (!allowedSignals) return { action: "allow" };
+
+      if (allowedSignals.includes(signal)) {
+        return { action: "allow" };
+      }
+
+      // Signal not in allowed list — enforce
+      const message = `Agent '${agentId}' (role: ${role}) emitted disallowed signal '${signal}'. Allowed: [${allowedSignals.join(", ")}]`;
+
+      switch (enforcement) {
+        case "strict":
+          return { action: "reject", message };
+        case "audit":
+          return { action: "audit", message };
+        case "permissive":
+        default:
+          return { action: "warn", message };
+      }
+    };
+  }
+
+  /**
+   * Convenience method: install interceptor, signal filter, and emission
+   * validator directly on the shared services.
+   *
+   * Use this for standalone operation (without TeamManager).
+   * TeamManager uses the individual create* methods for composite dispatch.
+   */
+  installOnServices(): void {
+    const { agentManager, messageRouter } = this.services;
+
+    agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
+
+    const signalFilter = this.createSignalFilter();
+    if (signalFilter && messageRouter.setSignalFilter) {
+      messageRouter.setSignalFilter(signalFilter);
+    }
+
+    const emissionValidator = this.createEmissionValidator();
+    if (emissionValidator && messageRouter.setEmissionValidator) {
+      messageRouter.setEmissionValidator(emissionValidator);
+    }
+  }
+
+  /**
+   * Convenience method: uninstall interceptor and filters from services.
+   * Use on teardown for standalone operation.
+   */
+  uninstallFromServices(): void {
+    this.services.agentManager.setSpawnInterceptor(null);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Internal: Pre-compute role allowed signals
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Pre-compute per-role allowed signals from channel subscriptions.
+   * Called during bootstrap() so createSignalFilter() can use the result.
+   */
+  private computeRoleAllowedSignals(): void {
+    this.roleAllowedSignals.clear();
+
+    for (const [roleName, subs] of Object.entries(this.communication.subscriptions ?? {})) {
       let allowed: Set<string> | "all" = new Set<string>();
 
       for (const sub of subs) {
@@ -524,80 +1066,7 @@ Focus on correctness — your changes go live immediately.`);
         }
       }
 
-      roleAllowedSignals.set(roleName, allowed);
-    }
-
-    if (messageRouter.setSignalFilter) {
-      messageRouter.setSignalFilter((from, to, signal) => {
-        // Untagged status events always pass through
-        if (!signal) return true;
-
-        // Check peer connection filter (directional: from→to)
-        const peerFilter = this.peerSignalFilters.get(`${from}→${to}`);
-        if (peerFilter) {
-          return peerFilter.includes(signal);
-        }
-
-        // Check channel subscription filter for recipient's role
-        const recipientRole = this.agentRoleMap.get(to);
-        if (recipientRole) {
-          const allowed = roleAllowedSignals.get(recipientRole);
-          if (allowed && allowed !== "all") {
-            return allowed.has(signal);
-          }
-        }
-
-        // No filter configured — allow delivery
-        return true;
-      });
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Emission Validation
-  // ─────────────────────────────────────────────────────────────
-
-  /**
-   * Install emission validator on the message router.
-   * Checks whether an agent's emitted signal is in its role's allowed emissions list.
-   * Behavior depends on enforcement mode: strict (reject), permissive (warn), audit (record).
-   */
-  private installEmissionValidator(): void {
-    const { messageRouter } = this.services;
-    const emissions = this.manifest.communication.emissions;
-    const enforcement = this.manifest.communication.enforcement ?? "permissive";
-
-    // No emissions config — nothing to enforce
-    if (!emissions || Object.keys(emissions).length === 0) return;
-
-    if (messageRouter.setEmissionValidator) {
-      messageRouter.setEmissionValidator((agentId, signal) => {
-        // Untagged status events are always allowed
-        if (!signal) return { action: "allow" };
-
-        const role = this.agentRoleMap.get(agentId);
-        if (!role) return { action: "allow" };
-
-        const allowedSignals = emissions[role];
-        if (!allowedSignals) return { action: "allow" };
-
-        if (allowedSignals.includes(signal)) {
-          return { action: "allow" };
-        }
-
-        // Signal not in allowed list — enforce
-        const message = `Agent '${agentId}' (role: ${role}) emitted disallowed signal '${signal}'. Allowed: [${allowedSignals.join(", ")}]`;
-
-        switch (enforcement) {
-          case "strict":
-            return { action: "reject", message };
-          case "audit":
-            return { action: "audit", message };
-          case "permissive":
-          default:
-            return { action: "warn", message };
-        }
-      });
+      this.roleAllowedSignals.set(roleName, allowed);
     }
   }
 
@@ -610,7 +1079,7 @@ Focus on correctness — your changes go live immediately.`);
    * Falls back to legacy bidirectional subtree subs when no peers config exists.
    */
   private wirePeerRoutes(): void {
-    const peers = this.manifest.communication.routing?.peers;
+    const peers = this.communication.routing?.peers;
 
     if (!peers || peers.length === 0) {
       // Fallback: hardcoded mutual subtree subscriptions (backwards compat)
