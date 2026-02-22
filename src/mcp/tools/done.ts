@@ -94,11 +94,7 @@ export function hasLifecycleDoneCapability(
 ): { hasCapability: boolean; role: string } {
   // Get the agent to find their role
   const agent = eventStore.getAgent(agentId);
-  if (!agent) {
-    return { hasCapability: false, role: "unknown" };
-  }
-
-  const role = agent.role ?? "worker";
+  const role = agent?.role ?? "worker";
 
   // Use RoleRegistry for capability lookup when available
   if (roleRegistry) {
@@ -245,6 +241,10 @@ export function createDoneHandler(context: ToolContext, deps: DoneToolDeps) {
         summary: args.summary ?? `Agent done with status: ${args.status}`,
         details: args.details,
       });
+      // Persist immediately so the parent process can detect done() via EventStore reload.
+      // MCP subprocesses run with disableAutoSave to prevent cross-process data corruption,
+      // so this explicit persist is required for the status event to reach the parent.
+      await eventStore.persist();
     } catch {
       // Continue even if emit fails
     }

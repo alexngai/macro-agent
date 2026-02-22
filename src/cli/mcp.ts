@@ -123,9 +123,12 @@ async function startLegacy() {
     createSessionProviderFromAgentManager,
   } = await import("../agent/wake.js");
 
-  // Initialize services with shared file-based storage
-  const eventStore = await createEventStore({ inMemory: false, instanceId, baseDir });
+  // Initialize services with shared file-based storage.
+  // Disable auto-save to prevent cross-process data corruption: the parent
+  // process owns auto-save; this subprocess only persists via explicit persist() calls.
+  const eventStore = await createEventStore({ inMemory: false, instanceId, baseDir, disableAutoSave: true });
   debugLog(`[MCP] EventStore created, path: ${eventStore.instancePath}`);
+
   const messageRouter = createMessageRouter(eventStore);
   const agentManager = createAgentManager(eventStore, messageRouter);
   const taskManager = createTaskManager(eventStore);

@@ -307,4 +307,7 @@ export {
   type CognitiveTask,
   type CognitiveAgentState,
   type CognitiveAgentSpawnConfig,
+  initCognitiveTeam,
+  type CognitiveTeamServices,
+  type CognitiveTeamHandle,
 } from './cognitive/index.js';

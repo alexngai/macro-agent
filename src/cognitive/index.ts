@@ -32,3 +32,10 @@ export {
   convertUpdatesToSession,
   updateSessionFromEvent,
 } from "./session-converter.js";
+
+// Team lifecycle (Phase 2)
+export {
+  initCognitiveTeam,
+  type CognitiveTeamServices,
+  type CognitiveTeamHandle,
+} from "./team-lifecycle.js";

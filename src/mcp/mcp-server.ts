@@ -425,6 +425,10 @@ export function createMCPServer(
       }
     }
 
+    // Persist immediately so parent process can detect status via EventStore reload.
+    // Required when MCP subprocess runs with disableAutoSave.
+    await eventStore.persist();
+
     return {
       content: [
         {

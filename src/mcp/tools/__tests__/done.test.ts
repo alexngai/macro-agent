@@ -105,13 +105,14 @@ describe("done tool", () => {
   // ─────────────────────────────────────────────────────────────────────────────
 
   describe("hasLifecycleDoneCapability", () => {
-    it("should return false for unknown agent", () => {
+    it("should default to worker role when agent not found", () => {
       const eventStore = { getAgent: vi.fn().mockReturnValue(null) };
 
       const result = hasLifecycleDoneCapability(eventStore as any, "unknown");
 
-      expect(result.hasCapability).toBe(false);
-      expect(result.role).toBe("unknown");
+      // Falls back to 'worker' role which has lifecycle.done capability
+      expect(result.hasCapability).toBe(true);
+      expect(result.role).toBe("worker");
     });
 
     it("should return true for worker role", () => {

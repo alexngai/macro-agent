@@ -368,7 +368,11 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
     // Auto-save: persist to disk whenever the in-memory store changes.
     // Without this, emit() only writes to TinyBase's in-memory store and
     // data is lost if the server is killed before an explicit persist().
-    await persister.startAutoSave();
+    // Disabled for secondary instances (e.g., MCP subprocesses) to prevent
+    // cross-process data corruption from concurrent TinyBase save operations.
+    if (!config.disableAutoSave) {
+      await persister.startAutoSave();
+    }
   }
 
   // Initialize/update instance metadata

@@ -93,6 +93,14 @@ export interface StoreConfig {
    */
   peerVisibility?: PeerVisibilityConfig;
 
+  /**
+   * Disable auto-save for cross-process safety.
+   * When true, changes are only persisted via explicit persist() calls.
+   * Use this for secondary EventStore instances (e.g., MCP subprocesses)
+   * that share a SQLite file with a primary instance.
+   */
+  disableAutoSave?: boolean;
+
   // ─── Legacy options (backward compatible) ───
 
   /**
