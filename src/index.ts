@@ -292,3 +292,6 @@ export {
   type WakeSessionProvider,
   type WakeAgentOptions,
 } from './agent/wake.js';
+
+// Teams - template seeding
+export { seedDefaultTemplates } from './teams/seed-defaults.js';

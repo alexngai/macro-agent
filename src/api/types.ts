@@ -184,7 +184,9 @@ export type WSMessageType =
   | "status"
   | "error"
   | "conversation_update"
-  | "turn_added";
+  | "turn_added"
+  | "team_started"
+  | "team_stopped";
 
 export interface WSMessage {
   type: WSMessageType;

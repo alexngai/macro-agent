@@ -12,6 +12,7 @@ import {
   AGENT_CAPABILITIES,
   LIFECYCLE_CAPABILITIES,
   MSG_CAPABILITIES,
+  WORKSPACE_CAPABILITIES,
 } from "../capabilities.js";
 
 /**
@@ -39,6 +40,7 @@ export const IntegratorRole: RoleDefinition = {
     LIFECYCLE_CAPABILITIES.DONE,
     MSG_CAPABILITIES.SEND,
     MSG_CAPABILITIES.SUBSCRIBE,
+    WORKSPACE_CAPABILITIES.INTEGRATE,
   ],
 
   workspace: {

@@ -31,9 +31,11 @@ import {
   registerTaskExtensions,
   registerResumeExtension,
   registerAgentLifecycleExtensions,
+  registerStreamExtensions,
   type MAPAdapter,
   type MAPAdapterServices,
   type MAPWebSocketHandler,
+  type StreamExtensionServices,
 } from "../map/adapter/index.js";
 import type { Agent, AgentId } from "../store/types/index.js";
 import type { Address, SendOptions } from "../map/types.js";
@@ -49,6 +51,7 @@ import {
   secureCompare,
 } from "../auth/token.js";
 import { TaskBackend, TaskToolProvider } from "../task/backend/types.js";
+import type { TeamManager } from "../teams/team-manager.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -73,6 +76,12 @@ export interface CombinedServerServices {
   agentTokenManager?: AgentTokenManager;
   /** Get connected opentasks project paths (for health endpoint) */
   getConnectedProjects?: () => string[];
+  /** Optional stream extension services for git-cascade stream/checkpoint/merge-queue features */
+  streamExtensions?: StreamExtensionServices;
+  /** Optional team manager for dynamic team management */
+  teamManager?: TeamManager;
+  /** Optional workspace manager for workspace isolation and merge queue */
+  workspaceManager?: import("../workspace/types.js").WorkspaceManager;
 }
 
 export interface CombinedServerConfig {
@@ -258,7 +267,7 @@ export function createCombinedServer(
   // Create Express app with API routes (include mail services)
   const app = createAPIApp(
     { ...services, mailService, conversationMap },
-    { cors, serverToken: resolvedServerToken },
+    { cors, serverToken: resolvedServerToken, defaultCwd },
   );
 
   // Create HTTP server with Express
@@ -368,6 +377,11 @@ export function createCombinedServer(
       taskToolContext: services.taskToolContext,
       agentTokenManager: services.agentTokenManager,
     });
+
+    // Register stream/checkpoint/diffStack/mergeQueue extensions
+    if (services.streamExtensions) {
+      registerStreamExtensions(mapAdapter, services.streamExtensions);
+    }
 
     mapHandler = createMAPWebSocketHandler(mapAdapter);
   }

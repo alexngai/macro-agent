@@ -253,12 +253,18 @@ async function startLegacy() {
     }
   });
 
-  // Read team config from EventStore
+  // Read team config from EventStore (scoped by MACRO_TEAM_NAME for multi-team)
   let teamTaskMode: string | undefined;
+  const myTeamName = process.env.MACRO_TEAM_NAME;
   const teamEvents = eventStore.query({ type: "status", limit: 50 });
-  const teamConfigEvent = teamEvents.find(
-    (e) => e.payload?.team_config != null
-  );
+  const teamConfigEvent = teamEvents.find((e) => {
+    const tc = e.payload?.team_config as Record<string, unknown> | undefined;
+    if (!tc) return false;
+    // If agent has a team name, find that specific team's config
+    if (myTeamName) return tc.teamName === myTeamName;
+    // Fallback: first team_config found (backward compat)
+    return true;
+  });
   if (teamConfigEvent?.payload?.team_config) {
     const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
     teamTaskMode = tc.taskMode as string | undefined;
@@ -282,15 +288,23 @@ async function startLegacy() {
 
     const strategyName = tc.strategy as string | undefined;
     if (strategyName) {
-      try {
-        const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
-        integrationStrategy = defaultStrategyRegistry.get(
-          strategyName,
-          tc.strategyConfig as Record<string, unknown> | undefined
-        );
-        debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
-      } catch (err) {
-        debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
+      // Queue strategy requires merge queue which is only available in the main process.
+      // Skip it so the worker handler falls through to MERGE_REQUEST signal emission,
+      // which the main server's TeamRuntime polls for and submits to the real merge queue.
+      if (strategyName === "queue") {
+        debugLog(`[MCP] Skipping queue strategy in subprocess (no merge queue available). ` +
+          `Worker done() will emit MERGE_REQUEST signal for main process to handle.`);
+      } else {
+        try {
+          const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
+          integrationStrategy = defaultStrategyRegistry.get(
+            strategyName,
+            tc.strategyConfig as Record<string, unknown> | undefined
+          );
+          debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
+        } catch (err) {
+          debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
+        }
       }
     }
   }

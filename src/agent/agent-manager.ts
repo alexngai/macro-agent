@@ -493,6 +493,7 @@ export function createAgentManager(
     permissionMode: string;
     lineage?: string[];
     sessionId?: string;
+    streamId?: string;
   }) {
     // Common env vars for both thin-client and legacy modes
     const env = [
@@ -509,6 +510,9 @@ export function createAgentManager(
         name: "OPENTASKS_SOCKET_PATH",
         value: configOpenTasksSocketPath ?? process.env.OPENTASKS_SOCKET_PATH ?? "",
       },
+      // Pass streamId so MCP subprocess can include it in lifecycle context
+      // (WorkspaceManager is not available in subprocess)
+      { name: "MACRO_STREAM_ID", value: opts.streamId ?? "" },
     ];
 
     if (serverUrl) {
@@ -577,9 +581,11 @@ export function createAgentManager(
       interactionPatterns,
       // Workspace-related fields (Phase 2)
       role,
+      team_instance,
       streamId,
       streamConfig,
       dataplaneTaskId,
+      capabilities,
     } = options;
 
     // Generate IDs upfront (including session_id so we can persist before starting MCP)
@@ -674,6 +680,7 @@ export function createAgentManager(
         task_id: taskId,
         parent: parent ?? null,
         role: role ?? undefined,
+        team_instance: team_instance ?? undefined,
         config: agentConfig ?? {},
         cwd,
       },
@@ -708,16 +715,95 @@ export function createAgentManager(
       });
 
       try {
+        // ─────────────────────────────────────────────────────────────────
+        // Workspace Creation (before session, so cwd reflects worktree)
+        // ─────────────────────────────────────────────────────────────────
+        let workspace: Workspace | undefined;
+        let resolvedStreamId = streamId;
+
+        if (workspaceManager && role) {
+          try {
+            workspace = await createWorkspaceForRole(
+              workspaceManager,
+              agentId,
+              role,
+              {
+                streamId,
+                streamConfig,
+                dataplaneTaskId,
+                capabilities,
+                cwd,
+              },
+            );
+
+            if (workspace) {
+              agentWorkspaces.set(agentId, workspace);
+              resolvedStreamId = workspace.streamId;
+
+              // Create and claim a dataplane task so the worktree gets a real
+              // worker branch.  Without this, the worktree stays in detached
+              // HEAD and done() would detect "HEAD" instead of the actual
+              // worker branch name (e.g. worker/<agentId>/<taskId>).
+              if (workspace.role === "worker" && workspace.streamId) {
+                try {
+                  const dpTaskId = workspaceManager.createTask(
+                    workspace.streamId,
+                    { title: task ?? `Task for ${agentId}` },
+                  );
+                  workspaceManager.claimTask(dpTaskId, agentId, workspace.path);
+                } catch (claimErr) {
+                  console.error(
+                    `[AgentManager] Failed to create/claim dataplane task for ${agentId}:`,
+                    claimErr,
+                  );
+                  // Continue without a branch — worktree stays in detached HEAD
+                }
+              }
+
+              // Register with parent coordinator if applicable
+              const isChildRole = role === "worker" || role === "integrator" ||
+                (capabilities && (capabilities.includes("workspace.worktree") || capabilities.includes("workspace.integrate")));
+              if (parent && isChildRole) {
+                const parentWorkspace = agentWorkspaces.get(parent);
+                if (parentWorkspace?.role === "coordinator") {
+                  workspaceManager.registerChildWorkspace(
+                    parent,
+                    agentId,
+                    workspace.path,
+                  );
+                }
+              }
+            }
+          } catch (wsError) {
+            console.error(
+              `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`,
+            );
+            // Continue without workspace — don't fail the spawn
+          }
+        }
+
+        // Use workspace path as the agent's working directory when available.
+        // This ensures the agent process, MCP subprocess (MACRO_AGENT_CWD), and
+        // done handler all use the worktree path instead of the repo root.
+        const effectiveCwd = workspace?.path ?? cwd;
+
+        // Update agent's cwd in EventStore so resume() also uses workspace path
+        if (workspace) {
+          eventStore.updateAgentMetadata(agentId as AgentId, { cwd: effectiveCwd });
+          await eventStore.persist();
+        }
+
         const macroAgentMcp = buildMacroAgentMcp({
           agentId,
           parentId: parent ?? "",
           taskId,
-          cwd,
+          cwd: effectiveCwd,
           permissionMode,
           lineage: parentAgent?.lineage
             ? [...parentAgent.lineage, parent!]
             : [],
           sessionId,
+          streamId,
         });
 
         // Combine with any user-provided MCP servers
@@ -744,7 +830,7 @@ export function createAgentManager(
           permissionMode === "interactive"
             ? { claudeCode: { options: { settingSources: [] } } }
             : undefined;
-        const session = await handle.createSession(cwd, {
+        const session = await handle.createSession(effectiveCwd, {
           mcpServers: [macroAgentMcp, ...userMcpServers],
           ...(agentMeta && { agentMeta }),
         });
@@ -833,50 +919,6 @@ export function createAgentManager(
 
         // Get the agent from materialized view
         const agent = eventStore.getAgent(agentId)!;
-
-        // ─────────────────────────────────────────────────────────────────
-        // Workspace Creation (Phase 2)
-        // ─────────────────────────────────────────────────────────────────
-        let workspace: Workspace | undefined;
-        let resolvedStreamId = streamId;
-
-        if (workspaceManager && role) {
-          try {
-            workspace = await createWorkspaceForRole(
-              workspaceManager,
-              agentId,
-              role,
-              {
-                streamId,
-                streamConfig,
-                dataplaneTaskId,
-                cwd,
-              },
-            );
-
-            if (workspace) {
-              agentWorkspaces.set(agentId, workspace);
-              resolvedStreamId = workspace.streamId;
-
-              // Register with parent coordinator if applicable
-              if (parent && (role === "worker" || role === "integrator")) {
-                const parentWorkspace = agentWorkspaces.get(parent);
-                if (parentWorkspace?.role === "coordinator") {
-                  workspaceManager.registerChildWorkspace(
-                    parent,
-                    agentId,
-                    workspace.path,
-                  );
-                }
-              }
-            }
-          } catch (wsError) {
-            console.error(
-              `[AgentManager] Failed to create workspace for ${agentId}: ${wsError}`,
-            );
-            // Continue without workspace - don't fail the spawn
-          }
-        }
 
         // Notify lifecycle listeners
         notifyLifecycle({ type: "spawned", agent });
@@ -1258,6 +1300,7 @@ export function createAgentManager(
         task_id: taskId,
         parent: sourceAgent.parent ?? null,
         role: sourceAgent.role ?? undefined,
+        team_instance: sourceAgent.team_instance ?? undefined,
         config: {},
         cwd,
         metadata: { fork_of: sourceAgentId },
@@ -1971,16 +2014,25 @@ interface CreateWorkspaceOptions {
   streamId?: string;
   streamConfig?: import("../workspace/types.js").StreamConfig;
   dataplaneTaskId?: string;
+  capabilities?: string[];
   cwd: string;
 }
 
 /**
- * Create a workspace for an agent based on their role.
+ * Create a workspace for an agent based on their capabilities.
+ *
+ * Dispatches on workspace capabilities (workspace.stream, workspace.integrate,
+ * workspace.worktree) rather than role names. This allows team-defined roles
+ * (e.g., "developer" extending "worker") to get proper workspace allocation
+ * by inheriting workspace capabilities from their base role.
+ *
+ * Falls back to role-name matching for backward compatibility when no
+ * capabilities are provided.
  *
  * @param workspaceManager - WorkspaceManager instance
  * @param agentId - Agent ID
- * @param role - Agent role (e.g., 'worker', 'coordinator', 'integrator')
- * @param options - Additional options
+ * @param role - Agent role name (used for logging and fallback)
+ * @param options - Workspace options including capabilities
  * @returns Created workspace or undefined
  */
 async function createWorkspaceForRole(
@@ -1989,66 +2041,85 @@ async function createWorkspaceForRole(
   role: string,
   options: CreateWorkspaceOptions,
 ): Promise<Workspace | undefined> {
-  const { streamId, streamConfig, dataplaneTaskId } = options;
+  const { streamId, streamConfig, dataplaneTaskId, capabilities } = options;
 
+  // Capability-based dispatch (preferred — works for team-defined roles)
+  if (capabilities && capabilities.length > 0) {
+    if (capabilities.includes("workspace.stream")) {
+      // Coordinator pattern: create integration stream.
+      // In team mode, stream is managed by TeamRuntime.setupWorkspaceIntegration(),
+      // so missing streamConfig is expected — return silently.
+      if (!streamConfig) {
+        return undefined;
+      }
+      const newStreamId = workspaceManager.createIntegrationStream(agentId, streamConfig);
+      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+
+    } else if (capabilities.includes("workspace.integrate")) {
+      // Integrator pattern: join existing stream
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] ${role} ${agentId} has workspace.integrate but no streamId, skipping workspace`,
+        );
+        return undefined;
+      }
+      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+
+    } else if (capabilities.includes("workspace.worktree")) {
+      // Worker pattern: create worktree in stream
+      if (!streamId) {
+        console.warn(
+          `[AgentManager] ${role} ${agentId} has workspace.worktree but no streamId, skipping workspace`,
+        );
+        return undefined;
+      }
+      const taskId = dataplaneTaskId ?? agentId;
+      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+    }
+
+    // Has capabilities but no workspace capability — no workspace needed
+    return undefined;
+  }
+
+  // Fallback: role-name dispatch (backward compatibility for non-team spawns)
   switch (role) {
     case "coordinator": {
-      // Coordinators create a new integration stream
       if (!streamConfig) {
         console.warn(
           `[AgentManager] Coordinator ${agentId} spawn missing streamConfig, skipping workspace`,
         );
         return undefined;
       }
-
-      const newStreamId = workspaceManager.createIntegrationStream(
-        agentId,
-        streamConfig,
-      );
-
+      const newStreamId = workspaceManager.createIntegrationStream(agentId, streamConfig);
       return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
     }
 
     case "integrator": {
-      // Integrators join an existing stream
       if (!streamId) {
         console.warn(
           `[AgentManager] Integrator ${agentId} spawn missing streamId, skipping workspace`,
         );
         return undefined;
       }
-
       return workspaceManager.createIntegratorWorkspace(agentId, streamId);
     }
 
     case "worker":
     case "worker.resolver": {
-      // Workers need streamId and either dataplaneTaskId or create a new task
       if (!streamId) {
         console.warn(
           `[AgentManager] Worker ${agentId} spawn missing streamId, skipping workspace`,
         );
         return undefined;
       }
-
-      // Use provided task ID or skip (task should be created separately)
-      const taskId = dataplaneTaskId;
-      if (!taskId) {
-        console.warn(
-          `[AgentManager] Worker ${agentId} spawn missing dataplaneTaskId, skipping workspace`,
-        );
-        return undefined;
-      }
-
+      const taskId = dataplaneTaskId ?? agentId;
       return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
     }
 
     case "monitor":
-      // Monitors don't need workspaces
       return undefined;
 
     default:
-      // Unknown role - no workspace
       return undefined;
   }
 }

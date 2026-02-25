@@ -18,14 +18,27 @@ import * as path from "path";
 // =============================================================================
 
 /**
+ * Entry in the `teams` config for declaring additional team templates.
+ */
+export interface TeamConfigEntry {
+  /** Template name (defaults to the key) */
+  template?: string;
+  /** Auto-start on server boot (default: false) */
+  autoStart?: boolean;
+}
+
+/**
  * Typed configuration schema for multiagent.
  *
  * Loaded from .multiagent/config.json (project or global).
  * Environment variables override file-based config.
  */
 export interface MultiagentConfig {
-  /** Team template name to load on startup */
+  /** Default team template name to load on startup */
   team?: string;
+
+  /** Additional teams available for dynamic or auto-start loading */
+  teams?: Record<string, TeamConfigEntry>;
 
   /** Server port (default: 3001) */
   port?: number;
@@ -247,6 +260,16 @@ export function loadMergedConfig(projectPath?: string): MultiagentConfig {
   }
   if (process.env.MACRO_NO_AUTH === "true") {
     merged.auth = { ...(merged.auth ?? {}), disabled: true };
+  }
+
+  // MACRO_TEAMS: comma-separated template names to auto-start
+  if (process.env.MACRO_TEAMS) {
+    const names = process.env.MACRO_TEAMS.split(",").map(s => s.trim()).filter(Boolean);
+    const teams: Record<string, TeamConfigEntry> = { ...(merged.teams ?? {}) };
+    for (const name of names) {
+      teams[name] = { ...teams[name], autoStart: true };
+    }
+    merged.teams = teams;
   }
 
   return merged;

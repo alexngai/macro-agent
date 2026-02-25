@@ -13,6 +13,7 @@ import {
   LIFECYCLE_CAPABILITIES,
   AGENT_CAPABILITIES,
   MSG_CAPABILITIES,
+  WORKSPACE_CAPABILITIES,
 } from "../capabilities.js";
 
 /** 30 minutes in milliseconds (stale timeout) */
@@ -45,6 +46,7 @@ export const WorkerRole: RoleDefinition = {
     LIFECYCLE_CAPABILITIES.DONE,
     AGENT_CAPABILITIES.SPAWN_WORKER,
     MSG_CAPABILITIES.SEND,
+    WORKSPACE_CAPABILITIES.WORKTREE,
   ],
 
   workspace: {
@@ -100,6 +102,7 @@ export const ResolverWorkerRole: RoleDefinition = {
     LIFECYCLE_CAPABILITIES.DONE,
     AGENT_CAPABILITIES.SPAWN_WORKER,
     MSG_CAPABILITIES.SEND,
+    WORKSPACE_CAPABILITIES.WORKTREE,
   ],
 
   // Inherits workspace from worker

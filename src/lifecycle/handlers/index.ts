@@ -111,29 +111,46 @@ export function createHandlerRegistry(
 }
 
 /**
- * Get the handler for a given role
+ * Get the handler for a given role.
  *
- * Falls back to the generic handler if no role-specific handler exists.
+ * Resolution order:
+ * 1. Exact role name match (e.g., "worker", "integrator")
+ * 2. Dot-prefix match (e.g., "worker.resolver" → "worker")
+ * 3. Capability-based match (e.g., "developer" with workspace.worktree → worker handler)
+ * 4. Generic fallback handler
  */
 export function getHandler(
   role: string,
   registry: DoneHandlerRegistry,
-  deps: AllHandlerDeps
+  deps: AllHandlerDeps,
+  capabilities?: string[],
 ): DoneHandler {
-  // Check for exact match
+  // 1. Exact match
   const handler = registry.get(role);
   if (handler) {
     return handler;
   }
 
-  // Check for role prefix match (e.g., "worker.resolver" matches "worker")
+  // 2. Dot-prefix match (e.g., "worker.resolver" → "worker")
   const baseRole = role.split(".")[0];
   const baseHandler = registry.get(baseRole);
   if (baseHandler) {
     return baseHandler;
   }
 
-  // Fall back to generic handler
+  // 3. Capability-based match (for team-defined roles like "developer" extending "worker")
+  if (capabilities) {
+    if (capabilities.includes("workspace.worktree")) {
+      const workerHandler = registry.get("worker");
+      if (workerHandler) return workerHandler;
+    }
+    if (capabilities.includes("workspace.integrate")) {
+      const integratorHandler = registry.get("integrator");
+      if (integratorHandler) return integratorHandler;
+    }
+  }
+
+  // 4. Generic fallback
   const genericDeps: GenericHandlerDeps = {
     messageRouter: deps.messageRouter,
   };
@@ -158,8 +175,8 @@ export async function dispatchDone(
   // Use provided registry or create default
   const handlers = registry ?? createHandlerRegistry(deps);
 
-  // Get the handler for this role
-  const handler = getHandler(context.role, handlers, deps);
+  // Get the handler for this role (pass capabilities for team role resolution)
+  const handler = getHandler(context.role, handlers, deps, context.capabilities);
 
   // Execute the handler
   return handler(context, args, cleanupStatus);

@@ -54,6 +54,12 @@ export type ExecCapability =
 /** Communication capabilities */
 export type MsgCapability = "msg.send" | "msg.broadcast" | "msg.subscribe";
 
+/** Workspace capabilities */
+export type WorkspaceCapability =
+  | "workspace.worktree"
+  | "workspace.stream"
+  | "workspace.integrate";
+
 /** All capability types combined, plus wildcard */
 export type Capability =
   | FileCapability
@@ -63,6 +69,7 @@ export type Capability =
   | TaskCapability
   | ExecCapability
   | MsgCapability
+  | WorkspaceCapability
   | "*"; // Wildcard for all capabilities
 
 // =============================================================================

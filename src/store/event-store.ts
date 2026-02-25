@@ -548,6 +548,12 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
       const existing = row.metadata ? JSON.parse(row.metadata as string) : {};
       partial.metadata = JSON.stringify({ ...existing, ...updates.metadata });
     }
+    if (updates.team_instance !== undefined) {
+      partial.team_instance = updates.team_instance;
+    }
+    if (updates.cwd !== undefined) {
+      partial.cwd = updates.cwd;
+    }
 
     store.setPartialRow('agents', agentId, partial);
 
@@ -1332,7 +1338,7 @@ function rebuildViews(store: Store): void {
   // Preserve out-of-band agent fields that aren't derived from events.
   // These fields are written directly (not through events),
   // so they would be lost when we clear and replay.
-  const OUT_OF_BAND_FIELDS = ['plan', 'name', 'metadata'] as const;
+  const OUT_OF_BAND_FIELDS = ['plan', 'name', 'metadata', 'cwd', 'team_instance'] as const;
   const savedOutOfBand = new Map<string, Record<string, string>>();
   for (const rowId of store.getRowIds('agents')) {
     const row = store.getRow('agents', rowId);
@@ -1478,6 +1484,7 @@ function applySpawnEvent(
     task_id?: TaskId;
     parent?: AgentId | null;
     role?: string;
+    team_instance?: string;
     config?: Record<string, unknown>;
     cwd?: string;
   };
@@ -1508,6 +1515,7 @@ function applySpawnEvent(
     task: payload.task,
     task_id: payload.task_id ?? '',
     role: payload.role ?? '',
+    team_instance: payload.team_instance ?? '',
     config: JSON.stringify(payload.config ?? {}),
     cwd: payload.cwd ?? process.cwd(),
     plan: '[]',
@@ -1866,6 +1874,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     task: row.task as string,
     task_id: (row.task_id as string) || undefined,
     role: (row.role as string) || undefined,
+    team_instance: (row.team_instance as string) || undefined,
     config: row.config ? JSON.parse(row.config as string) : {},
     cwd: (row.cwd as string) || process.cwd(),
     plan: row.plan ? JSON.parse(row.plan as string) : [],
