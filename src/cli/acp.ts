@@ -328,6 +328,17 @@ async function main() {
   const teamManager = new TeamManager({ agentManager, messageRouter, eventStore, workspaceManager, taskBackend });
   teamManager.install(); // Composite interceptor/filter/validator
 
+  // Seed default team templates if they don't exist yet
+  try {
+    const { seedDefaultTemplates } = await import("../teams/seed-defaults.js");
+    const seeded = await seedDefaultTemplates(defaultCwd);
+    if (seeded.length > 0) {
+      console.error(`[acp] Seeded default team templates: ${seeded.join(", ")}`);
+    }
+  } catch (err) {
+    console.error(`[acp] Failed to seed default templates: ${err}`);
+  }
+
   // Auto-start teams from config
   if (!options.acp) {
     // Default team (backward compat)

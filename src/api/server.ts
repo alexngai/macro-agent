@@ -375,13 +375,13 @@ function registerTeamRoutes(
 
   // POST /api/teams — Start a team instance
   app.post("/api/teams", async (req: Request, res: Response) => {
-    const { template } = req.body ?? {};
+    const { template, overrides } = req.body ?? {};
     if (!template || typeof template !== "string") {
       return sendError(res, 400, "INVALID_REQUEST", "Missing required field: template");
     }
 
     try {
-      const instance = await teamManager.startTeam(template, defaultCwd);
+      const instance = await teamManager.startTeam(template, defaultCwd, overrides);
       const result = {
         id: instance.id,
         templateName: instance.templateName,
@@ -1291,7 +1291,7 @@ export function createAPIServer(
     const gracePeriod = options?.force ? 0 : shutdownGracePeriodMs;
 
     // 1. Stop accepting new connections
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
 
     // 2. Wait grace period for in-flight work
     if (gracePeriod > 0) {

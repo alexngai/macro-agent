@@ -521,7 +521,7 @@ describe("API Server", () => {
 
   describe("Graceful Shutdown", () => {
     it("should call eventStore.persist and close on graceful shutdown", async () => {
-      const server = createTrackedServer();
+      const server = createTrackedServer(services, { port: 0 });
       await server.start();
       await server.stop();
 
@@ -531,7 +531,7 @@ describe("API Server", () => {
     });
 
     it("should skip grace period on force shutdown", async () => {
-      const server = createTrackedServer(services, { shutdownGracePeriodMs: 5000 });
+      const server = createTrackedServer(services, { port: 0, shutdownGracePeriodMs: 5000 });
       await server.start();
 
       const startTime = Date.now();
@@ -545,7 +545,7 @@ describe("API Server", () => {
     });
 
     it("should reject new messages during shutdown", async () => {
-      const server = createTrackedServer();
+      const server = createTrackedServer(services, { port: 0 });
       await server.start();
 
       // Initialize first
@@ -571,7 +571,7 @@ describe("API Server", () => {
     });
 
     it("should only shutdown once on multiple stop calls", async () => {
-      const server = createTrackedServer();
+      const server = createTrackedServer(services, { port: 0 });
       await server.start();
 
       // Call stop twice concurrently
@@ -585,6 +585,7 @@ describe("API Server", () => {
     it("should use custom shutdown grace period", async () => {
       const customGracePeriod = 100;
       const server = createTrackedServer(services, {
+        port: 0,
         shutdownGracePeriodMs: customGracePeriod,
       });
       await server.start();
@@ -1075,7 +1076,7 @@ describe("API Server", () => {
         expect(res.body.companionAgentIds).toEqual(["agent_comp1"]);
         expect(res.body.taskMode).toBe("push");
         expect(res.body.strategy).toBe("queue");
-        expect(teamManager.startTeam).toHaveBeenCalledWith("test-team", expect.any(String));
+        expect(teamManager.startTeam).toHaveBeenCalledWith("test-team", expect.any(String), undefined);
       });
 
       it("should return 400 when template is missing", async () => {
