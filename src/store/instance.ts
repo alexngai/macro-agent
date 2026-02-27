@@ -221,8 +221,8 @@ export interface ResolvedInstance {
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Default base directory */
-export const DEFAULT_BASE_DIR = path.join(os.homedir(), '.multiagent');
+/** Default base directory (override with MACRO_AGENT_HOME env var) */
+export const DEFAULT_BASE_DIR = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), '.multiagent');
 
 /** Default namespace */
 export const DEFAULT_NAMESPACE = 'default';

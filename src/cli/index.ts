@@ -718,7 +718,8 @@ program
       const path = await import("path");
       const os = await import("os");
 
-      const storagePath = path.join(os.homedir(), ".multiagent", "store.json");
+      const baseDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".multiagent");
+      const storagePath = path.join(baseDir, "store.json");
 
       if (fs.existsSync(storagePath)) {
         fs.unlinkSync(storagePath);

@@ -58,6 +58,7 @@ import {
   readInstanceMeta,
   touchInstance,
   registerInstance,
+  DEFAULT_BASE_DIR,
   DEFAULT_NAMESPACE,
   DEFAULT_PEER_VISIBILITY,
   filterEventsForPeer,
@@ -308,7 +309,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
   }
 
   // Track baseDir for MCP subprocess communication
-  const baseDir = config.baseDir ?? path.join(os.homedir(), '.multiagent');
+  const baseDir = config.baseDir ?? DEFAULT_BASE_DIR;
 
   // Get peer visibility config (default is restrictive)
   const peerVisibility: PeerVisibilityConfig =
@@ -382,7 +383,7 @@ export async function createEventStore(config: StoreConfig = {}): Promise<EventS
 
     // Register in namespace for discovery
     registerInstance(
-      config.baseDir ?? path.join(os.homedir(), '.multiagent'),
+      config.baseDir ?? DEFAULT_BASE_DIR,
       namespace,
       instanceId,
       { label: config.label }
