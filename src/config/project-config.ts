@@ -147,10 +147,11 @@ export function getProjectConfigPath(projectPath?: string): string {
 /**
  * Get the global config file path.
  *
- * @returns Absolute path to ~/.multiagent/config.json
+ * @returns Absolute path to ~/.multiagent/config.json (or MACRO_AGENT_HOME/config.json)
  */
 export function getGlobalConfigPath(): string {
-  return path.join(os.homedir(), CONFIG_DIR, CONFIG_FILE);
+  const globalDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), CONFIG_DIR);
+  return path.join(globalDir, CONFIG_FILE);
 }
 
 // =============================================================================

@@ -36,6 +36,10 @@ import { createMergeQueue, type MergeQueue } from "../../../workspace/merge-queu
 import type { WorkerWorkspace, IntegratorWorkspace } from "../../../workspace/types.js";
 import { createHandlerRegistry, getHandler, type AllHandlerDeps } from "../../../lifecycle/handlers/index.js";
 import { WORKSPACE_CAPABILITIES } from "../../../roles/capabilities.js";
+import { handleWorkerDone, type WorkerHandlerDeps } from "../../../lifecycle/handlers/worker.js";
+import type { LifecycleContext, CleanupStatus } from "../../../lifecycle/types.js";
+import { QueueIntegrationStrategy } from "../../../workspace/strategies/queue.js";
+import { OptimisticIntegrationStrategy } from "../../../workspace/strategies/optimistic.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration
@@ -465,6 +469,81 @@ describe("Workspace Isolation E2E — Infrastructure", () => {
     expect(typeof handler).toBe("function");
     log("developer role resolved to worker handler via capabilities");
   });
+
+  it("agent resume reads workspace cwd from EventStore (survives rebuildViews)", async () => {
+    const agentId = "resume-cwd-test-001";
+    const worktreePath = path.join(tempDir, "worktree-resume-test");
+
+    // Create agent via spawn event with original cwd
+    eventStore.emit({
+      type: "spawn",
+      source: { agent_id: agentId },
+      payload: {
+        agent_id: agentId,
+        task: "Test resume cwd",
+        role: "worker",
+        cwd: repoPath,
+      },
+    });
+    await eventStore.persist();
+    expect(eventStore.getAgent(agentId)?.cwd).toBe(repoPath);
+
+    // Update cwd out-of-band (simulating what spawn() does after workspace creation)
+    eventStore.updateAgentMetadata(agentId as any, { cwd: worktreePath });
+    await eventStore.persist();
+    expect(eventStore.getAgent(agentId)?.cwd).toBe(worktreePath);
+
+    // Simulate auto-load rebuild (triggers rebuildViews which replays events)
+    await eventStore.reload();
+
+    // cwd must survive the rebuild — this is what resume() would read
+    const agent = eventStore.getAgent(agentId);
+    expect(agent).not.toBeNull();
+    expect(agent!.cwd).toBe(worktreePath);
+    log("Agent cwd survives rebuildViews for resume");
+  });
+
+  it("workspace deallocated when agent terminates", () => {
+    const teamStreamId = runtime.getTeamStreamId()!;
+    const devId = "cleanup-test-001";
+    const taskId = manager.createTask(teamStreamId, { title: "cleanup test" });
+    const workspace = manager.createWorkerWorkspace(devId, taskId, teamStreamId) as WorkerWorkspace;
+
+    // Verify worktree exists
+    expect(fs.existsSync(workspace.path)).toBe(true);
+
+    // Track deallocated event via the custom event system
+    let deallocatedEvent: any = null;
+    manager.onEvent((e: any) => {
+      if (e.type === "workspace:deallocated") deallocatedEvent = e;
+    });
+
+    // Deallocate (this is what AgentManager.terminate() calls)
+    manager.deallocateWorkspace(devId);
+
+    // Workspace mapping should be cleared
+    expect(manager.getWorkspace(devId)).toBeNull();
+
+    // Event should have been emitted
+    expect(deallocatedEvent).not.toBeNull();
+    expect(deallocatedEvent.data.agentId).toBe(devId);
+    expect(deallocatedEvent.data.role).toBe("worker");
+    log("Workspace deallocated and worktree removed");
+  });
+
+  it("deallocateWorkspace is idempotent", () => {
+    const teamStreamId = runtime.getTeamStreamId()!;
+    const devId = "idempotent-test-001";
+    const taskId = manager.createTask(teamStreamId, { title: "idempotent test" });
+    manager.createWorkerWorkspace(devId, taskId, teamStreamId);
+
+    // First deallocation should work
+    manager.deallocateWorkspace(devId);
+
+    // Second deallocation should not throw
+    expect(() => manager.deallocateWorkspace(devId)).not.toThrow();
+    log("deallocateWorkspace is idempotent");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -768,6 +847,165 @@ describe("Workspace Isolation E2E — Service Lifecycle", () => {
     // Cleanup
     manager.deallocateWorkspace("merger-001");
     log(`Parallel lifecycle complete: ${workerCount} developers → merge queue → integrator`);
+  });
+
+  it("worker done handler dispatches to queue strategy via land()", async () => {
+    const teamStreamId = runtime.getTeamStreamId()!;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 1: Create developer workspace and make changes
+    // ═══════════════════════════════════════════════════════════════
+    const devId = "dev-strategy-001";
+    const taskId = manager.createTask(teamStreamId, {
+      title: "Strategy test task",
+      priority: 10,
+    });
+
+    const devWorkspace = manager.createWorkerWorkspace(
+      devId,
+      taskId,
+      teamStreamId,
+    ) as WorkerWorkspace;
+
+    const startResult = manager.claimTask(taskId, devId, devWorkspace.path);
+    writeAndCommit(
+      "src/strategy-test.ts",
+      'export const strategy = "queue";',
+      "feat: add strategy test file",
+      devWorkspace.path,
+    );
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 2: Wire queue strategy with real merge queue
+    // ═══════════════════════════════════════════════════════════════
+    const queueStrategy = new QueueIntegrationStrategy();
+    queueStrategy.setMergeQueue(manager.getMergeQueue());
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 3: Call handleWorkerDone with strategy
+    // ═══════════════════════════════════════════════════════════════
+    const context: LifecycleContext = {
+      agentId: devId,
+      role: "worker",
+      workspacePath: devWorkspace.path,
+      streamId: teamStreamId,
+      taskId: taskId,
+      branch: startResult.branchName,
+      integrationBranch: "integration",
+    };
+
+    const cleanupStatus: CleanupStatus = {
+      ready: true,
+    };
+
+    const deps: WorkerHandlerDeps = {
+      messageRouter,
+      agentManager,
+      integrationStrategy: queueStrategy,
+    };
+
+    const result = await handleWorkerDone(
+      context,
+      { status: "completed", summary: "Strategy test complete" },
+      cleanupStatus,
+      deps,
+    );
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 4: Verify strategy was used (not fallback MERGE_REQUEST)
+    // ═══════════════════════════════════════════════════════════════
+    expect(result.shouldTerminate).toBe(true);
+    expect(result.signalsEmitted).toContain("WORKER_DONE");
+    expect(result.signalsEmitted).toContain("WORKER_INTEGRATED");
+    expect(result.signalsEmitted).not.toContain("MERGE_REQUEST");
+
+    // Strategy submitted to merge queue
+    const wmMergeQueue = manager.getMergeQueue();
+    expect(wmMergeQueue.getQueueDepth(teamStreamId)).toBe(1);
+
+    const pending = wmMergeQueue.getPending(teamStreamId);
+    expect(pending[0].workerBranch).toBe(startResult.branchName);
+    expect(pending[0].workerAgentId).toBe(devId);
+
+    // cleanupActions should mention the strategy name
+    expect(result.cleanupActions?.some((a) => a.includes("queue"))).toBe(true);
+
+    // Cleanup
+    manager.deallocateWorkspace(devId);
+    log("Worker done handler dispatched to queue strategy successfully");
+  });
+
+  it("optimistic strategy emits validation event on successful land", async () => {
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 1: Create bare repo as "remote" for push operations
+    // ═══════════════════════════════════════════════════════════════
+    const bareDir = path.join(tempDir, "bare.git");
+    execSync(`git init --bare "${bareDir}"`, { stdio: "pipe" });
+
+    const cloneDir = path.join(tempDir, "optimistic-clone");
+    execSync(`git clone "${bareDir}" "${cloneDir}"`, { stdio: "pipe" });
+    git('config user.email "test@test.com"', cloneDir);
+    git('config user.name "Test User"', cloneDir);
+
+    // Create initial commit and push to origin/main
+    writeAndCommit("README.md", "# Test", "initial commit", cloneDir);
+    git("push origin HEAD:main", cloneDir);
+
+    // Create a worker branch and make changes
+    git("checkout -b worker/opt-test-001", cloneDir);
+    writeAndCommit(
+      "src/optimistic.ts",
+      'export const mode = "optimistic";',
+      "feat: add optimistic file",
+      cloneDir,
+    );
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 2: Create optimistic strategy with EventStore
+    // ═══════════════════════════════════════════════════════════════
+    const optimistic = new OptimisticIntegrationStrategy();
+    optimistic.setEventStore(eventStore);
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 3: Land changes
+    // ═══════════════════════════════════════════════════════════════
+    const landResult = await optimistic.land({
+      sourceBranch: "worker/opt-test-001",
+      targetBranch: "main",
+      workspacePath: cloneDir,
+      agentId: "agent-opt-001",
+      taskId: "task-opt-001",
+    });
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 4: Verify land succeeded and validation event emitted
+    // ═══════════════════════════════════════════════════════════════
+    expect(landResult.status).toBe("landed");
+    expect(landResult.commitHash).toBeDefined();
+    expect(landResult.commitHash!.length).toBeGreaterThan(0);
+
+    expect(landResult.retryCount).toBe(0);
+
+    // Verify validation event was emitted to EventStore
+    const statusEvents = eventStore.query({
+      type: "status",
+      source_agent_id: "agent-opt-001" as any,
+    });
+    const validationEvent = statusEvents.find(
+      (e) => e.payload?.validation_requested === true,
+    );
+    expect(validationEvent).toBeDefined();
+    expect(validationEvent!.payload.commitHash).toBe(landResult.commitHash);
+    expect(validationEvent!.payload.taskId).toBe("task-opt-001");
+    expect(validationEvent!.payload.agentId).toBe("agent-opt-001");
+
+    // Verify the commit actually landed on main at the remote
+    const remoteMain = execSync(`git -C "${bareDir}" log --oneline -1 main`, {
+      encoding: "utf-8",
+    }).trim();
+    expect(remoteMain).toContain("optimistic");
+
+    log(`Optimistic strategy landed: ${landResult.commitHash!.slice(0, 8)}`);
   });
 });
 

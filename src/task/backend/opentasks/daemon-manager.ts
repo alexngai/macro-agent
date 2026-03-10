@@ -54,7 +54,10 @@ export interface DaemonManagerResult {
 // Constants
 // =============================================================================
 
-const DEFAULT_CENTRAL_PATH = path.join(os.homedir(), ".multiagent", "opentasks");
+const DEFAULT_CENTRAL_PATH = path.join(
+  process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".multiagent"),
+  "opentasks",
+);
 
 /** Grace period (ms) between client disconnect and daemon.stop() to let children finish disconnecting */
 const DAEMON_DRAIN_MS = 500;

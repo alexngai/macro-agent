@@ -19,6 +19,7 @@ import type {
 import type { AgentId } from "../store/types/index.js";
 import { loadTeam } from "./team-loader.js";
 import { TeamRuntime, type TeamServices, type TeamBootstrapResult } from "./team-runtime.js";
+import type { TeamManifest } from "./types.js";
 
 // =============================================================================
 // Types
@@ -33,6 +34,17 @@ export interface TeamInstance {
   runtime: TeamRuntime;
   /** Bootstrap result (root + companion agent IDs) */
   result: TeamBootstrapResult;
+}
+
+/**
+ * Optional parameter overrides applied when starting a team.
+ * These are merged on top of the template's manifest values.
+ */
+export interface TeamStartOverrides {
+  /** Override model for all roles (root + companions) */
+  model?: string;
+  /** Override max workers scaling limit */
+  maxWorkers?: number;
 }
 
 // =============================================================================
@@ -71,13 +83,24 @@ export class TeamManager {
    *
    * @param templateName - Team template directory name
    * @param basePath - Project root (default: process.cwd())
+   * @param overrides - Optional parameter overrides applied on top of the template
    * @returns The created team instance
    */
-  async startTeam(templateName: string, basePath?: string): Promise<TeamInstance> {
+  async startTeam(
+    templateName: string,
+    basePath?: string,
+    overrides?: TeamStartOverrides,
+  ): Promise<TeamInstance> {
     const instanceId = `${templateName}-${++this.instanceCounter}`;
 
     const roleRegistry = this.services.agentManager.getRoleRegistry();
     const manifest = await loadTeam(templateName, roleRegistry, basePath);
+
+    // Apply runtime overrides on top of the loaded manifest
+    if (overrides) {
+      applyOverrides(manifest, overrides);
+    }
+
     const runtime = new TeamRuntime(manifest, this.services);
 
     await runtime.initialize({ teamInstanceId: instanceId });
@@ -316,5 +339,49 @@ export class TeamManager {
         parentTeam.runtime.registerAgent(agent.id as AgentId, agent.role);
       }
     });
+  }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/**
+ * Apply runtime overrides to a loaded team manifest.
+ * Mutates the manifest in place.
+ */
+function applyOverrides(manifest: TeamManifest, overrides: TeamStartOverrides): void {
+  if (overrides.model) {
+    // Override model on root topology node
+    if (manifest.topology?.root) {
+      manifest.topology.root.config = {
+        ...(manifest.topology.root.config ?? {}),
+        model: overrides.model,
+      };
+    }
+
+    // Override model on all companion topology nodes
+    if (manifest.topology?.companions) {
+      for (const companion of manifest.topology.companions) {
+        companion.config = {
+          ...(companion.config ?? {}),
+          model: overrides.model,
+        };
+      }
+    }
+  }
+
+  if (overrides.maxWorkers != null) {
+    // Ensure nested structure exists
+    if (!manifest.macro_agent) {
+      manifest.macro_agent = {};
+    }
+    if (!manifest.macro_agent.lifecycle) {
+      manifest.macro_agent.lifecycle = {};
+    }
+    if (!manifest.macro_agent.lifecycle.scaling) {
+      manifest.macro_agent.lifecycle.scaling = {};
+    }
+    manifest.macro_agent.lifecycle.scaling.max_workers = overrides.maxWorkers;
   }
 }

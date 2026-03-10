@@ -126,10 +126,11 @@ export function getProjectConfigPath(projectPath?: string): string {
 /**
  * Get the user-level config file path
  *
- * @returns Path to ~/.multiagent/roles.json
+ * @returns Path to ~/.multiagent/roles.json (or MACRO_AGENT_HOME/roles.json)
  */
 export function getUserConfigPath(): string {
-  return path.join(os.homedir(), USER_CONFIG_DIR, CONFIG_FILE_NAME);
+  const globalDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), USER_CONFIG_DIR);
+  return path.join(globalDir, CONFIG_FILE_NAME);
 }
 
 // =============================================================================

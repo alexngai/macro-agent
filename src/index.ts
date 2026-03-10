@@ -10,7 +10,7 @@ export {
   type TaskChangeCallback,
   type MessageCallback,
   type Unsubscribe,
-} from './store/event-store.js';
+} from "./store/event-store.js";
 
 export {
   type Agent,
@@ -39,14 +39,14 @@ export {
   type SubscriptionType,
   type StoreConfig,
   CURRENT_EVENT_VERSION,
-} from './store/types/index.js';
+} from "./store/types/index.js";
 
 // Agent manager
 export {
   createAgentManager,
   type AgentManager,
   type AgentManagerConfig,
-} from './agent/agent-manager.js';
+} from "./agent/agent-manager.js";
 
 export {
   type SpawnAgentOptions,
@@ -64,15 +64,12 @@ export {
   type AgentManagerErrorCode,
   type MCPServerConfig as AgentMCPServerConfig,
   type AgentConfig as SpawnAgentConfig,
-} from './agent/types.js';
+} from "./agent/types.js";
 
-export { generateSystemPrompt } from './agent/system-prompt.js';
+export { generateSystemPrompt } from "./agent/system-prompt.js";
 
 // Task manager
-export {
-  createTaskManager,
-  type TaskManager,
-} from './task/task-manager.js';
+export { createTaskManager, type TaskManager } from "./task/task-manager.js";
 
 export {
   type CreateTaskOptions,
@@ -82,14 +79,14 @@ export {
   TaskManagerError,
   type TaskManagerErrorCode,
   VALID_STATUS_TRANSITIONS,
-} from './task/types.js';
+} from "./task/types.js";
 
 // Message router
 export {
   createMessageRouter,
   type MessageRouter,
   type MessageRouterConfig,
-} from './router/message-router.js';
+} from "./router/message-router.js";
 
 export {
   type MessageTarget,
@@ -108,7 +105,7 @@ export {
   RoutingError,
   type RoutingErrorCode,
   DEFAULT_TRUNCATION_CONFIG,
-} from './router/types.js';
+} from "./router/types.js";
 
 // MCP server
 export {
@@ -116,7 +113,7 @@ export {
   type MCPServerConfig,
   type MCPServices,
   type MCPServerInstance,
-} from './mcp/mcp-server.js';
+} from "./mcp/mcp-server.js";
 
 export {
   type ToolContext,
@@ -150,7 +147,7 @@ export {
   type SendPeerRequestOutput,
   type RespondToPeerRequestInput,
   type RespondToPeerRequestOutput,
-} from './mcp/types.js';
+} from "./mcp/types.js";
 
 // API server
 export {
@@ -158,7 +155,7 @@ export {
   type APIServer,
   type APIServerConfig,
   type APIServices,
-} from './api/server.js';
+} from "./api/server.js";
 
 export {
   type SystemStatus,
@@ -188,7 +185,7 @@ export {
   type TaskQueryParams,
   type EventQueryParams,
   type APIError,
-} from './api/types.js';
+} from "./api/types.js";
 
 // ACP - Agent Communication Protocol support
 export {
@@ -223,7 +220,7 @@ export {
   type ACPExtensionRequests,
   type ACPExtensionResponses,
   type ACPErrorCode,
-} from './acp/index.js';
+} from "./acp/index.js";
 
 // Peer communication
 export {
@@ -240,7 +237,7 @@ export {
   type PeerInboxMessage,
   PeerError,
   type PeerErrorCode,
-} from './peer/index.js';
+} from "./peer/index.js";
 
 // Activity module - event-driven agent waking
 export {
@@ -280,7 +277,7 @@ export {
   createDeduplicator,
   type DeduplicationKey,
   type DeduplicationConfig,
-} from './activity/index.js';
+} from "./activity/index.js";
 
 // Agent wake mechanism
 export {
@@ -291,7 +288,7 @@ export {
   type WakeSessionInfo,
   type WakeSessionProvider,
   type WakeAgentOptions,
-} from './agent/wake.js';
+} from "./agent/wake.js";
 
 // Cognitive - Atlas compute backend
 export {
@@ -322,4 +319,7 @@ export {
   type CognitiveOperation,
   type SessionCompleteEvent,
   type SessionEventEmitter,
-} from './cognitive/index.js';
+} from "./cognitive/index.js";
+
+// Teams - template seeding
+export { seedDefaultTemplates } from "./teams/seed-defaults.js";
