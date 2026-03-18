@@ -1,6 +1,6 @@
 # macro-agent
 
-A multi-agent orchestration system for spawning and managing hierarchical Claude Code agents.
+A multi-agent orchestration system for spawning and managing hierarchical Claude Code agents. Delegates messaging to **agent-inbox** and task management to **opentasks**.
 
 ## Project Overview
 
@@ -10,186 +10,170 @@ macro-agent enables coordinated work across multiple AI agents with:
 - **Pluggable integration strategies** (queue, trunk, optimistic)
 - **Workspace isolation** via git worktrees
 - **Merge queue** for serialized integration
-- **Task backend** abstraction (memory or opentasks) with push and pull modes
-- **In-flight steering** via context injection
-- **Signal filtering and emission enforcement** for communication topology
+- **Messaging** via agent-inbox (structured inbox/outbox, threading, federation)
+- **Task management** via opentasks (graph-based dependencies, providers, claiming)
+- **Signal filtering and emission enforcement** for communication topology (adapter-side)
 - **Session continuations** for long-running daemon agents
-- **Observability** via throughput, utilization, and error metrics
+- **Trigger system** for wake management, cron, and webhooks
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      External Clients                       │
-│           (CLI, WebSocket ACP, REST API)                    │
+│                       (CLI)                                 │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
-│                     Team Runtime (optional)                   │
+│                   boot-v2.ts (System Wiring)                │
+│  Initializes all components and wires adapters              │
+└───────────────────────────┬─────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────┐
+│                 Team Runtime (optional)                      │
 │  - Loads team YAML config (topology, communication)         │
 │  - Bootstraps root + companion agents                       │
-│  - Installs spawn interceptor, signal filters, validators   │
-│  - Manages integration strategy and session continuations   │
+│  - Installs spawn interceptor                               │
+│  - Adapter-side signal filtering + emission validation      │
+│  - One inbox scope per team                                 │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
-│                     Agent Manager                            │
+│                     Agent Manager                           │
 │  - Spawns agents via acp-factory                            │
-│  - Manages lifecycle (spawn, prompt, stop, continue)        │
-│  - Spawn interception for team role/topic injection         │
+│  - Manages lifecycle (spawn, prompt, stop, continue, fork)  │
+│  - Registers agents in agent-inbox on spawn                 │
+│  - Creates tasks in opentasks on spawn                      │
+│  - Submits merge requests on worker terminate               │
+│  - Cascade termination with workspace cleanup               │
 └───────────────────────────┬─────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────┐
         │                   │                   │
         ▼                   ▼                   ▼
 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│    Roles     │   │   Workspace  │   │    Tasks     │
-│  Built-in +  │   │  Bare Repo   │   │  Backend     │
-│  Team-defined│   │  Worktrees   │   │  (memory/    │
-│  (via YAML)  │   │  Strategies  │   │  opentasks)  │
-│              │   │  (queue/     │   │  Push/Pull   │
-│              │   │   trunk/opt) │   │   modes      │
-└──────────────┘   └──────────────┘   └──────────────┘
-        │                   │                   │
-        └───────────────────┼───────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│                     Message Router                           │
-│  - MAP addressing (agent, role, scope, parent/child)        │
-│  - sendToAddress() for all message routing                  │
-│  - Topic-based status routing with signal filtering         │
-│  - Emission validation (strict/permissive/audit)            │
-│  - Activity waking for sleeping agents                      │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│                      Event Store                             │
-│  - Append-only event log (SQLite)                           │
-│  - Materialized views for queries                           │
-│  - Agents, tasks, messages, events, team config             │
-└─────────────────────────────────────────────────────────────┘
+│    Roles     │   │   Workspace  │   │   Adapters   │
+│  Built-in +  │   │  Worktrees   │   │              │
+│  Team-defined│   │  Strategies  │   │ InboxAdapter │
+│  (via YAML)  │   │  (queue/     │   │ TasksAdapter │
+│              │   │   trunk/opt) │   │              │
+└──────────────┘   └──────────────┘   └──────┬───────┘
+                                             │
+                        ┌────────────────────┼────────────────────┐
+                        │                                        │
+               ┌────────▼─────────┐                   ┌──────────▼─────────┐
+               │   agent-inbox    │                   │     opentasks      │
+               │  (embedded)      │                   │  (IPC to daemon)   │
+               │                  │                   │                    │
+               │  - Messaging     │                   │  - Task graph      │
+               │  - Threading     │                   │  - Dependencies    │
+               │  - IPC server    │                   │  - Providers       │
+               │  - Federation    │                   │  - Claiming        │
+               └──────────────────┘                   └────────────────────┘
 ```
 
 ## Source Directory Structure
 
 ```
 src/
-├── acp/                 # Agent Communication Protocol
-│   ├── macro-agent.ts      # ACP agent implementation (mount, fork)
-│   ├── websocket-server.ts # Multi-client WebSocket ACP
-│   └── session-mapper.ts   # Session → Agent ID mapping
+├── adapters/            # Subsystem integration layer
+│   ├── types.ts            # InboxAdapter + TasksAdapter interfaces
+│   ├── inbox-adapter.ts    # Wraps agent-inbox (embedded, hybrid IPC)
+│   ├── tasks-adapter.ts    # Wraps opentasks client (IPC to daemon)
+│   └── index.ts            # Public exports
 │
 ├── agent/               # Agent lifecycle
-│   ├── agent-manager.ts    # Spawn, prompt, stop, continue agents
-│   ├── wake.ts             # Wake sleeping agents
-│   └── system-prompt.ts    # Agent system prompts
+│   ├── agent-manager.ts    # AgentManager interface + SpawnInterceptor type
+│   ├── agent-manager-v2.ts # Implementation using adapters + AgentStore
+│   ├── agent-store.ts      # Minimal SQLite store (agents + sessions)
+│   ├── system-prompt.ts    # Agent system prompts
+│   └── types.ts            # SpawnAgentOptions, AgentFilter, etc.
 │
-├── api/                 # REST API
-│   ├── server.ts           # Express routes (agents, tasks, team, metrics)
-│   └── types.ts            # Request/response types
+├── boot-v2.ts           # System wiring entry point
 │
 ├── cli/                 # Command-line interface
-│   └── index.ts            # CLI commands (start, chat, status, --team)
+│   ├── index.ts            # CLI commands (uses bootV2)
+│   └── acp.ts              # ACP CLI mode (uses bootV2)
 │
 ├── config/              # Project configuration
 │   └── project-config.ts   # .multiagent/config.json loader
 │
 ├── lifecycle/           # Agent lifecycle management
-│   ├── handlers/           # Role-specific done() handlers
-│   │   ├── worker.ts       # Worker completion (strategy dispatch)
-│   │   ├── integrator.ts   # Integrator completion (merge queue)
-│   │   └── monitor.ts      # Monitor completion (health reporting)
+│   ├── handlers-v2.ts      # Role-specific done() handlers (using adapters)
 │   ├── cascade.ts          # Cascade termination
-│   └── cleanup.ts          # Workspace cleanup helpers
+│   ├── cleanup.ts          # Workspace cleanup helpers
+│   └── types.ts            # Lifecycle type definitions
 │
 ├── mcp/                 # Model Context Protocol
-│   ├── mcp-server.ts       # Per-agent MCP server (role-based tool filtering)
-│   └── tools/              # MCP tool implementations
-│       ├── done.ts         # Generalized done() tool
-│       ├── inject_context.ts # Context injection tool
-│       ├── claim_task.ts   # Claim task from pool (pull mode)
-│       ├── unclaim_task.ts # Release claimed task (pull mode)
-│       └── list_claimable_tasks.ts # List available tasks (pull mode)
-│
-├── metrics/             # Observability
-│   └── metrics.ts          # Throughput, utilization, error metrics
+│   ├── mcp-server-v2.ts    # Per-agent MCP server (5 tools)
+│   ├── tools/
+│   │   └── done-v2.ts      # done() tool using adapters
+│   └── types.ts            # ToolContext, error types
 │
 ├── roles/               # Role system
 │   ├── types.ts            # RoleDefinition, Capability types
-│   ├── capabilities.ts     # Capability constants (incl. task.claim)
+│   ├── capabilities.ts     # Capability constants
 │   ├── registry.ts         # Role registry with resolution
 │   └── builtin/            # Built-in role definitions
-│       ├── worker.ts
-│       ├── integrator.ts
-│       ├── coordinator.ts
-│       └── monitor.ts
 │
-├── router/              # Message routing
-│   ├── message-router.ts   # Core router with signal filtering + emission validation
-│   ├── broadcast.ts        # Broadcast channel (fan-out)
-│   ├── role-resolver.ts    # Role → Agent resolution
-│   ├── wake.ts             # Activity waking (status + message)
-│   └── types.ts            # Message, Channel types
-│
-├── steering/            # In-flight steering
-│   ├── inject.ts           # Context injection with fallback
-│   └── types.ts            # Injection types
-│
-├── store/               # Event sourcing
-│   ├── event-store.ts      # Core event store
-│   ├── instance.ts         # Global instance management
-│   ├── backends/           # Storage backends
-│   │   ├── sqlite-backend.ts
-│   │   └── memory-backend.ts
-│   └── types/              # Type definitions
+├── store/               # Type definitions only (no implementation)
+│   └── types/              # AgentId, TaskId, Agent, etc.
 │       ├── agents.ts
 │       ├── tasks.ts
 │       ├── events.ts
 │       └── primitives.ts
 │
-├── task/                # Task management
-│   ├── task-manager.ts     # Legacy task manager
-│   └── backend/            # Pluggable task backends
-│       ├── types.ts        # TaskBackend interface (+ claim/unclaim/listClaimable)
-│       ├── memory.ts       # InMemoryTaskBackend (push + pull)
-│       ├── unified-tool-provider.ts # Unified task MCP tool provider (7 tools)
-│       └── opentasks/      # OpenTasks integration
-│
 ├── teams/               # Team template system
 │   ├── types.ts            # TeamManifest, TeamTopology, TeamCommunication
 │   ├── team-loader.ts      # YAML loading, role resolution, validation
-│   ├── team-runtime.ts     # Initialize, bootstrap, peer routing, signal filtering
-│   ├── team-manager.ts     # Multi-team lifecycle, composite dispatch, agent-team mapping
+│   ├── team-runtime-v2.ts  # Initialize, bootstrap, signal filtering (adapter-side)
 │   └── index.ts            # Public exports
+│
+├── trigger/             # Trigger system
+│   ├── trigger-system-v2.ts # Factory: inbox delivery → wake manager
+│   ├── types.ts            # TriggerEvent, TriggerSource types
+│   ├── wake/               # Wake manager (heartbeat, coalesce, inject→interrupt→prompt)
+│   ├── queue/              # Per-agent system event queue
+│   └── sources/            # Cron scheduler, webhook handler
 │
 └── workspace/           # Workspace isolation
     ├── workspace-manager.ts # Worktree management
     ├── config.ts           # Workspace configuration
-    ├── merge-queue/        # Merge queue
-    │   ├── merge-queue.ts  # SQLite-backed queue
-    │   ├── types.ts        # Queue types
-    │   └── schema.ts       # Database schema
-    └── strategies/         # Integration strategies
-        ├── types.ts        # IntegrationStrategy interface
-        ├── registry.ts     # Strategy factory registry
-        ├── queue.ts        # Queue strategy (wraps merge queue)
-        ├── trunk.ts        # Trunk strategy (direct push + rebase)
-        └── optimistic.ts   # Optimistic strategy (push + validation event)
+    ├── merge-queue/        # SQLite-backed merge queue
+    └── strategies/         # Integration strategies (queue, trunk, optimistic)
 ```
 
 ## Key Concepts
 
+### Subsystem Architecture
+
+macro-agent delegates two major concerns to external subsystems:
+
+- **agent-inbox**: All messaging (send/receive, threading, conversations, federation). Embedded in-process for zero-latency events, with IPC server for agent MCP subprocesses.
+- **opentasks**: All task management (CRUD, dependencies, claiming, state transitions). Connected via IPC to opentasks daemon.
+
+macro-agent owns: agent lifecycle, workspace isolation, team topology, role system, trigger/wake.
+
+### Adapter Layer
+
+Two adapters form the integration boundary:
+
+- **InboxAdapter** (`adapters/inbox-adapter.ts`): Wraps agent-inbox. Owns adapter-side signal filtering and emission validation (set by TeamRuntime). Provides `send()`, `onDelivery()`, `registerAgent()`.
+- **TasksAdapter** (`adapters/tasks-adapter.ts`): Wraps opentasks client. Provides `createTask()`, `transitionTask()`, `queryReady()`, `claimTask()`.
+
+### AgentStore
+
+Minimal SQLite store with two tables: `agents` and `sessions`. Replaces the heavy EventStore + TinyBase materialized views. Simple CRUD, no event sourcing.
+
 ### Teams
 
-Teams are declarative YAML configurations that define multi-agent topologies. Multiple teams can run concurrently on the same server.
+Teams are declarative YAML configurations that define multi-agent topologies.
 
 - **TeamLoader** (`team-loader.ts`): Parses `team.yaml`, resolves role inheritance, validates topology
-- **TeamRuntime** (`team-runtime.ts`): Per-instance runtime — registers roles, bootstraps root + companions, wires peer routing, signal filtering, emission validation, continuation monitoring
-- **TeamManager** (`team-manager.ts`): Owns all team instances. Installs composite spawn interceptor, signal filter, and emission validator that route to the correct TeamRuntime per agent-to-team mapping
-- **Agent membership**: Bootstrap agents (root + companions) are spawned as a unit. Dynamic children auto-join the parent's team. Standalone agents (no team parent) are unaffected
-- **Cross-team messaging**: Allowed — sender's emission rules and recipient's signal filter both apply independently
-- Teams compose on top of existing primitives — no team loaded = identical behavior to pre-team codebase
-- Team config is shared across processes via scoped EventStore `team_config` events (filtered by `MACRO_TEAM_NAME`)
+- **TeamRuntime** (`team-runtime-v2.ts`): Per-instance runtime — registers roles, bootstraps root + companions, adapter-side signal filtering, emission validation, continuation monitoring
+- **Scope**: Each team gets its own agent-inbox scope (scope = team name)
+- **Signal filtering**: Installed on InboxAdapter (not MessageRouter) — enforced before delivery
+- **Emission validation**: Installed on InboxAdapter — enforced before send
 
 ### Roles
 
@@ -202,50 +186,47 @@ Agents are assigned roles that determine their capabilities:
 | **Coordinator** | Orchestrate workers and manage tasks | Spawn agents, assign tasks, broadcast |
 | **Monitor** | Health monitoring and alerts | Read-only access, activity watching |
 
-Teams can define custom roles (e.g., planner, grinder, judge) that extend built-in roles via `extends` in `roles/<name>.yaml`. Custom roles can add/remove capabilities and provide custom prompts.
+Teams can define custom roles (e.g., planner, grinder, judge) that extend built-in roles via `extends` in `roles/<name>.yaml`.
 
 ### Integration Strategies
 
 Pluggable strategies for landing worker changes:
 - **Queue** (`queue.ts`): Wraps merge queue with serialized integration
-- **Trunk** (`trunk.ts`): Direct push with rebase-retry loop, configurable `conflictAction`
-- **Optimistic** (`optimistic.ts`): Same as trunk + emits `validation:requested` event
-
-Strategy is set per-team in `team.yaml` under `macro_agent.integration.strategy`.
+- **Trunk** (`trunk.ts`): Direct push with rebase-retry loop
+- **Optimistic** (`optimistic.ts`): Same as trunk + emits validation event
 
 ### Workspace Isolation
 
-Each worker gets an isolated git worktree:
-- Workers operate on feature branches
-- Changes merge through the queue or strategy
-- Conflicts detected and resolved by integrator
+Each worker gets an isolated git worktree. Merge requests are submitted system-level by `AgentManager.terminate()` when a worker with completed work terminates — agents never construct merge requests directly.
 
-### Task Backend
+### MCP Tool Surface
 
-Two backends available:
-- **memory**: In-memory tasks with EventStore persistence (supports push + pull modes)
-- **opentasks**: External issue tracking with dependency management (supports push + pull modes)
+Each agent gets tools from three sources:
 
-The unified task tool provider exposes 7 MCP tools:
-- Always available: `create_task`, `get_task`, `list_tasks`, `assign_task`
-- When OpenTasks client available: `task` (upsert), `link`, `annotate`
-- Pull mode adds: `claim_task`, `unclaim_task`, `list_claimable_tasks` (gated by `task.claim` capability)
+| Source | Tools | Mount method |
+|--------|-------|-------------|
+| **agent-inbox** | `send_message`, `check_inbox`, `read_thread`, `list_agents` | IPC socket |
+| **opentasks** | `link`, `query`, `annotate`, `task` | IPC socket |
+| **macro-agent** | `done`, `spawn_agent`, `stop_agent`, `get_hierarchy`, `inject_context` | Built-in MCP server |
+
+### Trigger System
+
+Routes external events (cron, webhooks) and inbox delivery events to agents:
+- **WakeManager**: Heartbeat + coalesce + inject→interrupt→prompt fallback chain
+- **Inbox integration**: `InboxAdapter.onDelivery` → importance mapping → WakeManager
+- **CronService**: Time-based agent activation
+- **WebhookHandler**: HTTP endpoint triggers
 
 ### Communication Topology
 
-Teams configure non-hierarchical communication via:
-- **Channels**: Named topics (e.g., `work_coordination`, `task_updates`) with defined signals
+Teams configure communication via:
+- **Channels**: Named topics with defined signals
 - **Subscriptions**: Per-role channel subscriptions with optional signal filters
-- **Peer routing**: Directional connections between roles (`via: direct|topic|scope`) with per-peer signal filters
-- **Emissions**: Per-role allowed signal lists, enforced by emission validator
-- **Enforcement**: `strict` (reject violations), `permissive` (warn), `audit` (record to EventStore)
+- **Peer routing**: Directional connections with per-peer signal filters
+- **Emissions**: Per-role allowed signal lists
+- **Enforcement**: `strict` (reject), `permissive` (warn), `audit` (log)
 
-### Context Injection
-
-Inject context into running agents:
-- `inject()`: Direct session injection (if supported)
-- `interruptWith()`: Fallback interrupt method
-- High-priority message: Final fallback
+All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforces policy.
 
 ## Conventions
 
@@ -261,17 +242,6 @@ Inject context into running agents:
 - **PascalCase** for types and classes
 - **kebab-case** for file names
 - **SCREAMING_SNAKE** for constants
-
-#### ID Field Naming Convention
-
-Different layers use different naming for ID fields by design:
-
-| Layer | Convention | Example | Rationale |
-|-------|------------|---------|-----------|
-| **Internal** (store, router, activity) | `agent_id`, `task_id` | `source.agent_id` | Database/event conventions, explicit |
-| **MAP Protocol** (map/types) | `agent`, `task` | `address.agent` | Protocol spec, cleaner syntax |
-
-The `store/types/events.ts` module bridges these conventions when converting between internal events and MAP addresses.
 
 ### Testing
 
@@ -293,19 +263,18 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 
 ## Common Tasks
 
-### Adding a New MCP Tool
+### Adding a New MCP Tool (macro-agent specific)
 
 1. Create `src/mcp/tools/your_tool.ts`
 2. Define schema with Zod
 3. Export tool info and handler
-4. Register in `src/mcp/mcp-server.ts`
+4. Register in `src/mcp/mcp-server-v2.ts`
 
 ### Adding a New Built-in Role
 
 1. Create `src/roles/builtin/your_role.ts`
 2. Define `RoleDefinition` with capabilities
-3. Add enforcement implementations
-4. Register in `src/roles/builtin/index.ts`
+3. Register in `src/roles/builtin/index.ts`
 
 ### Adding a Team Role (via YAML)
 
@@ -314,31 +283,31 @@ npm run test:e2e            # E2E tests (requires RUN_E2E_TESTS=true)
 3. Create `.multiagent/teams/<team>/prompts/<role>.md` for custom prompt
 4. Reference the role in `team.yaml` topology and communication sections
 
-### Modifying Task Backend
-
-1. Update interface in `src/task/backend/types.ts`
-2. Implement in both `memory.ts` and `opentasks/`
-3. Update unified tool provider if adding new operations
-
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MACRO_TASK_BACKEND` | Task backend: `memory` or `opentasks` | `opentasks` |
-| `OPENTASKS_SOCKET_PATH` | Path to OpenTasks socket | — |
 | `MACRO_WORKSPACE_POOL_SIZE` | Max concurrent workspaces | `10` |
 | `MACRO_MERGE_QUEUE_DB` | Merge queue SQLite path | `:memory:` |
-| `MACRO_TEAMS` | Comma-separated team templates to auto-start on boot | — |
-| `MACRO_TEAM_NAME` | Team name (injected into agent env by team runtime) | — |
+| `MACRO_TEAMS` | Comma-separated team templates to auto-start | — |
+| `MACRO_TEAM_NAME` | Team name (injected by team runtime) | — |
 | `MACRO_TASK_MODE` | Task mode: `push` or `pull` (injected by team runtime) | — |
-| `MACRO_INTEGRATION_STRATEGY` | Integration strategy name (injected by team runtime) | — |
-| `MACRO_INSTANCE_ID` | EventStore instance ID (for MCP subprocess access) | — |
-| `MACRO_BASE_DIR` | EventStore base directory (for MCP subprocess access) | — |
+| `MACRO_INTEGRATION_STRATEGY` | Integration strategy name | — |
+| `INBOX_SOCKET_PATH` | agent-inbox IPC socket path | `~/.macro-agent/inbox.sock` |
+
+## Dependencies
+
+### Core (hard)
+
+- `agent-inbox` — Messaging, threading, federation (embedded in-process)
+- `opentasks` — Task graph, dependencies, providers (IPC to daemon)
+- `acp-factory` — Agent process management (Claude Code sessions)
+- `openteams` — Team template loading and resolution
+- `better-sqlite3` — AgentStore persistence
+- `git-cascade` — Git worktree and merge queue operations
 
 ## References
 
-- [README.md](README.md) - User-facing documentation
-- [docs/architecture.md](docs/architecture.md) - Full architecture documentation
-- [docs/configuration.md](docs/configuration.md) - Configuration reference
+- [docs/design-subsystem-extraction.md](docs/design-subsystem-extraction.md) - Subsystem extraction design document
 - [docs/teams.md](docs/teams.md) - Team template schema reference
 - [docs/team-templates.md](docs/team-templates.md) - Team template format and examples

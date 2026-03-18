@@ -13,13 +13,13 @@
  * @module trigger
  */
 
-// Main trigger system factory
+// Main trigger system V2 factory
 export {
-  createTriggerSystem,
-  type TriggerSystem,
-  type TriggerSystemConfig,
-  type TriggerSystemDeps,
-} from "./trigger-system.js";
+  createTriggerSystemV2,
+  type TriggerSystemV2,
+  type TriggerSystemV2Config,
+  type TriggerSystemV2Deps,
+} from "./trigger-system-v2.js";
 
 // Core types
 export {
@@ -48,31 +48,6 @@ export {
   type EnqueueOptions,
   type DrainOptions,
 } from "./queue/index.js";
-
-// Router
-export {
-  createTriggerRouter,
-  createDirectStrategy,
-  createHeadStrategy,
-  createRoleStrategy,
-  createBroadcastStrategy,
-  createTaskStrategy,
-  createAIRouterStrategy,
-  getDefaultRouterSystemPrompt,
-  type TriggerRouter,
-  type TriggerRouterConfig,
-  type TriggerRouterDeps,
-  type RoutingStrategy,
-  type RoutingContext,
-  type ExtendedRoutingContext,
-  type RoutingDecision,
-  type SpawnConfig,
-  type AgentSummary,
-  type TaskSummary,
-  type DirectStrategyOptions,
-  type RoleStrategyOptions,
-  type AIRouterStrategyOptions,
-} from "./router/index.js";
 
 // Wake
 export {

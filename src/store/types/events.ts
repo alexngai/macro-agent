@@ -3,7 +3,22 @@
  */
 
 import type { AgentId, TaskId, EventId, Timestamp } from "./primitives.js";
-import type { Address, MessagePriority, DeliveryHint } from "../../map/types.js";
+
+// Inline types previously from map/types.js (deleted in V2 cutover)
+/** MAP Address - simplified inline definition */
+export type Address =
+  | { agent: AgentId }
+  | { scope: string }
+  | { role: string }
+  | { task: TaskId }
+  | { broadcast: true }
+  | { hierarchical: true };
+
+/** Message priority levels */
+export type MessagePriority = "low" | "normal" | "high" | "urgent";
+
+/** Delivery hint for message routing */
+export type DeliveryHint = "best-effort" | "at-least-once" | "at-most-once";
 
 // Current event schema version
 export const CURRENT_EVENT_VERSION = 1;

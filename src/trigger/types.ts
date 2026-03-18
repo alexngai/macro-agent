@@ -149,6 +149,19 @@ export interface TriggerDeliveryResult {
 }
 
 // =============================================================================
+// Trigger Router Interface (minimal, V1 router module removed)
+// =============================================================================
+
+/**
+ * Minimal TriggerRouter interface for routing trigger events.
+ * The full V1 router module was removed in the V2 cutover.
+ */
+export interface TriggerRouter {
+  /** Route a trigger event to target agents */
+  route(event: TriggerEvent): Promise<TriggerDeliveryResult>;
+}
+
+// =============================================================================
 // Trigger Creation Helpers
 // =============================================================================
 

@@ -7,7 +7,7 @@
  */
 
 import crypto from "crypto";
-import type { TriggerRouter } from "../../router/types.js";
+import type { TriggerRouter } from "../../types.js";
 import type { TriggerWakeManager } from "../../wake/types.js";
 import { createTriggerEvent, type TriggerPayload } from "../../types.js";
 import type {

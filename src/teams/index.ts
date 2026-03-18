@@ -1,6 +1,4 @@
 export { loadTeam } from "./team-loader.js";
-export { TeamRuntime, type TeamServices, type TeamBootstrapResult } from "./team-runtime.js";
-export { TeamManager, type TeamInstance, type TeamStartOverrides } from "./team-manager.js";
 export { seedDefaultTemplates } from "./seed-defaults.js";
 export {
   TeamLoadError,

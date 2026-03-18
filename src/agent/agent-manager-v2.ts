@@ -1,0 +1,1313 @@
+/**
+ * AgentManager V2 — Uses AgentStore + InboxAdapter + TasksAdapter
+ *
+ * Replaces EventStore/MessageRouter dependencies with the adapter layer.
+ * Messages flow through agent-inbox, tasks through opentasks,
+ * agent lifecycle state in AgentStore (minimal SQLite).
+ *
+ * @module agent/agent-manager-v2
+ */
+
+import { nanoid } from "nanoid";
+import {
+  uniqueNamesGenerator,
+  adjectives,
+  animals,
+} from "unique-names-generator";
+import {
+  AgentFactory,
+  type Session,
+  type AgentHandle,
+  type ExtendedSessionUpdate,
+  type PermissionMode,
+} from "acp-factory";
+import {
+  AgentStore,
+  type AgentRecord,
+  type SessionRecord,
+} from "./agent-store.js";
+import type {
+  AgentId,
+  TaskId,
+  Timestamp,
+  Agent,
+  AgentState,
+} from "../store/types/index.js";
+import type {
+  SpawnAgentOptions,
+  SpawnedAgent,
+  AgentFilter,
+  AgentHierarchy,
+  AgentHierarchyNode,
+  HierarchyOptions,
+  ActiveSession,
+  AgentStopReason,
+  HeadManagerOptions,
+  SystemPromptContext,
+  AgentLifecycleCallback,
+  AgentLifecycleEvent,
+  AgentConfig,
+  ContinueAgentOptions,
+  MCPServerConfig,
+} from "./types.js";
+import { AgentManagerError } from "./types.js";
+import type { RoleRegistry, Capability } from "../roles/types.js";
+import { AGENT_CAPABILITIES } from "../roles/capabilities.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
+import { generateSystemPrompt } from "./system-prompt.js";
+import type { WorkspaceManager, Workspace } from "../workspace/types.js";
+import {
+  terminateWithChangeConsolidation,
+  type WorkspaceProvider,
+  type CascadeAgentManager,
+} from "../lifecycle/cascade.js";
+import { AgentTokenManager } from "../auth/token.js";
+import type { InboxAdapter } from "../adapters/types.js";
+import type { TasksAdapter } from "../adapters/types.js";
+import type { AgentManager, SpawnInterceptor } from "./agent-manager.js";
+
+// ─────────────────────────────────────────────────────────────────
+// Helper
+// ─────────────────────────────────────────────────────────────────
+
+function getSpawnCapability(childRole: string): Capability {
+  const baseRole = childRole.split(".")[0];
+  switch (baseRole) {
+    case "worker":
+      return AGENT_CAPABILITIES.SPAWN_WORKER;
+    case "integrator":
+      return AGENT_CAPABILITIES.SPAWN_INTEGRATOR;
+    case "monitor":
+      return AGENT_CAPABILITIES.SPAWN_MONITOR;
+    case "coordinator":
+      return AGENT_CAPABILITIES.SPAWN_CUSTOM;
+    default:
+      return `agent.spawn.${childRole}` as Capability;
+  }
+}
+
+function generateName(): string {
+  return uniqueNamesGenerator({
+    dictionaries: [adjectives, animals],
+    separator: "-",
+    length: 2,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Configuration
+// ─────────────────────────────────────────────────────────────────
+
+/** Minimal health check interface (monitor module removed in V2) */
+interface HealthCheckService {
+  startForCoordinator(agentId: string): void;
+  stopForCoordinator(agentId: string): void;
+}
+
+export interface AgentManagerV2Config {
+  defaultPermissionMode?: PermissionMode;
+  defaultAgentType?: string;
+  defaultCwd?: string;
+  workspaceManager?: WorkspaceManager;
+  roleRegistry?: RoleRegistry;
+  healthCheckService?: HealthCheckService;
+  agentTokenManager?: AgentTokenManager;
+  serverUrl?: string;
+  serverToken?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Factory
+// ─────────────────────────────────────────────────────────────────
+
+export function createAgentManagerV2(
+  agentStore: AgentStore,
+  inboxAdapter: InboxAdapter,
+  tasksAdapter: TasksAdapter,
+  config: AgentManagerV2Config = {}
+): AgentManager {
+  const {
+    defaultPermissionMode = "auto-approve",
+    defaultAgentType = "claude-code",
+    defaultCwd = process.cwd(),
+    workspaceManager,
+    roleRegistry = new DefaultRoleRegistry(),
+    healthCheckService,
+    serverUrl,
+    serverToken,
+    agentTokenManager,
+  } = config;
+
+  // In-memory state
+  const activeSessions = new Map<AgentId, ActiveSession>();
+  const agentWorkspaces = new Map<AgentId, Workspace>();
+  const lifecycleListeners = new Set<AgentLifecycleCallback>();
+  let spawnInterceptor: SpawnInterceptor | null = null;
+  let isShuttingDown = false;
+
+  // ── Helpers ──────────────────────────────────────────────────
+
+  function notifyLifecycle(event: AgentLifecycleEvent): void {
+    for (const listener of lifecycleListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Ignore listener errors
+      }
+    }
+  }
+
+  function agentRecordToAgent(record: AgentRecord): Agent {
+    return {
+      id: record.id,
+      name: record.name,
+      session_id: "",
+      parent: record.parent_id,
+      lineage: record.lineage,
+      state: record.state,
+      stop_reason: record.stop_reason as Agent["stop_reason"],
+      task: record.task,
+      task_id: record.task_id,
+      role: record.role,
+      team_instance: record.team,
+      config: (record.config as Agent["config"]) ?? {},
+      cwd: record.cwd,
+      plan: [],
+      metadata: record.metadata,
+      created_at: record.created_at,
+      started_at: record.started_at,
+      stopped_at: record.stopped_at,
+      last_activity_at: record.last_activity_at,
+    };
+  }
+
+  function buildMcpServerConfig(opts: {
+    agentId: string;
+    parentId: string;
+    taskId: string;
+    cwd: string;
+    permissionMode: string;
+    lineage?: string[];
+    sessionId?: string;
+    streamId?: string;
+  }): MCPServerConfig {
+    const env: Record<string, string> = {
+      MACRO_AGENT_ID: opts.agentId,
+      MACRO_PARENT_ID: opts.parentId,
+      MACRO_TASK_ID: opts.taskId,
+      MACRO_AGENT_CWD: opts.cwd,
+      MACRO_PERMISSION_MODE: opts.permissionMode,
+      MACRO_STREAM_ID: opts.streamId ?? "",
+      // Point to inbox socket for agent-inbox MCP tools
+      INBOX_SOCKET_PATH: inboxAdapter.socketPath,
+      // opentasks client auto-discovers its socket
+    };
+
+    if (serverUrl) {
+      env.MACRO_SERVER_URL = serverUrl;
+      env.MACRO_AGENT_LINEAGE = JSON.stringify(opts.lineage ?? []);
+      env.MACRO_SESSION_ID = opts.sessionId ?? "";
+      if (serverToken) env.MACRO_SERVER_TOKEN = serverToken;
+      if (agentTokenManager) {
+        env.MACRO_AGENT_TOKEN = agentTokenManager.createToken(opts.agentId);
+      }
+    }
+
+    return {
+      name: "macro-agent",
+      command: "npx",
+      args: ["multiagent-mcp"],
+      env,
+    };
+  }
+
+  // ── Workspace Helper ─────────────────────────────────────────
+
+  async function createWorkspaceForRole(
+    agentId: AgentId,
+    role: string,
+    options: SpawnAgentOptions
+  ): Promise<Workspace | undefined> {
+    if (!workspaceManager) return undefined;
+
+    const capabilities = options.capabilities ?? [];
+    const streamId = options.streamId;
+    const streamConfig = options.streamConfig;
+    const dataplaneTaskId = options.dataplaneTaskId;
+
+    // Capability-based dispatch
+    if (capabilities.includes("workspace.stream") && streamConfig) {
+      const newStreamId = workspaceManager.createIntegrationStream(
+        agentId,
+        streamConfig
+      );
+      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+    }
+
+    if (capabilities.includes("workspace.integrate") && streamId) {
+      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+    }
+
+    if (capabilities.includes("workspace.worktree") && streamId) {
+      const taskId = dataplaneTaskId ?? agentId;
+      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+    }
+
+    // Role-name fallback
+    switch (role) {
+      case "coordinator":
+        if (streamConfig) {
+          const sid = workspaceManager.createIntegrationStream(
+            agentId,
+            streamConfig
+          );
+          return workspaceManager.createCoordinatorWorkspace(agentId, sid);
+        }
+        return undefined;
+      case "integrator":
+        if (streamId) {
+          return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+        }
+        return undefined;
+      case "worker":
+      case "worker.resolver": {
+        if (streamId) {
+          const tid = dataplaneTaskId ?? agentId;
+          return workspaceManager.createWorkerWorkspace(agentId, tid, streamId);
+        }
+        return undefined;
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  // ── Core Lifecycle ───────────────────────────────────────────
+
+  async function spawn(rawOptions: SpawnAgentOptions): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot spawn agent during shutdown",
+        "SHUTDOWN_IN_PROGRESS"
+      );
+    }
+
+    // Apply spawn interceptor (set by TeamRuntime)
+    const options = spawnInterceptor
+      ? await spawnInterceptor(rawOptions)
+      : rawOptions;
+
+    const {
+      task,
+      task_id,
+      parent,
+      cwd = defaultCwd,
+      permissionMode = defaultPermissionMode,
+      subscribeParent = true,
+      topics = [],
+      config: agentConfig,
+      agentType = defaultAgentType,
+      customPrompt,
+      interactionPatterns,
+      role,
+      team_instance,
+      capabilities,
+    } = options;
+
+    // Generate IDs
+    const agentId = `agent_${nanoid(12)}` as AgentId;
+    const taskId = (task_id ?? `task_${nanoid(12)}`) as TaskId;
+    const sessionId = `session_${nanoid(12)}`;
+    const name = generateName();
+
+    // Validate parent exists
+    if (parent) {
+      const parentRecord = agentStore.getAgent(parent);
+      if (!parentRecord) {
+        throw new AgentManagerError(
+          `Parent agent ${parent} not found`,
+          "AGENT_NOT_FOUND",
+          parent
+        );
+      }
+
+      // Check spawn capability
+      if (role) {
+        const requiredCap = getSpawnCapability(role);
+        const parentRole = parentRecord.role;
+        if (
+          !roleRegistry.hasCapability(parentRole, requiredCap) &&
+          !roleRegistry.hasCapability(parentRole, AGENT_CAPABILITIES.SPAWN_CUSTOM)
+        ) {
+          throw new AgentManagerError(
+            `Parent ${parent} (role: ${parentRole}) lacks capability ${requiredCap}`,
+            "CAPABILITY_DENIED",
+            parent
+          );
+        }
+      }
+    }
+
+    // Compute lineage
+    const lineage: AgentId[] = [];
+    if (parent) {
+      const parentRecord = agentStore.getAgent(parent);
+      if (parentRecord) {
+        lineage.push(...parentRecord.lineage, parent);
+      }
+    }
+
+    // Generate system prompt
+    const resolvedRole = role
+      ? roleRegistry.resolveRole(role)
+      : undefined;
+    const systemPromptContext: SystemPromptContext = {
+      agentId,
+      task,
+      taskId,
+      parentId: parent ?? null,
+      isHeadManager: !parent,
+      lineage,
+      role,
+    };
+    let systemPrompt = generateSystemPrompt(systemPromptContext);
+    if (customPrompt) {
+      systemPrompt += `\n\n## Role Instructions\n\n${customPrompt}`;
+    } else if (resolvedRole?.systemPrompt) {
+      systemPrompt += `\n\n## Role Instructions\n\n${resolvedRole.systemPrompt}`;
+    }
+    if (interactionPatterns?.length) {
+      systemPrompt += `\n\n${interactionPatterns.join("\n\n")}`;
+    }
+
+    // Persist agent in store
+    const now = Date.now() as Timestamp;
+    const agentRecord: AgentRecord = {
+      id: agentId,
+      name,
+      role: role ?? (parent ? "worker" : "coordinator"),
+      state: "running",
+      parent_id: parent ?? null,
+      lineage,
+      team: team_instance,
+      scope: team_instance ?? "default",
+      task: task ?? "",
+      task_id: taskId,
+      cwd,
+      capabilities: capabilities ?? resolvedRole?.capabilities ?? [],
+      created_at: now,
+      started_at: now,
+      config: agentConfig as Record<string, unknown>,
+      metadata: {},
+    };
+    agentStore.putAgent(agentRecord);
+
+    let handle: AgentHandle | undefined;
+    let workspace: Workspace | undefined;
+
+    try {
+      // Spawn process via acp-factory
+      const env: Record<string, string> = {
+        ...agentConfig?.env,
+      };
+      handle = await AgentFactory.spawn(agentType, {
+        permissionMode,
+        env,
+      });
+
+      // Create workspace if applicable
+      workspace = await createWorkspaceForRole(agentId, role ?? "", options);
+      if (workspace) {
+        agentWorkspaces.set(agentId, workspace);
+
+        // Create and claim dataplane task for workers
+        if (
+          workspace.role === "worker" &&
+          workspace.streamId &&
+          workspaceManager
+        ) {
+          const dpTaskId = options.dataplaneTaskId ?? agentId;
+          workspaceManager.createTask(workspace.streamId, {
+            title: task ?? `Task for ${agentId}`,
+          });
+          workspaceManager.claimTask(dpTaskId, agentId, workspace.path);
+        }
+
+        agentStore.updateAgent(agentId, {
+          cwd: workspace.path,
+          workspace_path: workspace.path,
+          workspace_stream_id: workspace.streamId,
+        });
+      }
+
+      const effectiveCwd = workspace?.path ?? cwd;
+
+      // Build MCP server config
+      const macroAgentMcp = buildMcpServerConfig({
+        agentId,
+        parentId: parent ?? "",
+        taskId,
+        cwd: effectiveCwd,
+        permissionMode,
+        lineage,
+        sessionId,
+        streamId: workspace?.streamId,
+      });
+
+      // Convert to acp-factory format
+      const mcpServers = [
+        {
+          name: macroAgentMcp.name,
+          command: macroAgentMcp.command,
+          args: macroAgentMcp.args ?? [],
+          env: Object.entries(macroAgentMcp.env ?? {}).map(([k, v]) => ({
+            name: k,
+            value: v,
+          })),
+        },
+        ...(agentConfig?.mcpServers?.map((s) => ({
+          name: s.name,
+          command: s.command,
+          args: s.args ?? [],
+          env: Object.entries(s.env ?? {}).map(([k, v]) => ({
+            name: k,
+            value: v,
+          })),
+        })) ?? []),
+      ];
+
+      const agentMeta =
+        permissionMode === "interactive"
+          ? { claudeCode: { options: { settingSources: [] } } }
+          : undefined;
+
+      // Create session
+      const session = await handle.createSession(effectiveCwd, {
+        mcpServers,
+        systemPrompt,
+        ...(agentMeta && { agentMeta }),
+      } as any);
+
+      // Store session record
+      agentStore.putSession({
+        agent_id: agentId,
+        session_id: sessionId,
+        provider_session_id: session.id,
+        created_at: now,
+      });
+
+      // Update agent with provider session ID
+      agentStore.updateAgent(agentId, {
+        metadata: { provider_session_id: session.id },
+      });
+
+      // Register agent in inbox
+      await inboxAdapter.registerAgent(agentId, {
+        name,
+        role: role ?? "worker",
+        scope: team_instance ?? "default",
+      });
+
+      // Create task in opentasks
+      if (tasksAdapter.connected) {
+        try {
+          const otTaskId = await tasksAdapter.createTask({
+            title: task ?? `Task for ${agentId}`,
+            assignee: agentId,
+            tags: role ? [role] : [],
+          });
+          agentStore.updateAgent(agentId, { task_id: otTaskId });
+        } catch {
+          // Non-fatal — opentasks may not be available
+        }
+      }
+
+      // Track active session
+      const activeSession: ActiveSession = {
+        agentId,
+        handle,
+        session,
+        createdAt: now,
+        isPrompting: false,
+      };
+      activeSessions.set(agentId, activeSession);
+
+      // Notify lifecycle
+      const agent = agentRecordToAgent(agentStore.getAgent(agentId)!);
+      notifyLifecycle({ type: "spawned", agent });
+      notifyLifecycle({ type: "started", agent });
+
+      // Start health monitoring for coordinators
+      if (healthCheckService && role === "coordinator") {
+        healthCheckService.startForCoordinator(agentId);
+      }
+
+      return {
+        id: agentId,
+        session_id: sessionId,
+        agent,
+        session,
+        workspace,
+        streamId: workspace?.streamId,
+      };
+    } catch (err) {
+      // Cleanup on failure
+      if (handle) {
+        try {
+          await handle.close();
+        } catch {
+          /* ignore */
+        }
+      }
+      agentStore.updateAgent(agentId, {
+        state: "failed",
+        stop_reason: "failed",
+        stopped_at: Date.now(),
+      });
+      throw err;
+    }
+  }
+
+  async function terminate(
+    agentId: AgentId,
+    reason: AgentStopReason
+  ): Promise<void> {
+    const record = agentStore.getAgent(agentId);
+    if (!record) {
+      throw new AgentManagerError(
+        `Agent ${agentId} not found`,
+        "AGENT_NOT_FOUND",
+        agentId
+      );
+    }
+
+    // Close active session
+    const activeSession = activeSessions.get(agentId);
+    if (activeSession) {
+      try {
+        await activeSession.handle.close();
+      } catch {
+        /* ignore close errors */
+      }
+      activeSessions.delete(agentId);
+    }
+
+    // Stop health monitoring
+    if (healthCheckService && record.role === "coordinator") {
+      healthCheckService.stopForCoordinator(agentId);
+    }
+
+    // Submit merge request if worker completed with workspace
+    if (
+      workspaceManager &&
+      agentWorkspaces.has(agentId) &&
+      reason === "completed"
+    ) {
+      const ws = agentWorkspaces.get(agentId)!;
+      if (ws.role === "worker" && ws.streamId) {
+        try {
+          const mergeQueue = workspaceManager.getMergeQueue();
+          if (mergeQueue) {
+            mergeQueue.submit({
+              streamId: ws.streamId,
+              workerBranch: ws.branch,
+              taskId: record.task_id ?? agentId,
+              workerAgentId: agentId,
+            });
+          }
+        } catch {
+          // Non-fatal merge queue submission failure
+        }
+      }
+    }
+
+    // Deallocate workspace
+    if (workspaceManager && agentWorkspaces.has(agentId)) {
+      try {
+        workspaceManager.deallocateWorkspace(agentId);
+      } catch {
+        /* ignore */
+      }
+      agentWorkspaces.delete(agentId);
+    }
+
+    // Revoke auth token
+    if (agentTokenManager) {
+      agentTokenManager.revokeToken(agentId);
+    }
+
+    // Transition task in opentasks
+    if (record.task_id && tasksAdapter.connected) {
+      try {
+        const action =
+          reason === "completed"
+            ? "complete"
+            : reason === "failed"
+              ? "fail"
+              : "block";
+        await tasksAdapter.transitionTask(record.task_id, action as any);
+      } catch {
+        // Non-fatal task transition failure
+      }
+    }
+
+    // Notify parent via inbox
+    if (record.parent_id) {
+      try {
+        await inboxAdapter.send(
+          agentId,
+          record.parent_id,
+          {
+            type: "event",
+            event: "agent_stopped",
+            data: {
+              agentId,
+              reason,
+              taskId: record.task_id,
+              role: record.role,
+            },
+          },
+          { importance: "high", threadTag: `lifecycle:${agentId}` }
+        );
+      } catch {
+        // Non-fatal inbox notification failure
+      }
+    }
+
+    // Deregister from inbox
+    await inboxAdapter.deregisterAgent(agentId);
+
+    // Update agent state
+    agentStore.updateAgent(agentId, {
+      state: "stopped" as AgentState,
+      stop_reason: reason as any,
+      stopped_at: Date.now(),
+    });
+
+    // Notify lifecycle
+    const updatedAgent = agentRecordToAgent(agentStore.getAgent(agentId)!);
+    notifyLifecycle({ type: "stopped", agent: updatedAgent, reason });
+
+    // Cascade termination to children
+    const children = agentStore.getChildren(agentId);
+    for (const child of children) {
+      if (child.state === "running" || child.state === "spawning") {
+        const wsProvider: WorkspaceProvider = {
+          getWorkspace: (id: AgentId) => agentWorkspaces.get(id) ?? null,
+        };
+        const cascadeAdapter: CascadeAgentManager = {
+          getChildren: (id: AgentId) =>
+            agentStore
+              .getChildren(id)
+              .map((r) => agentRecordToAgent(r)),
+          terminate: (id: AgentId, r: AgentStopReason) => terminate(id, r),
+        };
+        await terminateWithChangeConsolidation(
+          child.id as AgentId,
+          agentId,
+          cascadeAdapter,
+          wsProvider
+        );
+      }
+    }
+  }
+
+  async function resume(
+    agentId: AgentId,
+    overridePermissionMode?: PermissionMode
+  ): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot resume agent during shutdown",
+        "SHUTDOWN_IN_PROGRESS"
+      );
+    }
+
+    const record = agentStore.getAgent(agentId);
+    if (!record) {
+      throw new AgentManagerError(
+        `Agent ${agentId} not found`,
+        "AGENT_NOT_FOUND",
+        agentId
+      );
+    }
+
+    if (activeSessions.has(agentId)) {
+      throw new AgentManagerError(
+        `Agent ${agentId} already has active session`,
+        "ALREADY_RUNNING",
+        agentId
+      );
+    }
+
+    const permMode = overridePermissionMode ?? defaultPermissionMode;
+    const agentCwd = record.cwd || defaultCwd;
+
+    const handle = await AgentFactory.spawn(defaultAgentType, {
+      permissionMode: permMode,
+    });
+
+    const macroAgentMcp = buildMcpServerConfig({
+      agentId,
+      parentId: record.parent_id ?? "",
+      taskId: record.task_id ?? "",
+      cwd: agentCwd,
+      permissionMode: permMode,
+      lineage: record.lineage,
+    });
+
+    const mcpServers = [
+      {
+        name: macroAgentMcp.name,
+        command: macroAgentMcp.command,
+        args: macroAgentMcp.args ?? [],
+        env: Object.entries(macroAgentMcp.env ?? {}).map(([k, v]) => ({
+          name: k,
+          value: v,
+        })),
+      },
+    ];
+
+    const agentMeta =
+      permMode === "interactive"
+        ? { claudeCode: { options: { settingSources: [] } } }
+        : undefined;
+
+    // Try to load existing session or create new
+    const sessionRecord = agentStore.getSession(agentId);
+    let session: Session;
+
+    if (sessionRecord?.provider_session_id) {
+      session = await handle.loadSession(
+        sessionRecord.provider_session_id,
+        agentCwd,
+        mcpServers as any,
+        agentMeta ? { agentMeta } : undefined
+      );
+    } else {
+      session = await handle.createSession(agentCwd, {
+        mcpServers,
+        ...(agentMeta && { agentMeta }),
+      });
+    }
+
+    const now = Date.now() as Timestamp;
+    activeSessions.set(agentId, {
+      agentId,
+      handle,
+      session,
+      createdAt: now,
+      isPrompting: false,
+    });
+
+    agentStore.updateAgent(agentId, {
+      state: "running",
+      started_at: now,
+    });
+    agentStore.putSession({
+      agent_id: agentId,
+      session_id: sessionRecord?.session_id ?? `session_${nanoid(12)}`,
+      provider_session_id: session.id,
+      created_at: now,
+    });
+
+    const agent = agentRecordToAgent(agentStore.getAgent(agentId)!);
+    return {
+      id: agentId,
+      session_id: sessionRecord?.session_id ?? "",
+      agent,
+      session,
+    };
+  }
+
+  async function continueAgent(
+    agentId: AgentId,
+    options?: ContinueAgentOptions
+  ): Promise<SpawnedAgent> {
+    const record = agentStore.getAgent(agentId);
+    if (!record) {
+      throw new AgentManagerError(
+        `Agent ${agentId} not found`,
+        "AGENT_NOT_FOUND",
+        agentId
+      );
+    }
+
+    const contextLines: string[] = [];
+    if (options?.additionalContext) {
+      contextLines.push(options.additionalContext);
+    }
+    contextLines.push(`## Prior Session Context`);
+    contextLines.push(`Continuing from agent ${agentId}.`);
+
+    const resumeContext = contextLines.join("\n");
+    const taskDescription =
+      options?.task ?? record.task ?? `Continue work from ${agentId}`;
+
+    return spawn({
+      task: taskDescription,
+      role: record.role,
+      parent: record.parent_id ?? undefined,
+      cwd: record.cwd || defaultCwd,
+      customPrompt: resumeContext,
+    });
+  }
+
+  async function forkAgent(
+    sourceAgentId: AgentId,
+    options?: { name?: string; prompt?: string; cwd?: string }
+  ): Promise<SpawnedAgent> {
+    if (isShuttingDown) {
+      throw new AgentManagerError(
+        "Cannot fork during shutdown",
+        "SHUTDOWN_IN_PROGRESS"
+      );
+    }
+
+    const record = agentStore.getAgent(sourceAgentId);
+    if (!record) {
+      throw new AgentManagerError(
+        `Agent ${sourceAgentId} not found`,
+        "AGENT_NOT_FOUND",
+        sourceAgentId
+      );
+    }
+
+    const activeSession = activeSessions.get(sourceAgentId);
+    const sessionRecord = agentStore.getSession(sourceAgentId);
+    if (!activeSession && !sessionRecord?.provider_session_id) {
+      throw new AgentManagerError(
+        `Agent ${sourceAgentId} has no session to fork`,
+        "FORK_NOT_SUPPORTED",
+        sourceAgentId
+      );
+    }
+
+    const forkCwd = options?.cwd ?? record.cwd ?? defaultCwd;
+
+    // Get forked session ID
+    let forkedProviderSessionId: string;
+    if (activeSession) {
+      const forkedSession = await activeSession.session.forkWithFlush();
+      forkedProviderSessionId = forkedSession.id;
+    } else {
+      forkedProviderSessionId = sessionRecord!.provider_session_id!;
+    }
+
+    // Spawn new process
+    const handle = await AgentFactory.spawn(defaultAgentType, {
+      permissionMode: defaultPermissionMode,
+    });
+
+    const agentId = `agent_${nanoid(12)}` as AgentId;
+    const taskId = `task_${nanoid(12)}` as TaskId;
+    const sessionId = `session_${nanoid(12)}`;
+    const name = options?.name ?? generateName();
+    const now = Date.now() as Timestamp;
+
+    // Persist forked agent
+    agentStore.putAgent({
+      id: agentId,
+      name,
+      role: record.role,
+      state: "running",
+      parent_id: record.parent_id,
+      lineage: record.lineage,
+      team: record.team,
+      scope: record.scope,
+      task: options?.prompt ?? `[Fork of ${sourceAgentId}]`,
+      task_id: taskId,
+      cwd: forkCwd,
+      capabilities: record.capabilities,
+      created_at: now,
+      started_at: now,
+      metadata: { fork_of: sourceAgentId },
+    });
+
+    const macroAgentMcp = buildMcpServerConfig({
+      agentId,
+      parentId: record.parent_id ?? "",
+      taskId,
+      cwd: forkCwd,
+      permissionMode: defaultPermissionMode,
+      lineage: record.lineage,
+      sessionId,
+    });
+
+    const session = await handle.loadSession(
+      forkedProviderSessionId,
+      forkCwd,
+      [
+        {
+          name: macroAgentMcp.name,
+          command: macroAgentMcp.command,
+          args: macroAgentMcp.args ?? [],
+          env: Object.entries(macroAgentMcp.env ?? {}).map(([k, v]) => ({
+            name: k,
+            value: v,
+          })),
+        },
+      ] as any
+    );
+
+    agentStore.putSession({
+      agent_id: agentId,
+      session_id: sessionId,
+      provider_session_id: session.id,
+      created_at: now,
+    });
+
+    await inboxAdapter.registerAgent(agentId, {
+      name,
+      role: record.role,
+      scope: record.scope,
+    });
+
+    activeSessions.set(agentId, {
+      agentId,
+      handle,
+      session,
+      createdAt: now,
+      isPrompting: false,
+    });
+
+    const agent = agentRecordToAgent(agentStore.getAgent(agentId)!);
+    notifyLifecycle({ type: "spawned", agent });
+    notifyLifecycle({ type: "started", agent });
+
+    return { id: agentId, session_id: sessionId, agent, session };
+  }
+
+  // ── Query Methods ──────────────────────────────────────────
+
+  function get(agentId: AgentId): Agent | null {
+    const record = agentStore.getAgent(agentId);
+    return record ? agentRecordToAgent(record) : null;
+  }
+
+  function list(filter?: AgentFilter): Agent[] {
+    const records = agentStore.listAgents({
+      state: filter?.state,
+      parent_id: filter?.parent,
+    });
+
+    let result = records.map(agentRecordToAgent);
+
+    if (filter?.task_id) {
+      result = result.filter((a) => a.task_id === filter.task_id);
+    }
+    if (filter?.headManagersOnly) {
+      result = result.filter((a) => !a.parent);
+    }
+
+    return result;
+  }
+
+  function getChildren(agentId: AgentId): Agent[] {
+    return agentStore.getChildren(agentId).map(agentRecordToAgent);
+  }
+
+  function getHierarchy(
+    agentId: AgentId,
+    options?: HierarchyOptions
+  ): AgentHierarchy | null {
+    const record = agentStore.getAgent(agentId);
+    if (!record) return null;
+
+    function buildTree(
+      id: AgentId,
+      depth: number
+    ): AgentHierarchyNode {
+      const agent = agentRecordToAgent(agentStore.getAgent(id)!);
+      const maxDepth = options?.depth;
+      const children =
+        maxDepth !== undefined && depth >= maxDepth
+          ? []
+          : agentStore
+              .getChildren(id)
+              .map((c) => buildTree(c.id as AgentId, depth + 1));
+
+      return { agent, children };
+    }
+
+    const root = buildTree(agentId, 0);
+
+    function countNodes(node: AgentHierarchyNode): number {
+      return 1 + node.children.reduce((sum, c) => sum + countNodes(c), 0);
+    }
+
+    function maxDepth(node: AgentHierarchyNode, d: number): number {
+      if (node.children.length === 0) return d;
+      return Math.max(...node.children.map((c) => maxDepth(c, d + 1)));
+    }
+
+    return {
+      root,
+      depth: maxDepth(root, 0),
+      totalAgents: countNodes(root),
+    };
+  }
+
+  // ── Head Manager ─────────────────────────────────────────────
+
+  async function getOrCreateHeadManager(
+    options: HeadManagerOptions
+  ): Promise<SpawnedAgent> {
+    // Check for existing head manager
+    const existing = agentStore
+      .listAgents({ parent_id: null, state: "running" })
+      .find((a) => a.cwd === options.cwd);
+
+    if (existing && activeSessions.has(existing.id as AgentId)) {
+      const session = activeSessions.get(existing.id as AgentId)!;
+      return {
+        id: existing.id as AgentId,
+        session_id: "",
+        agent: agentRecordToAgent(existing),
+        session: session.session,
+      };
+    }
+
+    return spawn({
+      task: "Head manager",
+      parent: null,
+      cwd: options.cwd,
+      permissionMode: options.permissionMode,
+      customPrompt: options.systemPrompt,
+      role: "coordinator",
+      topics: options.topics,
+    });
+  }
+
+  function listHeadManagers(): Agent[] {
+    return agentStore
+      .listAgents({ parent_id: null })
+      .map(agentRecordToAgent);
+  }
+
+  // ── Session Interaction ──────────────────────────────────────
+
+  async function* prompt(
+    agentId: AgentId,
+    message: string
+  ): AsyncIterable<ExtendedSessionUpdate> {
+    const activeSession = activeSessions.get(agentId);
+    if (!activeSession) {
+      throw new AgentManagerError(
+        `No active session for agent ${agentId}`,
+        "SESSION_NOT_FOUND",
+        agentId
+      );
+    }
+
+    activeSession.isPrompting = true;
+    try {
+      yield* activeSession.session.prompt(message);
+    } finally {
+      activeSession.isPrompting = false;
+      agentStore.updateAgent(agentId, {
+        last_activity_at: Date.now(),
+      });
+    }
+  }
+
+  async function promptUntilDone(
+    agentId: AgentId,
+    message: string,
+    options?: {
+      maxFollowUps?: number;
+      onUpdate?: (update: ExtendedSessionUpdate) => void;
+    }
+  ): Promise<{
+    doneCalled: boolean;
+    doneStatus?: string;
+    updates: ExtendedSessionUpdate[];
+  }> {
+    const maxFollowUps = options?.maxFollowUps ?? 2;
+    const allUpdates: ExtendedSessionUpdate[] = [];
+    let doneCalled = false;
+    let doneStatus: string | undefined;
+
+    let currentMessage = message;
+
+    for (let attempt = 0; attempt <= maxFollowUps; attempt++) {
+      for await (const update of prompt(agentId, currentMessage)) {
+        allUpdates.push(update);
+        options?.onUpdate?.(update);
+
+        if (
+          (update as any).type === "result" &&
+          (update as any).subtype === "tool_result"
+        ) {
+          const toolName = (update as any).toolName;
+          if (toolName === "done") {
+            doneCalled = true;
+            doneStatus = (update as any).result?.status;
+          }
+        }
+      }
+
+      if (doneCalled) break;
+
+      if (attempt < maxFollowUps) {
+        currentMessage =
+          "Please call the done() tool to signal that you have completed your work.";
+      }
+    }
+
+    return { doneCalled, doneStatus, updates: allUpdates };
+  }
+
+  function getSession(agentId: AgentId): Session | null {
+    return activeSessions.get(agentId)?.session ?? null;
+  }
+
+  function hasActiveSession(agentId: AgentId): boolean {
+    return activeSessions.has(agentId);
+  }
+
+  function isPrompting(agentId: AgentId): boolean {
+    return activeSessions.get(agentId)?.isPrompting ?? false;
+  }
+
+  async function supportsInjection(agentId: AgentId): Promise<boolean> {
+    const session = activeSessions.get(agentId)?.session;
+    if (!session) return false;
+    return typeof (session as any).supportsInject === "function"
+      ? (session as any).supportsInject()
+      : false;
+  }
+
+  function isProcessRunning(agentId: AgentId): boolean {
+    const session = activeSessions.get(agentId);
+    if (!session) return false;
+    return typeof (session as any).handle?.isRunning === "function"
+      ? (session as any).handle.isRunning()
+      : true;
+  }
+
+  function respondToPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId: string
+  ): boolean {
+    const session = activeSessions.get(agentId)?.session;
+    if (!session) return false;
+    return (session as any).respondToPermission?.(requestId, optionId) ?? false;
+  }
+
+  function cancelPermission(agentId: AgentId, requestId: string): boolean {
+    const session = activeSessions.get(agentId)?.session;
+    if (!session) return false;
+    return (session as any).cancelPermission?.(requestId) ?? false;
+  }
+
+  function setPermissionMode(
+    agentId: AgentId,
+    mode: PermissionMode
+  ): boolean {
+    const session = activeSessions.get(agentId);
+    if (!session) return false;
+    if (typeof (session.handle as any).setPermissionMode === "function") {
+      (session.handle as any).setPermissionMode(mode);
+      return true;
+    }
+    return false;
+  }
+
+  function getPermissionMode(agentId: AgentId): PermissionMode | null {
+    const session = activeSessions.get(agentId);
+    if (!session) return null;
+    return typeof (session.handle as any).getPermissionMode === "function"
+      ? (session.handle as any).getPermissionMode()
+      : null;
+  }
+
+  // ── Lifecycle Callbacks ──────────────────────────────────────
+
+  function onLifecycleEvent(
+    callback: AgentLifecycleCallback
+  ): () => void {
+    lifecycleListeners.add(callback);
+    return () => lifecycleListeners.delete(callback);
+  }
+
+  function setSpawnInterceptorFn(
+    interceptor: SpawnInterceptor | null
+  ): void {
+    spawnInterceptor = interceptor;
+  }
+
+  function getRoleRegistry(): RoleRegistry {
+    return roleRegistry;
+  }
+
+  // ── Legacy stubs ─────────────────────────────────────────────
+  // These methods exist for backward compatibility but are no-ops
+  // since messaging and task management are now in subsystems.
+
+  function setOpenTasksSocketPath(_socketPath: string): void {
+    // No-op: opentasks client auto-discovers socket
+  }
+
+  function setMailServices(): void {
+    // No-op: agent-inbox handles conversation tracking
+  }
+
+  // ── Cleanup ──────────────────────────────────────────────────
+
+  async function close(): Promise<void> {
+    isShuttingDown = true;
+
+    for (const [agentId, session] of activeSessions) {
+      try {
+        await session.handle.close();
+      } catch {
+        /* ignore */
+      }
+      agentStore.updateAgent(agentId, {
+        state: "stopped",
+        stop_reason: "cancelled",
+        stopped_at: Date.now(),
+      });
+    }
+    activeSessions.clear();
+    agentWorkspaces.clear();
+    lifecycleListeners.clear();
+
+    // Note: isShuttingDown stays true after close() to prevent further spawns
+  }
+
+  // ── Return AgentManager interface ────────────────────────────
+
+  return {
+    spawn,
+    terminate,
+    resume,
+    continueAgent,
+    forkAgent,
+    get,
+    list,
+    getChildren,
+    getHierarchy,
+    getOrCreateHeadManager,
+    listHeadManagers,
+    prompt,
+    promptUntilDone,
+    getSession,
+    hasActiveSession,
+    isPrompting,
+    supportsInjection,
+    isProcessRunning,
+    respondToPermission,
+    cancelPermission,
+    setPermissionMode,
+    getPermissionMode,
+    onLifecycleEvent,
+    setSpawnInterceptor: setSpawnInterceptorFn,
+    getRoleRegistry,
+    setOpenTasksSocketPath,
+    setMailServices,
+    close,
+  } as AgentManager;
+}

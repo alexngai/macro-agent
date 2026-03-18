@@ -1,17 +1,8 @@
 /**
- * macro-agent - Multi-agent orchestration system
+ * macro-agent - Multi-agent orchestration system (V2)
  */
 
-// Store - core event store and types
-export {
-  createEventStore,
-  type EventStore,
-  type AgentChangeCallback,
-  type TaskChangeCallback,
-  type MessageCallback,
-  type Unsubscribe,
-} from './store/event-store.js';
-
+// Store types (primitives used everywhere)
 export {
   type Agent,
   type AgentState,
@@ -37,15 +28,16 @@ export {
   type QueuedMessage,
   type Subscription,
   type SubscriptionType,
-  type StoreConfig,
   CURRENT_EVENT_VERSION,
 } from './store/types/index.js';
 
-// Agent manager
+// Agent manager (interface + V2 factory)
 export {
   createAgentManager,
+  createAgentManagerV2,
   type AgentManager,
   type AgentManagerConfig,
+  type SpawnInterceptor,
 } from './agent/agent-manager.js';
 
 export {
@@ -68,230 +60,45 @@ export {
 
 export { generateSystemPrompt } from './agent/system-prompt.js';
 
-// Task manager
-export {
-  createTaskManager,
-  type TaskManager,
-} from './task/task-manager.js';
+// Agent store (V2 lifecycle state)
+export { AgentStore } from './agent/agent-store.js';
 
+// Adapters (V2 messaging + tasks)
 export {
-  type CreateTaskOptions,
-  type UpdateTaskOptions,
-  type TaskFilter,
-  type SubtaskStatus,
-  TaskManagerError,
-  type TaskManagerErrorCode,
-  VALID_STATUS_TRANSITIONS,
-} from './task/types.js';
-
-// Message router
-export {
-  createMessageRouter,
-  type MessageRouter,
-  type MessageRouterConfig,
-} from './router/message-router.js';
+  DefaultInboxAdapter,
+} from './adapters/inbox-adapter.js';
 
 export {
-  type MessageTarget,
-  type MessageSender,
-  type SendMessageRequest,
-  type SentMessage,
-  type ReceivedMessage,
-  type GetMessagesOptions,
-  type Channel,
-  type ChannelType,
-  type DefaultSubscriptionOptions,
-  type StatusType as RouterStatusType,
-  type EmitStatusRequest,
-  type StatusNotification,
-  type TruncationConfig,
-  RoutingError,
-  type RoutingErrorCode,
-  DEFAULT_TRUNCATION_CONFIG,
-} from './router/types.js';
-
-// MCP server
-export {
-  createMCPServer,
-  type MCPServerConfig,
-  type MCPServices,
-  type MCPServerInstance,
-} from './mcp/mcp-server.js';
+  DefaultTasksAdapter,
+} from './adapters/tasks-adapter.js';
 
 export {
-  type ToolContext,
-  type SpawnAgentInput,
-  type SpawnAgentOutput,
-  type EmitStatusInput,
-  type EmitStatusOutput,
-  type SendMessageInput,
-  type SendMessageOutput,
-  type CheckMessagesInput,
-  type CheckMessagesOutput,
-  type QueryIndexInput,
-  type QueryIndexOutput,
-  type GetHierarchyInput,
-  type GetHierarchyOutput,
-  type HierarchyNode as MCPHierarchyNode,
-  type GetAgentSummaryInput,
-  type GetAgentSummaryOutput,
-  type StopAgentInput,
-  type StopAgentOutput,
-  type CreateTaskInput,
-  type CreateTaskOutput,
-  type GetTaskInput,
-  type GetTaskOutput,
-  MCPToolError,
-  type MCPToolErrorCode,
-  // Peer communication tools
-  type SendPeerMessageInput,
-  type SendPeerMessageOutput,
-  type SendPeerRequestInput,
-  type SendPeerRequestOutput,
-  type RespondToPeerRequestInput,
-  type RespondToPeerRequestOutput,
-} from './mcp/types.js';
+  type InboxAdapter,
+  type TasksAdapter,
+} from './adapters/types.js';
 
-// API server
+// Boot V2
 export {
-  createAPIServer,
-  type APIServer,
-  type APIServerConfig,
-  type APIServices,
-} from './api/server.js';
+  bootV2,
+  type BootV2Config,
+  type MacroAgentSystemV2,
+} from './boot-v2.js';
 
+// Roles
 export {
-  type SystemStatus,
-  type InitRequest,
-  type InitResponse,
-  type ConversationMessageRequest,
-  type ConversationMessageResponse,
-  type ConversationHistoryEntry,
-  type ConversationHistoryResponse,
-  type AgentSummary,
-  type AgentDetail,
-  type AgentListResponse,
-  type HierarchyNode as APIHierarchyNode,
-  type HierarchyResponse,
-  type TaskSummary,
-  type TaskDetail,
-  type TaskListResponse,
-  type EventSummary,
-  type EventListResponse,
-  type WSMessage,
-  type WSMessageType,
-  type WSSubscribeMessage,
-  type WSAgentUpdate,
-  type WSTaskUpdate,
-  type WSConversationMessage,
-  type AgentQueryParams,
-  type TaskQueryParams,
-  type EventQueryParams,
-  type APIError,
-} from './api/types.js';
+  type RoleDefinition,
+  type RoleRegistry,
+  type Capability,
+} from './roles/types.js';
 
-// ACP - Agent Communication Protocol support
+export { DefaultRoleRegistry } from './roles/registry.js';
+export { AGENT_CAPABILITIES } from './roles/capabilities.js';
+
+// Workspace
 export {
-  // Registration helper
-  registerMacroAgent,
-  type RegisterOptions,
-  // Classes
-  SessionMapper,
-  MacroAgent,
-  ACPError,
-  // Types
-  type MacroAgentConfig,
-  type ACPSessionId,
-  type SessionMapping,
-  // Initialization config types
-  type MacroAgentInitConfig,
-  type SubAgentConfig,
-  type ACPMCPServerConfig,
-  type ACPPermissionMode,
-  // Extension request/response types
-  type SpawnAgentRequest as ACPSpawnAgentRequest,
-  type SpawnAgentResponse as ACPSpawnAgentResponse,
-  type GetHierarchyRequest as ACPGetHierarchyRequest,
-  type GetHierarchyResponse as ACPGetHierarchyResponse,
-  type GetTaskRequest as ACPGetTaskRequest,
-  type GetTaskResponse as ACPGetTaskResponse,
-  type MountAgentRequest,
-  type MountAgentResponse,
-  type ForkAgentRequest,
-  type ForkAgentResponse,
-  type ACPExtensionMethod,
-  type ACPExtensionRequests,
-  type ACPExtensionResponses,
-  type ACPErrorCode,
-} from './acp/index.js';
-
-// Peer communication
-export {
-  createPeerManager,
-  type PeerManager,
-  type PeerTransport,
-  type PeerHandler,
-  type PeerConfig,
-  type PeerMessage,
-  type PeerRequest,
-  type PeerResponse,
-  type PeerAddress,
-  type ParsedPeerAddress,
-  type PeerInboxMessage,
-  PeerError,
-  type PeerErrorCode,
-} from './peer/index.js';
-
-// Activity module - event-driven agent waking
-export {
-  // Types
-  type Activity,
-  type ActivityEventType,
-  type ActivitySource,
-  type ActivityTarget,
-  type EventSubscription,
-  type EventSubscriptionScope,
-  type WakeResult,
-  type WakeMethod,
-  type WaitForActivityResult,
-  MONITOR_DEFAULT_EVENT_TYPES,
-
-  // Activity watcher
-  createActivityWatcher,
-  subscribeAgentToEvents,
-  type ActivityWatcher,
-  type ActivityListener,
-  type WakeHandler,
-
-  // Relevance detection
-  findRelevantAgents,
-  matchesRole,
-  matchesSubscriptionScope,
-  getAncestors,
-  isInSubtree,
-  getAgentsByRole,
-  type RelevanceAgentInfo,
-  type RelevanceAgentSource,
-  type RelevanceSubscriptionSource,
-  type RelevanceOptions,
-
-  // Deduplication
-  ActivityDeduplicator,
-  createDeduplicator,
-  type DeduplicationKey,
-  type DeduplicationConfig,
-} from './activity/index.js';
-
-// Agent wake mechanism
-export {
-  wakeAgent,
-  createWakeHandler,
-  createSessionProviderFromAgentManager,
-  formatActivityContext,
-  type WakeSessionInfo,
-  type WakeSessionProvider,
-  type WakeAgentOptions,
-} from './agent/wake.js';
+  type WorkspaceManager,
+  type Workspace,
+} from './workspace/types.js';
 
 // Teams - template seeding
 export { seedDefaultTemplates } from './teams/seed-defaults.js';

@@ -7,7 +7,7 @@
  * @module trigger/sources/cron/cron-service
  */
 
-import type { TriggerRouter } from "../../router/types.js";
+import type { TriggerRouter } from "../../types.js";
 import type { TriggerWakeManager } from "../../wake/types.js";
 import type {
   CronService,

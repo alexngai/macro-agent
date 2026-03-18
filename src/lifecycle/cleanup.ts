@@ -13,7 +13,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { execSync, execFileSync } from "child_process";
 import type { CleanupStatus, LifecycleContext } from "./types.js";
-import type { MessageRouter } from "../router/message-router.js";
 
 // =============================================================================
 // Cleanup Detection Interface
@@ -23,8 +22,7 @@ import type { MessageRouter } from "../router/message-router.js";
  * Dependencies for cleanup detection
  */
 export interface CleanupDependencies {
-  /** Message router for checking pending messages */
-  messageRouter?: MessageRouter;
+  // V1 MessageRouter removed — extend as needed for V2 adapters
 }
 
 // =============================================================================
@@ -89,24 +87,13 @@ export function getCurrentBranch(workspacePath: string): string | undefined {
 // =============================================================================
 
 /**
- * Get count of pending (unacknowledged) messages for an agent
+ * Get count of pending (unacknowledged) messages for an agent.
+ * V1 MessageRouter removed — always returns 0 until V2 inbox adapter is wired.
  */
 export function getPendingMessageCount(
-  agentId: string,
-  messageRouter?: MessageRouter
+  _agentId: string,
 ): number {
-  if (!messageRouter) {
-    return 0;
-  }
-
-  try {
-    const messages = messageRouter.getMessages(agentId, {
-      includeAcknowledged: false,
-    });
-    return messages.length;
-  } catch {
-    return 0;
-  }
+  return 0;
 }
 
 // =============================================================================
@@ -143,7 +130,7 @@ export function detectCleanupStatus(
   }
 
   // Check pending messages
-  pendingMessages = getPendingMessageCount(context.agentId, deps.messageRouter);
+  pendingMessages = getPendingMessageCount(context.agentId);
   if (pendingMessages > 0) {
     reasons.push(`${pendingMessages} pending message(s)`);
   }
