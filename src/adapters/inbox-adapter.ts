@@ -49,8 +49,8 @@ export interface InboxAdapterConfig {
 export class DefaultInboxAdapter implements IInboxAdapter {
   private inbox: AgentInbox | null = null;
   private handlers: Set<DeliveryHandler> = new Set();
-  private signalFilter: SignalFilterFn | null = null;
-  private emissionValidator: EmissionValidatorFn | null = null;
+  private signalFilters = new Map<string, SignalFilterFn>();
+  private emissionValidators = new Map<string, EmissionValidatorFn>();
   private readonly config: InboxAdapterConfig;
   private readonly defaultScope: string;
 
@@ -138,9 +138,9 @@ export class DefaultInboxAdapter implements IInboxAdapter {
       metadata: {},
     } as Message;
 
-    // Run emission validation (adapter-side)
-    if (this.emissionValidator) {
-      const rejection = this.emissionValidator(from, validationMsg);
+    // Run emission validation (adapter-side) — first rejection wins
+    for (const validator of this.emissionValidators.values()) {
+      const rejection = validator(from, validationMsg);
       if (rejection) {
         throw new Error(`Emission rejected for ${from}: ${rejection}`);
       }
@@ -195,11 +195,29 @@ export class DefaultInboxAdapter implements IInboxAdapter {
   // ── Policy Hooks ─────────────────────────────────────────────
 
   setSignalFilter(filter: SignalFilterFn): void {
-    this.signalFilter = filter;
+    this.signalFilters.set("default", filter);
   }
 
   setEmissionValidator(validator: EmissionValidatorFn): void {
-    this.emissionValidator = validator;
+    this.emissionValidators.set("default", validator);
+  }
+
+  // ── Multi-Team Policy Hooks ─────────────────────────────────
+
+  addSignalFilter(id: string, filter: SignalFilterFn): void {
+    this.signalFilters.set(id, filter);
+  }
+
+  removeSignalFilter(id: string): void {
+    this.signalFilters.delete(id);
+  }
+
+  addEmissionValidator(id: string, validator: EmissionValidatorFn): void {
+    this.emissionValidators.set(id, validator);
+  }
+
+  removeEmissionValidator(id: string): void {
+    this.emissionValidators.delete(id);
   }
 
   // ── Lifecycle ────────────────────────────────────────────────
@@ -229,9 +247,9 @@ export class DefaultInboxAdapter implements IInboxAdapter {
   }
 
   private handleDeliveryEvent(event: InboxDeliveryEvent): void {
-    // Apply signal filter (adapter-side)
-    if (this.signalFilter) {
-      const allowed = this.signalFilter(
+    // Apply signal filters (adapter-side) — ALL must return true (AND logic)
+    for (const filter of this.signalFilters.values()) {
+      const allowed = filter(
         event.message.sender_id,
         event.agentId,
         event.message

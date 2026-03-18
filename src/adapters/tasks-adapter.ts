@@ -76,24 +76,21 @@ export class DefaultTasksAdapter implements ITasksAdapter {
   async createTask(opts: CreateTaskOptions): Promise<string> {
     const client = this.requireClient();
 
-    const result = await client.query({
-      nodes: { type: "task" },
+    // Create via graph CRUD (createNode) — the task tool does not
+    // have a "create" operation; it only handles transitions, ready
+    // queries, assignments, and valid-action introspection.
+    const node = await client.createNode({
+      type: "task",
+      title: opts.title,
+      content: opts.content,
+      status: "open",
+      assignee: opts.assignee,
+      parent_id: opts.parent,
+      tags: opts.tags,
+      priority: opts.priority,
     });
 
-    // Create via the task tool's semantic interface
-    const createResult = await client.task({
-      create: {
-        title: opts.title,
-        content: opts.content,
-        status: "open",
-        assignee: opts.assignee,
-        parent_id: opts.parent,
-        tags: opts.tags,
-        priority: opts.priority,
-      },
-    });
-
-    return createResult.id ?? createResult.node_id ?? "";
+    return node?.id ?? "";
   }
 
   async assignTask(taskId: string, agentId: string): Promise<void> {
@@ -114,16 +111,13 @@ export class DefaultTasksAdapter implements ITasksAdapter {
 
   async getTask(taskId: string): Promise<TaskRecord> {
     const client = this.requireClient();
-    const result = await client.query({
-      nodes: { id: taskId },
-    });
+    const node = await client.getNode(taskId);
 
-    const items = result.items ?? [];
-    if (items.length === 0) {
+    if (!node) {
       throw new Error(`Task not found: ${taskId}`);
     }
 
-    return this.nodeToTaskRecord(items[0]);
+    return this.nodeToTaskRecord(node);
   }
 
   async queryReady(
@@ -164,8 +158,8 @@ export class DefaultTasksAdapter implements ITasksAdapter {
   async addBlocker(taskId: string, blockerId: string): Promise<void> {
     const client = this.requireClient();
     await client.link({
-      from_id: blockerId,
-      to_id: taskId,
+      fromId: blockerId,
+      toId: taskId,
       type: "blocks",
     });
   }
@@ -173,8 +167,8 @@ export class DefaultTasksAdapter implements ITasksAdapter {
   async removeBlocker(taskId: string, blockerId: string): Promise<void> {
     const client = this.requireClient();
     await client.link({
-      from_id: blockerId,
-      to_id: taskId,
+      fromId: blockerId,
+      toId: taskId,
       type: "blocks",
       remove: true,
     });
@@ -215,12 +209,14 @@ export class DefaultTasksAdapter implements ITasksAdapter {
 
   async unclaimTask(taskId: string): Promise<void> {
     const client = this.requireClient();
-    // Reopen and unassign
+    // To unclaim a task that's in_progress, transition through
+    // blocked -> open: in_progress --(block)--> blocked --(reopen)--> open.
+    // "reopen" is only valid from blocked/closed, not from in_progress.
     await client.task({
-      transition: { id: taskId, action: "reopen" },
+      transition: { id: taskId, action: "block" },
     });
     await client.task({
-      assign: { id: taskId, assignee: "" },
+      transition: { id: taskId, action: "reopen" },
     });
   }
 
@@ -297,6 +293,8 @@ interface OpenTasksClientLike {
   query(params: Record<string, unknown>): Promise<QueryResultLike>;
   link(params: Record<string, unknown>): Promise<unknown>;
   task(params: Record<string, unknown>): Promise<TaskResultLike>;
+  createNode(params: Record<string, unknown>): Promise<NodeSummaryLike>;
+  getNode(idOrUri: string): Promise<NodeSummaryLike | null>;
 }
 
 interface QueryResultLike {

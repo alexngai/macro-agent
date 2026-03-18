@@ -360,7 +360,16 @@ export class TeamRuntimeV2 {
     return this.agentRoleMap;
   }
 
-  /** Register an agent's role mapping (dynamic spawn tracking) */
+  /**
+   * Register an agent's role mapping (dynamic spawn tracking).
+   *
+   * NOTE: roleAgentMap is 1:1 (last writer wins). This is fine for bootstrap
+   * agents (one per role) and peer route wiring. Dynamic workers with the
+   * same role will overwrite each other here, but that's acceptable because
+   * dynamic lookup uses agentRoleMap (agent→role) not roleAgentMap (role→agent).
+   * If multi-instance role→agent resolution is needed in the future, change
+   * roleAgentMap to Map<string, Set<AgentId>>.
+   */
   registerAgent(agentId: AgentId, roleName: string): void {
     this.agentRoleMap.set(agentId, roleName);
     this.roleAgentMap.set(roleName, agentId);
@@ -449,17 +458,23 @@ export class TeamRuntimeV2 {
 
   /**
    * Install signal filter and emission validator on the InboxAdapter.
+   *
+   * Uses addSignalFilter/addEmissionValidator with team name as ID
+   * so multiple teams can coexist without overwriting each other.
+   * Also installs spawn interceptor on the AgentManager.
    */
   installOnServices(): void {
     const { agentManager, inboxAdapter } = this.services;
 
     agentManager.setSpawnInterceptor(this.createSpawnInterceptor());
-    inboxAdapter.setSignalFilter(this.createSignalFilter());
-    inboxAdapter.setEmissionValidator(this.createEmissionValidator());
+    inboxAdapter.addSignalFilter(this.manifest.name, this.createSignalFilter());
+    inboxAdapter.addEmissionValidator(this.manifest.name, this.createEmissionValidator());
   }
 
   uninstallFromServices(): void {
     this.services.agentManager.setSpawnInterceptor(null);
+    this.services.inboxAdapter.removeSignalFilter(this.manifest.name);
+    this.services.inboxAdapter.removeEmissionValidator(this.manifest.name);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -852,10 +867,18 @@ Focus on correctness — your changes go live immediately.`);
             const caps = resolved?.capabilities ?? [];
             if (caps.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
               try {
-                this.services.agentManager.prompt(
+                // prompt() returns AsyncIterable — drain in background (fire-and-forget)
+                const iter = this.services.agentManager.prompt(
                   agentId,
                   `Merge request submitted. Process the merge queue.`
                 );
+                (async () => {
+                  try {
+                    for await (const _ of iter) { /* drain */ }
+                  } catch {
+                    // Best-effort wake — ignore errors
+                  }
+                })();
               } catch {
                 // Best-effort wake
               }

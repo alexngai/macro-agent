@@ -1,0 +1,3 @@
+
+# OpenTasks merge driver for graph.jsonl
+.opentasks/graph.jsonl merge=opentasks

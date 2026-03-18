@@ -140,6 +140,20 @@ export interface InboxAdapter {
   /** Install an emission validator (replaces any existing validator). */
   setEmissionValidator(validator: EmissionValidatorFn): void;
 
+  // ── Multi-Team Policy Hooks ─────────────────────────────────
+
+  /** Add a named signal filter (for multi-team). */
+  addSignalFilter(id: string, filter: SignalFilterFn): void;
+
+  /** Remove a named signal filter. */
+  removeSignalFilter(id: string): void;
+
+  /** Add a named emission validator (for multi-team). */
+  addEmissionValidator(id: string, validator: EmissionValidatorFn): void;
+
+  /** Remove a named emission validator. */
+  removeEmissionValidator(id: string): void;
+
   // ── Lifecycle ────────────────────────────────────────────────
 
   /** The IPC socket path for agent subprocesses to connect to. */

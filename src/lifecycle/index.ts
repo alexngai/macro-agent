@@ -50,7 +50,6 @@ export {
   hasUncommittedChanges,
   getUncommittedFiles,
   getCurrentBranch,
-  getPendingMessageCount,
 
   // Helper functions
   commitChanges,

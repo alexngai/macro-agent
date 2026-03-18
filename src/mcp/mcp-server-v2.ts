@@ -110,7 +110,13 @@ export function createMCPServerV2(
   // Resolve agent's role for tool filtering
   const agentRecord = agentStore.getAgent(context.agent_id);
   const agentRole = agentRecord?.role ?? "worker";
-  const resolvedRole: RoleDefinition = roleRegistry.resolveRole(agentRole);
+  let resolvedRole: RoleDefinition;
+  try {
+    resolvedRole = roleRegistry.resolveRole(agentRole);
+  } catch {
+    // Fallback to worker role if resolution fails (e.g., unknown custom role)
+    resolvedRole = roleRegistry.resolveRole("worker");
+  }
 
   function shouldRegister(toolName: string): boolean {
     return isToolAllowedForRole(toolName, resolvedRole);
@@ -303,6 +309,96 @@ export function createMCPServerV2(
         throw new MCPToolError(
           `Failed to inject context: ${error}`,
           "ROUTING_FAILED"
+        );
+      }
+    });
+  }
+
+  // ── Tool: claim_task (pull mode) ─────────────────────────────
+
+  if (shouldRegister("claim_task")) {
+    server.registerTool("claim_task", {
+      description: "Claim the next available task from the pool (pull mode). Returns the claimed task or null if none available.",
+      inputSchema: {
+        tags: z.array(z.string()).optional().describe("Filter tasks by tags"),
+        root_tasks_only: z.boolean().optional().describe("Only claim root-level tasks (no subtasks)"),
+      },
+    }, async (args) => {
+      try {
+        const filter: { tags?: string[] } = {};
+        if (args.tags) filter.tags = args.tags;
+
+        const task = await tasksAdapter.claimTask(context.agent_id, filter);
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify(task ?? { claimed: false, task: null }),
+          }],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to claim task: ${error}`,
+          "TASK_NOT_FOUND"
+        );
+      }
+    });
+  }
+
+  // ── Tool: unclaim_task (pull mode) ─────────────────────────
+
+  if (shouldRegister("unclaim_task")) {
+    server.registerTool("unclaim_task", {
+      description: "Release a previously claimed task back to the pool.",
+      inputSchema: {
+        task_id: z.string().describe("ID of the task to unclaim"),
+      },
+    }, async (args) => {
+      try {
+        await tasksAdapter.unclaimTask(args.task_id);
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ success: true, task_id: args.task_id }),
+          }],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to unclaim task: ${error}`,
+          "TASK_NOT_FOUND"
+        );
+      }
+    });
+  }
+
+  // ── Tool: list_claimable_tasks (pull mode) ─────────────────
+
+  if (shouldRegister("list_claimable_tasks")) {
+    server.registerTool("list_claimable_tasks", {
+      description: "List tasks available for claiming from the pool.",
+      inputSchema: {
+        tags: z.array(z.string()).optional().describe("Filter tasks by tags"),
+        limit: z.number().optional().describe("Maximum number of tasks to return"),
+      },
+    }, async (args) => {
+      try {
+        const filter: { tags?: string[]; limit?: number } = {};
+        if (args.tags) filter.tags = args.tags;
+        if (args.limit) filter.limit = args.limit;
+
+        const tasks = await tasksAdapter.listClaimable(filter);
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ tasks, count: tasks.length }),
+          }],
+        };
+      } catch (error) {
+        throw new MCPToolError(
+          `Failed to list claimable tasks: ${error}`,
+          "TASK_NOT_FOUND"
         );
       }
     });

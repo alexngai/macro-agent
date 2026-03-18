@@ -23,6 +23,8 @@ interface MockOpenTasksClient {
   query: ReturnType<typeof vi.fn>;
   link: ReturnType<typeof vi.fn>;
   task: ReturnType<typeof vi.fn>;
+  createNode: ReturnType<typeof vi.fn>;
+  getNode: ReturnType<typeof vi.fn>;
 }
 
 function createMockClient(): MockOpenTasksClient {
@@ -32,6 +34,8 @@ function createMockClient(): MockOpenTasksClient {
     query: vi.fn().mockResolvedValue({ items: [] }),
     link: vi.fn().mockResolvedValue({ success: true }),
     task: vi.fn().mockResolvedValue({ id: "t-new", success: true }),
+    createNode: vi.fn().mockResolvedValue({ id: "t-new", title: "Test", status: "open" }),
+    getNode: vi.fn().mockResolvedValue({ id: "t-1", title: "Test Task", status: "in_progress", assignee: "worker-1", tags: ["urgent"], priority: 1 }),
   };
 }
 
@@ -72,7 +76,7 @@ describe("TasksAdapter", () => {
 
   describe("createTask", () => {
     it("should create a task and return ID", async () => {
-      mockClient.task.mockResolvedValue({ id: "t-abc123" });
+      mockClient.createNode.mockResolvedValue({ id: "t-abc123" });
 
       const id = await adapter.createTask({
         title: "Implement feature X",
@@ -81,13 +85,11 @@ describe("TasksAdapter", () => {
       });
 
       expect(id).toBe("t-abc123");
-      expect(mockClient.task).toHaveBeenCalledWith(
+      expect(mockClient.createNode).toHaveBeenCalledWith(
         expect.objectContaining({
-          create: expect.objectContaining({
-            title: "Implement feature X",
-            assignee: "worker-1",
-            tags: ["backend"],
-          }),
+          title: "Implement feature X",
+          assignee: "worker-1",
+          tags: ["backend"],
         })
       );
     });
@@ -137,17 +139,13 @@ describe("TasksAdapter", () => {
 
   describe("getTask", () => {
     it("should return a task record", async () => {
-      mockClient.query.mockResolvedValue({
-        items: [
-          {
-            id: "t-1",
-            title: "Test Task",
-            status: "in_progress",
-            assignee: "worker-1",
-            tags: ["urgent"],
-            priority: 1,
-          },
-        ],
+      mockClient.getNode.mockResolvedValue({
+        id: "t-1",
+        title: "Test Task",
+        status: "in_progress",
+        assignee: "worker-1",
+        tags: ["urgent"],
+        priority: 1,
       });
 
       const task = await adapter.getTask("t-1");
@@ -159,7 +157,7 @@ describe("TasksAdapter", () => {
     });
 
     it("should throw for non-existent task", async () => {
-      mockClient.query.mockResolvedValue({ items: [] });
+      mockClient.getNode.mockResolvedValue(null);
       await expect(adapter.getTask("t-missing")).rejects.toThrow(
         "Task not found"
       );
@@ -198,8 +196,8 @@ describe("TasksAdapter", () => {
       await adapter.addBlocker("t-impl", "t-spec");
 
       expect(mockClient.link).toHaveBeenCalledWith({
-        from_id: "t-spec",
-        to_id: "t-impl",
+        fromId: "t-spec",
+        toId: "t-impl",
         type: "blocks",
       });
     });
@@ -208,8 +206,8 @@ describe("TasksAdapter", () => {
       await adapter.removeBlocker("t-impl", "t-spec");
 
       expect(mockClient.link).toHaveBeenCalledWith({
-        from_id: "t-spec",
-        to_id: "t-impl",
+        fromId: "t-spec",
+        toId: "t-impl",
         type: "blocks",
         remove: true,
       });
@@ -246,14 +244,14 @@ describe("TasksAdapter", () => {
   });
 
   describe("unclaimTask", () => {
-    it("should reopen and unassign", async () => {
+    it("should block then reopen to unclaim", async () => {
       await adapter.unclaimTask("t-1");
 
       expect(mockClient.task).toHaveBeenCalledWith({
-        transition: { id: "t-1", action: "reopen" },
+        transition: { id: "t-1", action: "block" },
       });
       expect(mockClient.task).toHaveBeenCalledWith({
-        assign: { id: "t-1", assignee: "" },
+        transition: { id: "t-1", action: "reopen" },
       });
     });
   });

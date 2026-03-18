@@ -171,19 +171,10 @@ async function handleWorkerDone(
     warnings.push("Failed to emit WORKER_DONE");
   }
 
-  // Step 4: Transition task in opentasks
-  if (context.taskId && deps.tasksAdapter.connected) {
-    try {
-      const action =
-        args.status === "completed" ? "complete" : "fail";
-      await deps.tasksAdapter.transitionTask(context.taskId, action);
-      cleanupActions.push(`Task ${context.taskId} transitioned to ${action}`);
-    } catch {
-      warnings.push("Failed to transition task in opentasks");
-    }
-  }
+  // NOTE: Task transition is NOT done here — AgentManagerV2.terminate() handles
+  // it to avoid double-transitioning.
 
-  // Step 5: Signal descendants (notification only — actual cascade via AgentManager)
+  // Step 4: Signal descendants (notification only — actual cascade via AgentManager)
   try {
     const cascadeAdapter: CascadeAgentManager = {
       getChildren: (agentId) => {

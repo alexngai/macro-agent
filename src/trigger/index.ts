@@ -19,6 +19,10 @@ export {
   type TriggerSystemV2,
   type TriggerSystemV2Config,
   type TriggerSystemV2Deps,
+  type TriggerRouterV2,
+  type RoutingStrategy,
+  type RoutingContext,
+  type RoutingDecision,
 } from "./trigger-system-v2.js";
 
 // Core types

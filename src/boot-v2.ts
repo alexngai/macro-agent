@@ -8,6 +8,7 @@
  * - AgentManagerV2 for agent lifecycle
  * - TeamRuntimeV2 for team topology
  * - TriggerSystemV2 for wake/cron/webhooks
+ * - ControlServer for MCP subprocess lifecycle RPC
  * - MCPServerV2 for per-agent tools
  *
  * Usage:
@@ -32,6 +33,7 @@ import {
 } from "./adapters/tasks-adapter.js";
 import { createAgentManagerV2 } from "./agent/agent-manager-v2.js";
 import { createTriggerSystemV2 } from "./trigger/trigger-system-v2.js";
+import { ControlServer } from "./control/control-server.js";
 import type { AgentManager } from "./agent/agent-manager.js";
 import type { InboxAdapter, TasksAdapter } from "./adapters/types.js";
 import type { TriggerSystemV2 } from "./trigger/trigger-system-v2.js";
@@ -102,8 +104,14 @@ export interface MacroAgentSystemV2 {
   /** Trigger system (wake, cron, webhooks) */
   triggerSystem: TriggerSystemV2;
 
+  /** Control server (lifecycle RPC for MCP subprocesses) */
+  controlServer: ControlServer;
+
   /** Role registry */
   roleRegistry: RoleRegistry;
+
+  /** Control socket path (for MCP subprocess connection) */
+  controlSocketPath: string;
 
   /** Shut down all components */
   shutdown(): Promise<void>;
@@ -158,6 +166,7 @@ export async function bootV2(
   const roleRegistry = config.roleRegistry ?? new DefaultRoleRegistry();
 
   // 5. Agent Manager V2
+  const controlSocketPath = path.join(baseDir, "control.sock");
   const agentManager = createAgentManagerV2(
     agentStore,
     inboxAdapter,
@@ -170,6 +179,7 @@ export async function bootV2(
       workspaceManager: config.workspaceManager,
       serverUrl: config.serverUrl,
       serverToken: config.serverToken,
+      controlSocketPath,
     }
   );
 
@@ -189,16 +199,25 @@ export async function bootV2(
   );
   await triggerSystem.start();
 
-  // 7. Return system handle
+  // 7. Control Server (lifecycle RPC for MCP subprocesses)
+  const controlServer = new ControlServer(agentManager, {
+    socketPath: controlSocketPath,
+  });
+  await controlServer.start();
+
+  // 8. Return system handle
   return {
     agentManager,
     agentStore,
     inboxAdapter,
     tasksAdapter,
     triggerSystem,
+    controlServer,
     roleRegistry,
+    controlSocketPath,
 
     async shutdown(): Promise<void> {
+      await controlServer.stop();
       await triggerSystem.stop();
       await agentManager.close();
       tasksAdapter.disconnect();

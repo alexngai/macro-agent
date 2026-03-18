@@ -627,4 +627,144 @@ describeFn("Agent Lifecycle E2E (V2)", () => {
       system = null!;
     });
   });
+
+  // ── Part 9: Emission Validation ─────────────────────────────
+
+  describe("EMISSION: Emission Validation", () => {
+    it("should block unauthorized signal emission in strict mode", async () => {
+      const manifest = await loadTeam(
+        "self-driving",
+        system.roleRegistry,
+        PROJECT_ROOT
+      );
+
+      const runtime = new TeamRuntimeV2(manifest, {
+        agentManager: system.agentManager,
+        inboxAdapter: system.inboxAdapter,
+        tasksAdapter: system.tasksAdapter,
+      });
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+
+      // Override enforcement to strict for this test
+      // The self-driving team uses "permissive" by default, so we
+      // create a custom emission validator with strict enforcement.
+      const grinderId = await (async () => {
+        // Spawn a grinder agent under the planner
+        const grinder = await system.agentManager.spawn({
+          task: "Grind some code",
+          role: "grinder",
+          parent: result.rootId,
+          team_instance: "self-driving",
+        });
+        return grinder.id;
+      })();
+
+      // Install team services (signal filter + emission validator)
+      runtime.installOnServices();
+
+      // Now override with a strict validator
+      // grinder is only allowed: [WORKER_DONE]
+      // Attempting to emit TASK_CREATED (planner-only) should fail
+      const strictValidator = (() => {
+        const original = runtime.createEmissionValidator();
+        // Wrap to force strict behavior
+        return (from: string, message: any) => {
+          const result = original(from, message);
+          // original returns null for permissive mode even on violations
+          // so we re-check directly
+          const agentRole = system.agentStore.getAgent(from)?.role;
+          if (!agentRole) return null;
+
+          const emissions: Record<string, string[]> = {
+            planner: ["TASK_CREATED", "WORK_ASSIGNED"],
+            grinder: ["WORKER_DONE"],
+            judge: ["HEALTH_CHECK", "GREEN_SNAPSHOT", "FIXUP_CREATED"],
+          };
+
+          const signal = message?.content?.event;
+          if (!signal) return null;
+
+          const allowed = emissions[agentRole];
+          if (!allowed) return null;
+
+          if (allowed.includes(signal)) return null;
+          return `Strict: ${agentRole} cannot emit ${signal}`;
+        };
+      })();
+
+      system.inboxAdapter.setEmissionValidator(strictValidator);
+
+      // Grinder tries to emit TASK_CREATED (not in its allowed emissions)
+      await expect(
+        system.inboxAdapter.send(
+          grinderId,
+          result.rootId, // planner
+          {
+            type: "event",
+            event: "TASK_CREATED",
+            data: { taskId: "t-unauthorized" },
+          }
+        )
+      ).rejects.toThrow(/Strict.*grinder.*cannot emit.*TASK_CREATED/);
+
+      await runtime.teardown();
+    });
+
+    it("should allow authorized signal emission", async () => {
+      const manifest = await loadTeam(
+        "self-driving",
+        system.roleRegistry,
+        PROJECT_ROOT
+      );
+
+      const runtime = new TeamRuntimeV2(manifest, {
+        agentManager: system.agentManager,
+        inboxAdapter: system.inboxAdapter,
+        tasksAdapter: system.tasksAdapter,
+      });
+
+      await runtime.initialize();
+      const result = await runtime.bootstrap();
+      runtime.installOnServices();
+
+      // Planner emitting TASK_CREATED should be allowed
+      // (planner allowed: [TASK_CREATED, WORK_ASSIGNED])
+      const deliveredEvents: any[] = [];
+      system.inboxAdapter.onDelivery((e) => deliveredEvents.push(e));
+
+      // Need a grinder to receive the message
+      const grinder = await system.agentManager.spawn({
+        task: "Receive tasks",
+        role: "grinder",
+        parent: result.rootId,
+        team_instance: "self-driving",
+      });
+
+      await system.inboxAdapter.send(
+        result.rootId, // planner
+        grinder.id,
+        {
+          type: "event",
+          event: "TASK_CREATED",
+          data: { taskId: "t-authorized" },
+        }
+      );
+
+      // Give event loop time for delivery
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Message should have been delivered (no throw)
+      const inbox = await system.inboxAdapter.checkInbox(grinder.id);
+      const taskMsg = inbox.find(
+        (m) =>
+          m.content?.type === "event" &&
+          m.content?.event === "TASK_CREATED"
+      );
+      expect(taskMsg).toBeDefined();
+
+      await runtime.teardown();
+    });
+  });
 });

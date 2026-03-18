@@ -114,6 +114,8 @@ export interface AgentManagerV2Config {
   agentTokenManager?: AgentTokenManager;
   serverUrl?: string;
   serverToken?: string;
+  /** Control socket path for MCP subprocess lifecycle RPC */
+  controlSocketPath?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -136,6 +138,7 @@ export function createAgentManagerV2(
     serverUrl,
     serverToken,
     agentTokenManager,
+    controlSocketPath,
   } = config;
 
   // In-memory state
@@ -158,10 +161,11 @@ export function createAgentManagerV2(
   }
 
   function agentRecordToAgent(record: AgentRecord): Agent {
+    const session = agentStore.getSession(record.id as AgentId);
     return {
       id: record.id,
       name: record.name,
-      session_id: "",
+      session_id: session?.session_id ?? "",
       parent: record.parent_id,
       lineage: record.lineage,
       state: record.state,
@@ -200,6 +204,12 @@ export function createAgentManagerV2(
       MACRO_STREAM_ID: opts.streamId ?? "",
       // Point to inbox socket for agent-inbox MCP tools
       INBOX_SOCKET_PATH: inboxAdapter.socketPath,
+      // Control socket for lifecycle RPC (spawn, terminate, etc.)
+      MACRO_CONTROL_SOCKET_PATH: controlSocketPath ?? "",
+      // Base directory for AgentStore + inbox in MCP subprocess
+      MACRO_BASE_DIR: controlSocketPath
+        ? controlSocketPath.replace(/\/control\.sock$/, "")
+        : "",
       // opentasks client auto-discovers its socket
     };
 
@@ -213,10 +223,14 @@ export function createAgentManagerV2(
       }
     }
 
+    // Use node with local dist path to ensure we run V2 MCP server,
+    // not a globally installed V1 version.
+    const mcpEntryPoint = new URL("../../dist/cli/mcp.js", import.meta.url).pathname;
+
     return {
       name: "macro-agent",
-      command: "npx",
-      args: ["multiagent-mcp"],
+      command: "node",
+      args: [mcpEntryPoint],
       env,
     };
   }
@@ -1135,15 +1149,41 @@ export function createAgentManagerV2(
         allUpdates.push(update);
         options?.onUpdate?.(update);
 
+        // Detect done() tool call from session updates.
+        // acp-factory uses { sessionUpdate: "tool_call", title: "mcp__macro-agent__done" }
+        const uAny = update as any;
+
+        // Check title field (primary detection)
         if (
-          (update as any).type === "result" &&
-          (update as any).subtype === "tool_result"
+          (uAny.sessionUpdate === "tool_call" || uAny.sessionUpdate === "tool_call_update") &&
+          typeof uAny.title === "string" &&
+          uAny.title.endsWith("__done")
         ) {
-          const toolName = (update as any).toolName;
-          if (toolName === "done") {
-            doneCalled = true;
-            doneStatus = (update as any).result?.status;
+          doneCalled = true;
+          // Extract status from rawInput (may arrive across multiple updates —
+          // first update has rawInput={}, subsequent has full input)
+          try {
+            const raw = uAny.rawInput;
+            const input =
+              typeof raw === "string" ? JSON.parse(raw) :
+              typeof raw === "object" ? raw :
+              uAny.input;
+            if (input?.status) {
+              doneStatus = input.status;
+            }
+          } catch {
+            // Best effort — rawInput may not be parseable yet
           }
+        }
+
+        // Fallback: check older format
+        if (
+          uAny.type === "result" &&
+          uAny.subtype === "tool_result" &&
+          uAny.toolName === "done"
+        ) {
+          doneCalled = true;
+          doneStatus = uAny.result?.status;
         }
       }
 

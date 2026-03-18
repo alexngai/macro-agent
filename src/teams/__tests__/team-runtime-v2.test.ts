@@ -73,8 +73,8 @@ function createMockInboxAdapter(): InboxAdapter & {
   _signalFilter: SignalFilterFn | null;
   _emissionValidator: EmissionValidatorFn | null;
 } {
-  let signalFilter: SignalFilterFn | null = null;
-  let emissionValidator: EmissionValidatorFn | null = null;
+  const signalFilters = new Map<string, SignalFilterFn>();
+  const emissionValidators = new Map<string, EmissionValidatorFn>();
 
   return {
     registerAgent: vi.fn().mockResolvedValue(undefined),
@@ -85,18 +85,33 @@ function createMockInboxAdapter(): InboxAdapter & {
     checkInbox: vi.fn().mockResolvedValue([]),
     readThread: vi.fn().mockResolvedValue([]),
     setSignalFilter: vi.fn((f: SignalFilterFn) => {
-      signalFilter = f;
+      signalFilters.set("default", f);
     }),
     setEmissionValidator: vi.fn((v: EmissionValidatorFn) => {
-      emissionValidator = v;
+      emissionValidators.set("default", v);
+    }),
+    addSignalFilter: vi.fn((id: string, f: SignalFilterFn) => {
+      signalFilters.set(id, f);
+    }),
+    removeSignalFilter: vi.fn((id: string) => {
+      signalFilters.delete(id);
+    }),
+    addEmissionValidator: vi.fn((id: string, v: EmissionValidatorFn) => {
+      emissionValidators.set(id, v);
+    }),
+    removeEmissionValidator: vi.fn((id: string) => {
+      emissionValidators.delete(id);
     }),
     socketPath: "/tmp/test-inbox.sock",
     stop: vi.fn().mockResolvedValue(undefined),
     get _signalFilter() {
-      return signalFilter;
+      // Return the most recently added filter (for backward compat with existing tests)
+      const values = [...signalFilters.values()];
+      return values.length > 0 ? values[values.length - 1] : null;
     },
     get _emissionValidator() {
-      return emissionValidator;
+      const values = [...emissionValidators.values()];
+      return values.length > 0 ? values[values.length - 1] : null;
     },
   } as unknown as InboxAdapter & {
     _signalFilter: SignalFilterFn | null;
@@ -209,7 +224,8 @@ describe("TeamRuntimeV2", () => {
       await runtime.bootstrap();
       runtime.installOnServices();
 
-      expect(inboxAdapter.setSignalFilter).toHaveBeenCalledWith(
+      expect(inboxAdapter.addSignalFilter).toHaveBeenCalledWith(
+        "self-driving",
         expect.any(Function)
       );
     });
@@ -261,7 +277,8 @@ describe("TeamRuntimeV2", () => {
       await runtime.bootstrap();
       runtime.installOnServices();
 
-      expect(inboxAdapter.setEmissionValidator).toHaveBeenCalledWith(
+      expect(inboxAdapter.addEmissionValidator).toHaveBeenCalledWith(
+        "self-driving",
         expect.any(Function)
       );
     });

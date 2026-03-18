@@ -3,7 +3,6 @@
  *
  * Auto-detects workspace cleanup readiness by checking:
  * - Uncommitted changes via git status
- * - Pending messages via MessageRouter
  *
  * @module lifecycle/cleanup
  * @see s-32xs Self-Cleaning Workers spec
@@ -19,11 +18,9 @@ import type { CleanupStatus, LifecycleContext } from "./types.js";
 // =============================================================================
 
 /**
- * Dependencies for cleanup detection
+ * Dependencies for cleanup detection (currently empty — extend for V2 adapters if needed)
  */
-export interface CleanupDependencies {
-  // V1 MessageRouter removed — extend as needed for V2 adapters
-}
+export interface CleanupDependencies {}
 
 // =============================================================================
 // Git Status Helpers
@@ -83,41 +80,25 @@ export function getCurrentBranch(workspacePath: string): string | undefined {
 }
 
 // =============================================================================
-// Message Status Helpers
-// =============================================================================
-
-/**
- * Get count of pending (unacknowledged) messages for an agent.
- * V1 MessageRouter removed — always returns 0 until V2 inbox adapter is wired.
- */
-export function getPendingMessageCount(
-  _agentId: string,
-): number {
-  return 0;
-}
-
-// =============================================================================
 // Main Detection Function
 // =============================================================================
 
 /**
  * Detect cleanup status for an agent
  *
- * Checks:
- * 1. Uncommitted changes in workspace
- * 2. Pending (unacknowledged) messages
+ * Checks uncommitted changes in workspace.
+ * Pending message checks are handled by agent-inbox directly.
  *
  * @param context - Lifecycle context with agent info
- * @param deps - Dependencies for detection
+ * @param _deps - Dependencies (currently unused, reserved for future)
  * @returns Cleanup status indicating readiness
  */
 export function detectCleanupStatus(
   context: LifecycleContext,
-  deps: CleanupDependencies = {}
+  _deps: CleanupDependencies = {}
 ): CleanupStatus {
   const reasons: string[] = [];
   let uncommittedFiles: string[] = [];
-  let pendingMessages = 0;
 
   // Check uncommitted changes if workspace path is available
   if (context.workspacePath) {
@@ -129,20 +110,12 @@ export function detectCleanupStatus(
     }
   }
 
-  // Check pending messages
-  pendingMessages = getPendingMessageCount(context.agentId);
-  if (pendingMessages > 0) {
-    reasons.push(`${pendingMessages} pending message(s)`);
-  }
-
-  // Determine readiness
   const ready = reasons.length === 0;
 
   return {
     ready,
     reason: ready ? undefined : reasons.join("; "),
     uncommittedFiles: uncommittedFiles.length > 0 ? uncommittedFiles : undefined,
-    pendingMessages: pendingMessages > 0 ? pendingMessages : undefined,
   };
 }
 

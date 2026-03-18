@@ -249,6 +249,9 @@ program
 // Status Command
 // ─────────────────────────────────────────────────────────────────
 
+// TODO: Read-only commands (status, agents, hierarchy) boot the full system via
+// bootV2(). This is heavier than necessary — a lightweight read-only boot mode
+// that only opens AgentStore (SQLite) without starting adapters would be ideal.
 program
   .command("status")
   .description("Show system status")
@@ -425,11 +428,20 @@ program
       const path = await import("path");
       const os = await import("os");
 
-      const baseDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".multiagent");
-      const storagePath = path.join(baseDir, "store.json");
+      const baseDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".macro-agent");
+      const dbFiles = ["agents.db", "inbox.db"];
+      let cleared = false;
 
-      if (fs.existsSync(storagePath)) {
-        fs.unlinkSync(storagePath);
+      for (const dbFile of dbFiles) {
+        const dbPath = path.join(baseDir, dbFile);
+        if (fs.existsSync(dbPath)) {
+          fs.unlinkSync(dbPath);
+          console.log(chalk.green(`Removed ${dbFile}`));
+          cleared = true;
+        }
+      }
+
+      if (cleared) {
         console.log(chalk.green("Data cleared successfully"));
       } else {
         console.log(chalk.gray("No data to clear"));

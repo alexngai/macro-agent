@@ -161,13 +161,7 @@ export function createDoneHandlerV2(
       roleRegistry
     );
 
-    // detectCleanupStatus needs a minimal interface — pass empty stub
-    // since we don't use MessageRouter for pending message checks anymore
-    const cleanupStatus = detectCleanupStatus(lifecycleContext, {
-      messageRouter: {
-        getMessages: () => [],
-      } as any,
-    });
+    const cleanupStatus = detectCleanupStatus(lifecycleContext);
 
     // Step 3: Dispatch to V2 handler
     const handlerDeps: HandlerDepsV2 = {

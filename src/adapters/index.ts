@@ -29,3 +29,9 @@ export {
   DefaultTasksAdapter,
   type TasksAdapterConfig,
 } from "./tasks-adapter.js";
+
+export {
+  ensureOpentasksDaemon,
+  type DaemonHandle,
+  type EnsureDaemonOptions,
+} from "./opentasks-daemon.js";

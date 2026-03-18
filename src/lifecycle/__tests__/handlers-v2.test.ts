@@ -121,7 +121,7 @@ describe("Lifecycle Handlers V2", () => {
       );
     });
 
-    it("should transition task in opentasks on completion", async () => {
+    it("should NOT transition task (handled by AgentManagerV2.terminate)", async () => {
       await dispatchDoneV2(
         makeContext(),
         { status: "completed" },
@@ -129,13 +129,10 @@ describe("Lifecycle Handlers V2", () => {
         deps
       );
 
-      expect(tasksAdapter.transitionTask).toHaveBeenCalledWith(
-        "task-1",
-        "complete"
-      );
+      expect(tasksAdapter.transitionTask).not.toHaveBeenCalled();
     });
 
-    it("should transition task to fail on failure", async () => {
+    it("should NOT transition task on failure (handled by AgentManagerV2.terminate)", async () => {
       await dispatchDoneV2(
         makeContext(),
         { status: "failed" },
@@ -143,10 +140,7 @@ describe("Lifecycle Handlers V2", () => {
         deps
       );
 
-      expect(tasksAdapter.transitionTask).toHaveBeenCalledWith(
-        "task-1",
-        "fail"
-      );
+      expect(tasksAdapter.transitionTask).not.toHaveBeenCalled();
     });
 
     it("should NOT terminate on blocked status", async () => {
