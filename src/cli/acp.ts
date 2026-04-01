@@ -34,9 +34,25 @@ async function main() {
   try {
     const system = await bootV2({
       cwd: defaultCwd,
+      // Enable ACP WebSocket server if port is specified (server mode)
+      ...(options.port
+        ? {
+            acp: {
+              enabled: true,
+              port: options.port,
+              host: options.host ?? "localhost",
+            },
+          }
+        : {}),
     });
 
+    const acpUrl = system.acpServer
+      ? `ws://${options.host ?? "localhost"}:${options.port}/acp`
+      : null;
     console.error("[acp] V2 system booted successfully.");
+    if (acpUrl) {
+      console.error(`[acp] MAP WebSocket: ${acpUrl}`);
+    }
 
     // Cleanup function
     const cleanup = async () => {

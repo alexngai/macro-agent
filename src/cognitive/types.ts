@@ -117,6 +117,10 @@ export interface MacroAgentBackendConfig {
   onSessionComplete?: (event: SessionCompleteEvent) => void;
   /** Optional inbox adapter for sending session.complete notifications. */
   inboxAdapter?: InboxAdapter;
+  /** When true, spawned analysts are children of coordinatorAgentId. */
+  useTeam?: boolean;
+  /** Parent agent ID when useTeam is true. */
+  coordinatorAgentId?: AgentId;
 }
 
 /**

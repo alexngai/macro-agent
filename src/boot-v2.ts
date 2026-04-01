@@ -97,6 +97,25 @@ export interface BootV2Config {
     peers?: Array<{ systemId: string; url?: string; meshPeerId?: string }>;
     trust?: { allowedSystems?: string[] };
   };
+
+  /** MAP sidecar config (connect to OpenHive hub) */
+  map?: {
+    enabled?: boolean;
+    server?: string;
+    token?: string;
+    scope?: string;
+    systemId?: string;
+    credential?: string;
+    agentName?: string;
+    trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
+    reconnectIntervalMs?: number;
+    reconnection?: {
+      enabled?: boolean;
+      maxRetries?: number;
+      baseDelayMs?: number;
+      maxDelayMs?: number;
+    };
+  };
 }
 
 // =============================================================================
@@ -133,6 +152,9 @@ export interface MacroAgentSystemV2 {
 
   /** ACP WebSocket server (if enabled) */
   acpServer?: WebSocketACPServer;
+
+  /** MAP sidecar (if enabled) */
+  mapSidecar?: import("./map/types.js").MAPSidecar;
 
   /** Shut down all components */
   shutdown(): Promise<void>;
@@ -334,7 +356,35 @@ export async function bootV2(
     await acpServer.start();
   }
 
-  // 11. Return system handle
+  // 11. MAP Sidecar (optional — connect to OpenHive hub)
+  let mapSidecar: import("./map/types.js").MAPSidecar | null = null;
+  if (config.map?.enabled && config.map.server) {
+    try {
+      const { createMAPSidecar } = await import("./map/sidecar.js");
+      mapSidecar = createMAPSidecar(
+        { agentManager, agentStore, inboxAdapter, tasksAdapter },
+        {
+          server: config.map.server,
+          token: config.map.token,
+          scope: config.map.scope,
+          systemId: config.map.systemId,
+          credential: config.map.credential,
+          agentName: config.map.agentName,
+          trajectorySyncLevel: config.map.trajectorySyncLevel,
+          reconnectIntervalMs: config.map.reconnectIntervalMs,
+          reconnection: config.map.reconnection,
+        },
+      );
+      await mapSidecar.start();
+    } catch (err) {
+      // Non-fatal — MAP hub connectivity is optional
+      console.warn(
+        `[boot-v2] MAP sidecar failed to start: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // 12. Return system handle
   return {
     agentManager,
     agentStore,
@@ -346,9 +396,11 @@ export async function bootV2(
     controlSocketPath,
     ...(apiServer ? { apiServer } : {}),
     ...(acpServer ? { acpServer } : {}),
+    ...(mapSidecar ? { mapSidecar } : {}),
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (mapSidecar) await mapSidecar.stop();
       if (federationCleanup) federationCleanup();
       if (acpServer) await acpServer.stop();
       if (apiServer) await apiServer.stop();

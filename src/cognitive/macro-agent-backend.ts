@@ -40,6 +40,7 @@ export class MacroAgentBackend {
   readonly supportedTypes = ["claude-code"];
 
   private readonly agentManager: AgentManager;
+  private readonly config: MacroAgentBackendConfig | undefined;
   private readonly maxFollowUps: number;
   private readonly softTimeoutRatio: number;
   private readonly tasksAdapter: import("../adapters/types.js").TasksAdapter | undefined;
@@ -49,6 +50,7 @@ export class MacroAgentBackend {
 
   constructor(agentManager: AgentManager, config?: MacroAgentBackendConfig) {
     this.agentManager = agentManager;
+    this.config = config;
     this.maxFollowUps = config?.maxFollowUps ?? DEFAULT_MAX_FOLLOW_UPS;
     this.softTimeoutRatio = config?.softTimeoutRatio ?? DEFAULT_SOFT_TIMEOUT_RATIO;
     this.tasksAdapter = config?.tasksAdapter;
@@ -191,7 +193,9 @@ export class MacroAgentBackend {
       task: config.task.description,
       task_id: taskId,
       role: "analyst",
-      parent: null,
+      parent: this.config?.useTeam && this.config.coordinatorAgentId
+        ? this.config.coordinatorAgentId
+        : null,
       cwd: config.cwd,
       config: config.env ? { env: config.env } : undefined,
       customPrompt: config.systemPromptAdditions,
