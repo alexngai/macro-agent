@@ -88,6 +88,12 @@ export {
   type CronEvent,
 } from "./sources/cron/index.js";
 
+// Strategies
+export {
+  createAIRouterStrategy,
+  type AIRouterConfig,
+} from "./strategies/ai-router.js";
+
 // Webhook
 export {
   createWebhookHandler,

@@ -22,7 +22,8 @@ import type {
   CleanupStatus,
   DoneHandlerResult,
 } from "./types.js";
-import { commitChanges } from "./cleanup.js";
+import { commitChanges, attemptMerge, abortMerge } from "./cleanup.js";
+import type { MergeQueueInterface } from "../workspace/merge-queue/types.js";
 import {
   getAllDescendants,
   needsCascadeTermination,
@@ -38,6 +39,7 @@ export interface HandlerDepsV2 {
   tasksAdapter: TasksAdapter;
   agentManager: AgentManager;
   taskMode?: "push" | "pull";
+  mergeQueue?: MergeQueueInterface;
 }
 
 // =============================================================================
@@ -228,21 +230,104 @@ async function handleIntegratorDone(
   deps: HandlerDepsV2
 ): Promise<DoneHandlerResult> {
   const signalsEmitted: string[] = [];
+  const cleanupActions: string[] = [];
   const warnings: string[] = [];
+  const pendingResolvers: string[] = [];
 
+  // Only process queue on "completed" status (not failed/blocked)
+  if (args.status === "completed" && context.workspacePath && context.streamId) {
+    const mergeQueue = deps.mergeQueue;
+
+    if (mergeQueue) {
+      let mr = mergeQueue.getNext(context.streamId);
+      while (mr) {
+        mergeQueue.markProcessing(mr.id);
+
+        const mergeResult = attemptMerge(
+          mr.workerBranch,
+          context.workspacePath,
+          `Merge worker branch '${mr.workerBranch}'`
+        );
+
+        if (mergeResult.success) {
+          mergeQueue.markMerged(mr.id, mergeResult.mergeCommit ?? "");
+          cleanupActions.push(
+            `Merged ${mr.workerBranch} (${mergeResult.mergeCommit?.slice(0, 8) ?? "already-merged"})`
+          );
+
+          // Notify via inbox
+          await emitSignal(deps, context, "MERGE_COMPLETE", {
+            summary: `Merged ${mr.workerBranch}`,
+            details: {
+              mrId: mr.id,
+              branch: mr.workerBranch,
+              commit: mergeResult.mergeCommit,
+            },
+          });
+          signalsEmitted.push("MERGE_COMPLETE");
+        } else if (mergeResult.conflicts && mergeResult.conflicts.length > 0) {
+          // Conflict detected — abort and spawn resolver
+          abortMerge(context.workspacePath);
+
+          const conflictFiles = mergeResult.conflicts;
+          const taskDesc = [
+            `Resolve merge conflicts for branch '${mr.workerBranch}'.`,
+            `Conflicting files: ${conflictFiles.join(", ")}`,
+            `Work in your worktree to fix the conflicts, then call done(status="completed").`,
+            `Do NOT submit to the merge queue — the integrator will handle that.`,
+          ].join("\n");
+
+          try {
+            const spawned = await deps.agentManager.spawn({
+              task: taskDesc,
+              parent: context.agentId,
+              role: "worker.resolver",
+            });
+
+            mergeQueue.markConflict(mr.id, conflictFiles, spawned.id);
+            pendingResolvers.push(spawned.id);
+            cleanupActions.push(
+              `Spawned resolver ${spawned.id} for ${mr.workerBranch} (${conflictFiles.length} conflicts)`
+            );
+          } catch (err) {
+            warnings.push(
+              `Failed to spawn resolver for ${mr.workerBranch}: ${err}`
+            );
+          }
+        } else {
+          // Non-conflict failure
+          warnings.push(
+            `Merge failed for ${mr.workerBranch}: ${mergeResult.error}`
+          );
+        }
+
+        mr = mergeQueue.getNext(context.streamId);
+      }
+    }
+  }
+
+  // Emit INTEGRATOR_DONE signal
   try {
     await emitSignal(deps, context, "INTEGRATOR_DONE", {
       summary: args.summary ?? `Integrator done: ${args.status}`,
-      details: { status: args.status, ...args.details },
+      details: {
+        status: args.status,
+        resolversSpawned: pendingResolvers.length,
+        ...args.details,
+      },
     });
     signalsEmitted.push("INTEGRATOR_DONE");
   } catch {
     warnings.push("Failed to emit INTEGRATOR_DONE");
   }
 
+  // Stay alive if resolvers are pending
+  const shouldTerminate = pendingResolvers.length === 0;
+
   return {
-    shouldTerminate: true,
+    shouldTerminate,
     signalsEmitted,
+    cleanupActions: cleanupActions.length > 0 ? cleanupActions : undefined,
     warnings: warnings.length > 0 ? warnings : undefined,
   };
 }

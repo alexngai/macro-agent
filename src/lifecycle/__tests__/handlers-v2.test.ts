@@ -7,6 +7,21 @@ import { dispatchDoneV2, type HandlerDepsV2 } from "../handlers-v2.js";
 import type { LifecycleContext, CleanupStatus } from "../types.js";
 import type { InboxAdapter, TasksAdapter } from "../../adapters/types.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
+import type { MergeQueueInterface, MergeRequest } from "../../workspace/merge-queue/types.js";
+import * as cleanup from "../cleanup.js";
+
+// =============================================================================
+// Module Mocks
+// =============================================================================
+
+vi.mock("../cleanup.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof cleanup>();
+  return {
+    ...actual,
+    attemptMerge: vi.fn(),
+    abortMerge: vi.fn().mockReturnValue(true),
+  };
+});
 
 // =============================================================================
 // Mocks
@@ -55,6 +70,47 @@ function createMockAgentManager(): AgentManager {
     get: vi.fn(),
     list: vi.fn().mockReturnValue([]),
   } as unknown as AgentManager;
+}
+
+function createMockMergeQueue(): MergeQueueInterface {
+  return {
+    submit: vi.fn().mockReturnValue("mr-1"),
+    getNext: vi.fn().mockReturnValue(null),
+    markProcessing: vi.fn(),
+    markMerged: vi.fn(),
+    markConflict: vi.fn(),
+    markAbandoned: vi.fn(),
+    markResolverComplete: vi.fn(),
+    get: vi.fn().mockReturnValue(null),
+    getPending: vi.fn().mockReturnValue([]),
+    getByTask: vi.fn().mockReturnValue(null),
+    getQueueDepth: vi.fn().mockReturnValue(0),
+    reposition: vi.fn(),
+    bumpPriority: vi.fn(),
+    onEvent: vi.fn().mockReturnValue(() => {}),
+    close: vi.fn(),
+  };
+}
+
+function makeMergeRequest(overrides: Partial<MergeRequest> = {}): MergeRequest {
+  return {
+    id: "mr-1",
+    streamId: "stream-1",
+    taskId: "task-1",
+    workerBranch: "worker/feature-1",
+    workerAgentId: "worker-1",
+    status: "pending",
+    priority: 100,
+    position: null,
+    submittedAt: Date.now(),
+    startedAt: null,
+    completedAt: null,
+    mergeCommit: null,
+    conflictFiles: null,
+    resolverTaskId: null,
+    metadata: {},
+    ...overrides,
+  };
 }
 
 function makeContext(overrides: Partial<LifecycleContext> = {}): LifecycleContext {
@@ -321,6 +377,189 @@ describe("Lifecycle Handlers V2", () => {
       );
 
       expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+    });
+  });
+
+  // ── Integrator Done with Merge Queue ─────────────────────────
+
+  describe("integrator done with merge queue", () => {
+    let mergeQueue: MergeQueueInterface;
+
+    beforeEach(() => {
+      mergeQueue = createMockMergeQueue();
+      vi.mocked(cleanup.attemptMerge).mockReset();
+      vi.mocked(cleanup.abortMerge).mockReset().mockReturnValue(true);
+    });
+
+    it("should process successful merge and terminate", async () => {
+      const mr = makeMergeRequest();
+      vi.mocked(mergeQueue.getNext)
+        .mockReturnValueOnce(mr)
+        .mockReturnValueOnce(null);
+      vi.mocked(cleanup.attemptMerge).mockReturnValue({
+        success: true,
+        mergeCommit: "abc12345def",
+      });
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(mergeQueue.markProcessing).toHaveBeenCalledWith("mr-1");
+      expect(mergeQueue.markMerged).toHaveBeenCalledWith("mr-1", "abc12345def");
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.signalsEmitted).toContain("MERGE_COMPLETE");
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+      expect(result.cleanupActions).toEqual(
+        expect.arrayContaining([expect.stringContaining("Merged worker/feature-1")])
+      );
+    });
+
+    it("should spawn resolver on conflict and stay alive", async () => {
+      const mr = makeMergeRequest();
+      vi.mocked(mergeQueue.getNext)
+        .mockReturnValueOnce(mr)
+        .mockReturnValueOnce(null);
+      vi.mocked(cleanup.attemptMerge).mockReturnValue({
+        success: false,
+        conflicts: ["src/file1.ts", "src/file2.ts"],
+      });
+      vi.mocked(agentManager.spawn).mockResolvedValue({
+        id: "resolver-1",
+        session_id: "sess-1",
+        agent: {} as any,
+        session: {} as any,
+      });
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(cleanup.abortMerge).toHaveBeenCalledWith("/tmp/workspace");
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parent: "worker-1",
+          role: "worker.resolver",
+          task: expect.stringContaining("worker/feature-1"),
+        })
+      );
+      expect(mergeQueue.markConflict).toHaveBeenCalledWith(
+        "mr-1",
+        ["src/file1.ts", "src/file2.ts"],
+        "resolver-1"
+      );
+      expect(result.shouldTerminate).toBe(false);
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+    });
+
+    it("should process multiple MRs (first succeeds, second conflicts)", async () => {
+      const mr1 = makeMergeRequest({ id: "mr-1", workerBranch: "worker/feat-a" });
+      const mr2 = makeMergeRequest({ id: "mr-2", workerBranch: "worker/feat-b" });
+      vi.mocked(mergeQueue.getNext)
+        .mockReturnValueOnce(mr1)
+        .mockReturnValueOnce(mr2)
+        .mockReturnValueOnce(null);
+      vi.mocked(cleanup.attemptMerge)
+        .mockReturnValueOnce({ success: true, mergeCommit: "commit1" })
+        .mockReturnValueOnce({ success: false, conflicts: ["README.md"] });
+      vi.mocked(agentManager.spawn).mockResolvedValue({
+        id: "resolver-2",
+        session_id: "sess-2",
+        agent: {} as any,
+        session: {} as any,
+      });
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(mergeQueue.markMerged).toHaveBeenCalledWith("mr-1", "commit1");
+      expect(mergeQueue.markConflict).toHaveBeenCalledWith(
+        "mr-2",
+        ["README.md"],
+        "resolver-2"
+      );
+      expect(result.shouldTerminate).toBe(false);
+      expect(result.signalsEmitted).toContain("MERGE_COMPLETE");
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+    });
+
+    it("should terminate when queue is empty", async () => {
+      vi.mocked(mergeQueue.getNext).mockReturnValue(null);
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+      expect(cleanup.attemptMerge).not.toHaveBeenCalled();
+    });
+
+    it("should terminate when no merge queue is provided", async () => {
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        deps // no mergeQueue
+      );
+
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+    });
+
+    it("should skip queue processing on non-completed status", async () => {
+      vi.mocked(mergeQueue.getNext).mockReturnValue(
+        makeMergeRequest()
+      );
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "failed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(mergeQueue.getNext).not.toHaveBeenCalled();
+      expect(result.shouldTerminate).toBe(true);
+      expect(result.signalsEmitted).toContain("INTEGRATOR_DONE");
+    });
+
+    it("should warn on non-conflict merge failure", async () => {
+      const mr = makeMergeRequest();
+      vi.mocked(mergeQueue.getNext)
+        .mockReturnValueOnce(mr)
+        .mockReturnValueOnce(null);
+      vi.mocked(cleanup.attemptMerge).mockReturnValue({
+        success: false,
+        error: "branch not found",
+      });
+
+      const result = await dispatchDoneV2(
+        makeContext({ role: "integrator", streamId: "stream-1" }),
+        { status: "completed" },
+        cleanStatus,
+        { ...deps, mergeQueue }
+      );
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Merge failed for worker/feature-1"),
+        ])
+      );
+      expect(result.shouldTerminate).toBe(true);
     });
   });
 });

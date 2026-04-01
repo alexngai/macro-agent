@@ -204,9 +204,35 @@ export function createTriggerSystemV2(
     config.webhook
   );
 
+  // ── Dedup: time-window deduplication for rapid events ────────
+  const recentSourceKeys = new Map<string, number>(); // sourceKey → timestamp
+  const DEDUP_WINDOW_MS = 2000; // Suppress duplicates within 2 seconds
+
+  function isDuplicate(sourceKey: string | undefined): boolean {
+    if (!sourceKey) return false;
+    const now = Date.now();
+    const lastSeen = recentSourceKeys.get(sourceKey);
+    if (lastSeen && now - lastSeen < DEDUP_WINDOW_MS) {
+      return true; // Duplicate within window
+    }
+    recentSourceKeys.set(sourceKey, now);
+    // Prune old entries periodically (every 100 inserts)
+    if (recentSourceKeys.size > 500) {
+      for (const [key, ts] of recentSourceKeys) {
+        if (now - ts > DEDUP_WINDOW_MS * 2) recentSourceKeys.delete(key);
+      }
+    }
+    return false;
+  }
+
   // The key V2 integration: connect inbox delivery events to wake decisions
   const deliveryHandler = (event: InboxDeliveryEvent) => {
     const { agentId, message } = event;
+
+    // Dedup: skip if we recently processed this exact message
+    const sourceKey = `inbox:${message.id}`;
+    if (isDuplicate(sourceKey)) return;
+
     const hasSession = deps.agentManager.hasActiveSession(agentId);
     const action = mapImportanceToWakeAction(message.importance, hasSession);
 
@@ -221,7 +247,7 @@ export function createTriggerSystemV2(
         queue.enqueue(content, {
           agentId,
           priority: message.importance === "urgent" ? "high" : "normal",
-          sourceKey: `inbox:${message.id}`,
+          sourceKey,
         });
         // Request immediate wake
         wakeManager.requestWakeNow({ reason: "inbox-delivery", agentId });
@@ -231,7 +257,7 @@ export function createTriggerSystemV2(
         queue.enqueue(content, {
           agentId,
           priority: "normal",
-          sourceKey: `inbox:${message.id}`,
+          sourceKey,
         });
         break;
     }

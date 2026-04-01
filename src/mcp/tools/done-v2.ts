@@ -50,6 +50,7 @@ export interface DoneToolDepsV2 {
   tasksAdapter: TasksAdapter;
   roleRegistry?: RoleRegistry;
   taskMode?: "push" | "pull";
+  mergeQueue?: import("../../workspace/merge-queue/types.js").MergeQueueInterface;
 }
 
 // =============================================================================
@@ -169,6 +170,7 @@ export function createDoneHandlerV2(
       tasksAdapter,
       agentManager,
       taskMode: deps.taskMode,
+      mergeQueue: deps.mergeQueue,
     };
 
     const handlerResult = await dispatchDoneV2(

@@ -282,6 +282,71 @@ describe("AgentStore", () => {
     });
   });
 
+  // ── Change Subscriptions ────────────────────────────────────
+
+  describe("onChange", () => {
+    it("should fire on putAgent", () => {
+      const events: { type: string; agentId: string }[] = [];
+      store.onChange((e) => events.push(e));
+
+      store.putAgent(makeAgent({ id: "agent-1" }));
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({ type: "put", agentId: "agent-1" });
+    });
+
+    it("should fire on updateAgent", () => {
+      store.putAgent(makeAgent({ id: "agent-1" }));
+
+      const events: { type: string; agentId: string }[] = [];
+      store.onChange((e) => events.push(e));
+
+      store.updateAgent("agent-1", { state: "stopped" });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({ type: "update", agentId: "agent-1" });
+    });
+
+    it("should fire on removeAgent", () => {
+      store.putAgent(makeAgent({ id: "agent-1" }));
+
+      const events: { type: string; agentId: string }[] = [];
+      store.onChange((e) => events.push(e));
+
+      store.removeAgent("agent-1");
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({ type: "remove", agentId: "agent-1" });
+    });
+
+    it("should support unsubscribe", () => {
+      const events: { type: string; agentId: string }[] = [];
+      const unsub = store.onChange((e) => events.push(e));
+
+      store.putAgent(makeAgent({ id: "agent-1" }));
+      expect(events).toHaveLength(1);
+
+      unsub();
+
+      store.putAgent(makeAgent({ id: "agent-2" }));
+      expect(events).toHaveLength(1); // No new events after unsub
+    });
+
+    it("should not break other listeners when one throws", () => {
+      const events: { type: string; agentId: string }[] = [];
+
+      store.onChange(() => {
+        throw new Error("listener error");
+      });
+      store.onChange((e) => events.push(e));
+
+      store.putAgent(makeAgent({ id: "agent-1" }));
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({ type: "put", agentId: "agent-1" });
+    });
+  });
+
   // ── Sessions ───────────────────────────────────────────────
 
   describe("sessions", () => {

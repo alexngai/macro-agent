@@ -41,6 +41,8 @@ import type { RoleRegistry } from "./roles/types.js";
 import { DefaultRoleRegistry } from "./roles/registry.js";
 import type { WorkspaceManager } from "./workspace/types.js";
 import type { PermissionMode } from "acp-factory";
+import type { ApiServer } from "./api/types.js";
+import type { WebSocketACPServer } from "./acp/websocket-server.js";
 
 // =============================================================================
 // Configuration
@@ -82,6 +84,12 @@ export interface BootV2Config {
 
   /** Server token for thin-client auth */
   serverToken?: string;
+
+  /** REST API server config */
+  api?: { enabled?: boolean; port?: number; host?: string };
+
+  /** ACP WebSocket server config */
+  acp?: { enabled?: boolean; port?: number; host?: string; path?: string };
 }
 
 // =============================================================================
@@ -112,6 +120,12 @@ export interface MacroAgentSystemV2 {
 
   /** Control socket path (for MCP subprocess connection) */
   controlSocketPath: string;
+
+  /** REST API server (if enabled) */
+  apiServer?: ApiServer;
+
+  /** ACP WebSocket server (if enabled) */
+  acpServer?: WebSocketACPServer;
 
   /** Shut down all components */
   shutdown(): Promise<void>;
@@ -205,7 +219,98 @@ export async function bootV2(
   });
   await controlServer.start();
 
-  // 8. Return system handle
+  // 8. Health check escalation loop
+  //    Periodically check for unhealthy agents (stale MCP heartbeats)
+  //    and notify their parents via inbox.
+  const HEALTH_CHECK_INTERVAL_MS = 30_000;
+  const UNHEALTHY_THRESHOLD_MS = 60_000;
+
+  const healthCheckTimer = setInterval(async () => {
+    try {
+      const unhealthy = controlServer.getUnhealthyAgents(UNHEALTHY_THRESHOLD_MS);
+      for (const { agentId, lastSeen } of unhealthy) {
+        const agent = agentStore.getAgent(agentId);
+        if (!agent || agent.state !== "running") continue;
+
+        // Notify parent (if any) that this agent's MCP subprocess may be stale
+        if (agent.parent_id) {
+          try {
+            await inboxAdapter.send(
+              "system",
+              agent.parent_id,
+              {
+                type: "event",
+                event: "STALE_AGENT",
+                data: {
+                  agentId,
+                  role: agent.role,
+                  lastSeen,
+                  staleSinceMs: Date.now() - lastSeen,
+                },
+              },
+              { importance: "high", threadTag: `health:${agentId}` }
+            );
+          } catch {
+            // Best effort notification
+          }
+        }
+      }
+    } catch {
+      // Best effort health check
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+  healthCheckTimer.unref(); // Don't prevent process exit
+
+  // 9. REST API server (optional)
+  let apiServer: ApiServer | null = null;
+  if (config.api?.enabled) {
+    const { createApiServer } = await import("./api/server.js");
+    // Build a partial system reference for the API server.
+    // The full system object is returned below; we create the API server
+    // first so it can be included in the return value and shut down cleanly.
+    const systemRef = {
+      agentManager,
+      agentStore,
+      inboxAdapter,
+      tasksAdapter,
+      triggerSystem,
+      controlServer,
+      roleRegistry,
+      controlSocketPath,
+    } as any;
+    apiServer = createApiServer(systemRef, {
+      port: config.api.port,
+      host: config.api.host,
+    });
+    await apiServer.start();
+  }
+
+  // 10. ACP WebSocket server (optional)
+  let acpServer: WebSocketACPServer | null = null;
+  if (config.acp?.enabled) {
+    const { createWebSocketACPServer } = await import("./acp/websocket-server.js");
+    acpServer = createWebSocketACPServer(
+      // Pass a partial system ref (the full object is built below)
+      {
+        agentManager,
+        agentStore,
+        inboxAdapter,
+        tasksAdapter,
+        triggerSystem,
+        controlServer,
+        roleRegistry,
+        controlSocketPath,
+      } as any,
+      {
+        port: config.acp.port,
+        host: config.acp.host,
+        path: config.acp.path,
+      },
+    );
+    await acpServer.start();
+  }
+
+  // 11. Return system handle
   return {
     agentManager,
     agentStore,
@@ -215,8 +320,13 @@ export async function bootV2(
     controlServer,
     roleRegistry,
     controlSocketPath,
+    ...(apiServer ? { apiServer } : {}),
+    ...(acpServer ? { acpServer } : {}),
 
     async shutdown(): Promise<void> {
+      clearInterval(healthCheckTimer);
+      if (acpServer) await acpServer.stop();
+      if (apiServer) await apiServer.stop();
       await controlServer.stop();
       await triggerSystem.stop();
       await agentManager.close();

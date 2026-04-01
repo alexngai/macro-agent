@@ -122,14 +122,33 @@ CREATE TABLE IF NOT EXISTS sessions (
 // Implementation
 // ─────────────────────────────────────────────────────────────────
 
+export type ChangeCallback = (event: { type: "put" | "update" | "remove"; agentId: string }) => void;
+
 export class AgentStore {
   private db: Database.Database;
+  private changeListeners = new Set<ChangeCallback>();
 
   constructor(dbPath: string = ":memory:") {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
+  }
+
+  // ── Change Subscriptions ───────────────────────────────────────
+
+  /**
+   * Subscribe to agent store changes. Returns an unsubscribe function.
+   */
+  onChange(callback: ChangeCallback): () => void {
+    this.changeListeners.add(callback);
+    return () => { this.changeListeners.delete(callback); };
+  }
+
+  private notifyChange(type: "put" | "update" | "remove", agentId: string): void {
+    for (const listener of this.changeListeners) {
+      try { listener({ type, agentId }); } catch { /* ignore listener errors */ }
+    }
   }
 
   // ── Agents ─────────────────────────────────────────────────────
@@ -168,6 +187,7 @@ export class AgentStore {
       stopped_at: agent.stopped_at ?? null,
       last_activity_at: agent.last_activity_at ?? null,
     });
+    this.notifyChange("put", agent.id);
   }
 
   getAgent(id: AgentId): AgentRecord | null {
@@ -241,10 +261,12 @@ export class AgentStore {
     this.db
       .prepare(`UPDATE agents SET ${fields.join(", ")} WHERE id = @id`)
       .run(params);
+    this.notifyChange("update", id);
   }
 
   removeAgent(id: AgentId): void {
     this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    this.notifyChange("remove", id);
   }
 
   // ── Hierarchy ──────────────────────────────────────────────────

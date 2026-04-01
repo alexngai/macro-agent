@@ -88,6 +88,11 @@ const InjectContextSchema = {
   urgent: z.boolean().optional().default(false).describe("If true, interrupts immediately"),
 };
 
+const WaitForActivitySchema = {
+  event_type: z.string().optional().describe("Event type to wait for (e.g., 'agent_stopped', 'task_completed')"),
+  timeout_ms: z.number().optional().default(30000).describe("Max time to wait in milliseconds"),
+};
+
 // =============================================================================
 // Factory
 // =============================================================================
@@ -403,6 +408,67 @@ export function createMCPServerV2(
       }
     });
   }
+
+  // ── Tool: wait_for_activity ──────────────────────────────────
+
+  server.registerTool("wait_for_activity", {
+    description: "Block until a matching event arrives in your inbox, or timeout. Useful for waiting on agent completion, task updates, or other async events.",
+    inputSchema: WaitForActivitySchema,
+  }, async (args) => {
+    const POLL_INTERVAL_MS = 2000;
+    const timeoutMs = args.timeout_ms ?? 30000;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const messages = await inboxAdapter.checkInbox(context.agent_id);
+
+        if (args.event_type) {
+          // Look for messages matching event_type in content.event field
+          const match = messages.find((msg) => {
+            const content = msg.content as Record<string, unknown> | undefined;
+            return content?.event === args.event_type;
+          });
+          if (match) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify({ timeout: false, message: match }),
+              }],
+            };
+          }
+        } else if (messages.length > 0) {
+          // No event_type filter — return the first message that arrived after startTime
+          const recent = messages.find((msg) => {
+            const createdAt = msg.created_at;
+            if (typeof createdAt === "number") return createdAt >= startTime;
+            if (typeof createdAt === "string") return new Date(createdAt).getTime() >= startTime;
+            return false;
+          });
+          if (recent) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify({ timeout: false, message: recent }),
+              }],
+            };
+          }
+        }
+      } catch {
+        // Inbox check failed — continue polling
+      }
+
+      // Wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ timeout: true }),
+      }],
+    };
+  });
 
   // ── Start / Close ────────────────────────────────────────────
 
