@@ -274,7 +274,7 @@ describeLive("ACP-over-MAP Permission Flow", () => {
     system = await bootV2({
       cwd: PERM_TEST_DIR,
       baseDir: PERM_TEST_DIR,
-      // Use "interactive" mode so agents request permission for tool calls
+      // Use "interactive" mode so acp-factory yields PermissionRequestUpdate
       defaultPermissionMode: "interactive",
       inbox: {
         socketPath: path.join(PERM_TEST_DIR, "inbox.sock"),
@@ -407,11 +407,20 @@ describeLive("ACP-over-MAP Permission Flow", () => {
       `[perm-test] Initialized: ${initResult.agentInfo?.name}`,
     );
 
-    // Create session — should reuse the pre-spawned head manager
+    // Create session — should reuse the pre-spawned head manager.
+    // Pass settingSources: [] to disable reading ~/.claude/settings.json
+    // which may have rules that auto-approve tools (bypassing permission requests).
     const sessionResult = await acpStream.newSession({
       mcpServers: [],
       cwd: PERM_TEST_DIR,
-    });
+      _meta: {
+        claudeCode: {
+          options: {
+            settingSources: [], // No pre-configured permissions — ask for everything
+          },
+        },
+      },
+    } as any);
     expect(sessionResult).toBeDefined();
     const sessionId = (sessionResult as any).sessionId;
     console.log(`[perm-test] Session: ${sessionId}`);
