@@ -90,6 +90,13 @@ export interface BootV2Config {
 
   /** ACP WebSocket server config */
   acp?: { enabled?: boolean; port?: number; host?: string; path?: string };
+
+  /** Federation config for cross-instance communication */
+  federation?: {
+    systemId: string;
+    peers?: Array<{ systemId: string; url?: string; meshPeerId?: string }>;
+    trust?: { allowedSystems?: string[] };
+  };
 }
 
 // =============================================================================
@@ -160,6 +167,16 @@ export async function bootV2(
     sqlitePath: inboxSqlitePath,
     defaultScope: "default",
     ...config.inbox,
+    // Pass federation config if provided
+    ...(config.federation && {
+      federation: {
+        systemId: config.federation.systemId,
+        peers: config.federation.peers,
+        trust: config.federation.trust
+          ? { allowedServers: config.federation.trust.allowedSystems }
+          : undefined,
+      },
+    }),
   });
   await inboxAdapter.initialize();
 
@@ -197,7 +214,14 @@ export async function bootV2(
     }
   );
 
-  // 6. Trigger System V2
+  // 6. Federation (cross-instance communication)
+  let federationCleanup: (() => void) | null = null;
+  if (config.federation) {
+    const { setupFederation } = await import("./adapters/federation.js");
+    federationCleanup = setupFederation(agentManager, inboxAdapter, config.federation);
+  }
+
+  // 7. Trigger System V2
   const triggerSystem = createTriggerSystemV2(
     {
       agentManager,
@@ -325,6 +349,7 @@ export async function bootV2(
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (federationCleanup) federationCleanup();
       if (acpServer) await acpServer.stop();
       if (apiServer) await apiServer.stop();
       await controlServer.stop();

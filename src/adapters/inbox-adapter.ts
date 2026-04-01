@@ -40,6 +40,18 @@ export interface InboxAdapterConfig {
   socketPath: string;
   /** Default scope for standalone agents (default: "default"). */
   defaultScope?: string;
+  /** Federation config for cross-instance communication. */
+  federation?: {
+    systemId?: string;
+    peers?: Array<{
+      systemId: string;
+      url?: string;
+      meshPeerId?: string;
+    }>;
+    trust?: {
+      allowedServers?: string[];
+    };
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -66,9 +78,20 @@ export class DefaultInboxAdapter implements IInboxAdapter {
   async initialize(): Promise<void> {
     this.inbox = await createAgentInbox({
       sqlitePath: this.config.sqlitePath,
+      enableFederation: !!this.config.federation?.peers?.length,
       config: {
         socketPath: this.config.socketPath,
         scope: this.defaultScope,
+        // Federation config is passed through with compatible types
+        ...(this.config.federation && {
+          federation: {
+            systemId: this.config.federation.systemId,
+            peers: this.config.federation.peers,
+            trust: this.config.federation.trust
+              ? { allowedServers: this.config.federation.trust.allowedServers ?? [] }
+              : undefined,
+          } as any,
+        }),
       },
     });
 

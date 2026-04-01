@@ -35,3 +35,10 @@ export {
   type DaemonHandle,
   type EnsureDaemonOptions,
 } from "./opentasks-daemon.js";
+
+export {
+  setupFederation,
+  createRemoteSpawnHandler,
+  type FederationConfig,
+  type FederationPeer,
+} from "./federation.js";
