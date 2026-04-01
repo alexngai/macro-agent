@@ -188,3 +188,138 @@ Multiple named **execution modes**, each with a different orchestration pattern:
 The two projects are **complementary rather than directly competitive**. macro-agent provides the low-level orchestration primitives (lifecycle, workspaces, messaging, task graphs, merge strategies) that a tool like OMC could theoretically build its developer experience on top of. OMC provides the user-facing patterns (magic keywords, agent personas, execution modes, cost optimization) that make multi-agent development accessible.
 
 Where they overlap is in **team orchestration** and **agent lifecycle management**, but they approach it from opposite ends: macro-agent from the infrastructure up, OMC from the user experience down.
+
+---
+
+## 9. oh-my-openagent: The Vendor-Neutral Evolution
+
+[oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (formerly oh-my-opencode) is the **vendor-neutral fork/evolution** of OMC. It runs on OpenCode instead of Claude Code and adds multi-provider model routing (GPT, Gemini, Kimi K2.5, GLM alongside Claude). Same maintainer ecosystem, ~46k GitHub stars.
+
+### Agent Architecture
+
+oh-my-openagent defines **10 built-in agents** with a strict planning/execution separation:
+
+| Agent | Role | Default Model | macro-agent Equivalent |
+|---|---|---|---|
+| **Sisyphus** | Main orchestrator | Claude Opus 4.6 / Kimi K2.5 / GLM-5 | Coordinator role |
+| **Prometheus** | Strategic planner (interview mode) | Claude Opus 4.6 | Custom planner role |
+| **Atlas** | Plan executor, wave/parallel management | Claude Opus 4.6 | Custom executor role |
+| **Hephaestus** | Autonomous deep worker | GPT-5.4 | Worker role |
+| **Oracle** | Verification and QA | — | Monitor role |
+| **Librarian** | Knowledge retrieval | — | Custom role |
+| **Explore** | Fast codebase search | — | Custom role |
+| **Metis** | Gap analysis (planning) | — | Custom role |
+| **Momus** | Quality review | — | Custom role |
+| **Sisyphus-Junior** | Lightweight category-based delegator | — | Worker role variant |
+
+### Mapping to openteams Configuration
+
+The oh-my-openagent agent topology maps directly to an openteams team manifest:
+
+```yaml
+# Hypothetical openteams equivalent of oh-my-openagent's topology
+name: sisyphus-team
+version: 1
+roles: [orchestrator, planner, executor, deep-worker, verifier, librarian, explorer]
+
+topology:
+  root:
+    role: orchestrator        # Sisyphus
+    config:
+      model: claude-opus-4-6
+  companions:
+    - role: planner           # Prometheus
+      config:
+        model: claude-opus-4-6
+  spawn_rules:
+    orchestrator: [executor, deep-worker, verifier, librarian, explorer]
+    executor: [deep-worker]   # Atlas delegates to Hephaestus
+
+communication:
+  channels:
+    planning:
+      signals: [PLAN_READY, GAP_ANALYSIS, PLAN_APPROVED]
+    execution:
+      signals: [TASK_ASSIGNED, TASK_COMPLETED, WAVE_COMPLETE]
+    verification:
+      signals: [VERIFY_REQUEST, VERIFY_PASS, VERIFY_FAIL]
+  subscriptions:
+    executor:
+      - channel: planning
+        signals: [PLAN_READY]
+    verifier:
+      - channel: execution
+        signals: [TASK_COMPLETED]
+  emissions:
+    planner: [PLAN_READY, GAP_ANALYSIS]
+    executor: [TASK_ASSIGNED, WAVE_COMPLETE]
+    deep-worker: [TASK_COMPLETED]
+    verifier: [VERIFY_PASS, VERIFY_FAIL]
+
+macro_agent:
+  task_assignment:
+    mode: push              # Atlas pushes tasks to workers
+  integration:
+    strategy: trunk
+```
+
+### Category-Based Task Routing
+
+oh-my-openagent routes tasks through **categories** that map to models:
+
+| Category | Purpose | Model | openteams Equivalent |
+|---|---|---|---|
+| `deep` | Complex architectural work | GPT-5.4 | Role with `model` config |
+| `quick` | Simple fast tasks | Claude Sonnet | Role with `model` config |
+| `visual-engineering` | UI/UX code | Gemini | Role with `model` config |
+| `ultrabrain` | Expert reasoning | GPT-5.4 xhigh | Role with `model` config |
+| `research` | Analysis/investigation | — | Role with capabilities |
+| `writing` | Documentation | — | Role with capabilities |
+
+This is conceptually equivalent to defining multiple worker roles in openteams, each with a different model and capability set — the "category" is just a role by another name.
+
+### What Maps vs What Doesn't
+
+**Maps cleanly to openteams config:**
+- Agent definitions → `roles/*.yaml`
+- Agent topology (Prometheus → Atlas → Hephaestus) → `topology` section
+- Category-based routing → multiple worker roles with different models
+- Delegation triggers → `communication.routing.peers`
+- Skill loading → role capabilities
+- `oh-my-opencode.json` → `team.yaml` manifest
+
+**Maps to macro-agent runtime (not openteams):**
+- Agent lifecycle management → `AgentManagerV2`
+- `.sisyphus/plans/` state files → `AgentStore` + `opentasks`
+- Background subagent execution → `ControlServer` + health checks
+- Circuit breaker for runaway agents → `ControlServer` monitoring
+- Session recovery → Agent sessions + continuation
+
+**Unique to oh-my-openagent (no equivalent):**
+- **Hash-anchored edit tool** (Hashline) — content-validated line references
+- **Multi-provider model routing** — Claude/GPT/Gemini/Kimi/GLM in one config
+- **IntentGate** — intent classification before action
+- **OpenCode plugin system** — different host platform entirely
+- **Magic keywords** — natural language activation
+
+### Layer Model
+
+```
+┌────────────────────────────────────────────────┐
+│  UX Layer                                      │
+│  Magic keywords, HUD, hashline, notepad,       │  ← oh-my-openagent only
+│  intent gate, multi-provider model routing      │
+├────────────────────────────────────────────────┤
+│  Config Layer                                  │
+│  Agent definitions, categories, delegation      │  ← openteams YAML equivalent
+│  rules, topology, skill composition             │
+├────────────────────────────────────────────────┤
+│  Runtime Layer                                 │
+│  Lifecycle, IPC, workspaces, messaging,         │  ← macro-agent equivalent
+│  tasks, triggers, control socket                │
+└────────────────────────────────────────────────┘
+```
+
+oh-my-openagent is a **vertically integrated stack** spanning all three layers. The config layer is the openteams equivalent. The runtime layer is what macro-agent provides (but oh-my-openagent builds a thinner version since there's no macro-agent underneath). The UX layer is oh-my-openagent's unique contribution.
+
+If oh-my-openagent were rebuilt on macro-agent + openteams, the config layer would become YAML manifests, the runtime layer would be deleted, and only the UX layer would remain as the project's differentiator.
