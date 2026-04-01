@@ -27,7 +27,7 @@ import type {
 } from "@agentclientprotocol/sdk";
 import type { AgentSideConnection } from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
-import type { ExtendedSessionUpdate } from "acp-factory";
+import type { ExtendedSessionUpdate, PermissionRequestUpdate } from "acp-factory";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { InboxAdapter, TasksAdapter } from "../adapters/types.js";
 import type { MacroAgentSystemV2 } from "../boot-v2.js";
@@ -106,6 +106,19 @@ function isACPSessionUpdate(
     ACP_SESSION_UPDATE_TYPES.has(
       (update as { sessionUpdate: string }).sessionUpdate,
     )
+  );
+}
+
+/**
+ * Type guard: returns true if the update is a PermissionRequestUpdate
+ * from acp-factory (emitted when the agent is in interactive permission mode).
+ */
+function isPermissionRequestUpdate(
+  update: ExtendedSessionUpdate,
+): update is PermissionRequestUpdate {
+  return (
+    "sessionUpdate" in update &&
+    (update as { sessionUpdate: string }).sessionUpdate === "permission_request"
   );
 }
 
@@ -449,9 +462,53 @@ export function createMacroAgent(
         const updates = agentManager.prompt(agentId, message);
 
         for await (const update of updates) {
+
+          // Handle permission requests from the underlying agent.
+          // When the agent is in interactive mode, it yields
+          // PermissionRequestUpdate objects instead of auto-approving.
+          // We forward these to the client via AgentSideConnection's
+          // requestPermission() method (JSON-RPC agent→client request).
+          if (isPermissionRequestUpdate(update)) {
+            try {
+              const permResponse = await connection.requestPermission({
+                sessionId: params.sessionId,
+                toolCall: {
+                  toolCallId: update.toolCall.toolCallId,
+                  title: update.toolCall.title,
+                  status: update.toolCall.status as any,
+                  rawInput: update.toolCall.rawInput,
+                },
+                options: update.options,
+              });
+              // Relay the permission response back to the agent.
+              // ACP response: { outcome: { outcome: "selected", optionId } | { outcome: "cancelled" } }
+              const outcome = permResponse?.outcome;
+              if (outcome) {
+                if (outcome.outcome === "selected" && "optionId" in outcome) {
+                  agentManager.respondToPermission(
+                    agentId,
+                    update.requestId,
+                    outcome.optionId,
+                  );
+                } else if (outcome.outcome === "cancelled") {
+                  agentManager.cancelPermission(agentId, update.requestId);
+                }
+              }
+            } catch {
+              // If the permission request fails (e.g., client disconnected),
+              // cancel it so the agent doesn't hang.
+              try {
+                agentManager.cancelPermission(agentId, update.requestId);
+              } catch {
+                // Best effort
+              }
+            }
+            continue;
+          }
+
           // Forward each update to the client as a session notification.
           // Only forward ACP-compatible SessionUpdate types; skip
-          // acp-factory extended types like PermissionRequestUpdate.
+          // acp-factory extended types like CompactionUpdate.
           if ("sessionUpdate" in update && isACPSessionUpdate(update)) {
             const notification: SessionNotification = {
               sessionId: params.sessionId,

@@ -134,7 +134,8 @@ export function setupCoordinationHandlers(
 
     try {
       // Deliver context to all running agents via inbox
-      const agents = agentManager.list({ state: "running" as any });
+      const agents = agentManager.list()
+        .filter((a: any) => a.state === "running");
       for (const agent of agents) {
         await inboxAdapter
           .send("system", agent.id, {
@@ -161,21 +162,33 @@ export function setupCoordinationHandlers(
     if (!p?.content) return;
 
     try {
-      // Route to a specific agent or broadcast to all
-      const agents = agentManager.list({ state: "running" as any });
-      const target = agents[0]; // Route to first running agent (head manager)
-      if (target) {
-        await inboxAdapter.send("system", target.id, {
-          type: "event",
-          event: "EXTERNAL_MESSAGE",
-          data: {
-            from: p.from_swarm_id,
-            content_type: p.content_type,
-            content: p.content,
-            reply_to: p.reply_to,
-          },
-        });
-      }
+      const agents = agentManager.list()
+        .filter((a: any) => a.state === "running");
+      if (agents.length === 0) return;
+
+      // Route to the best target:
+      // 1. If to_swarm_id matches a local agent ID, send directly
+      // 2. If metadata has a target_agent hint, use it
+      // 3. Otherwise, send to the coordinator/head manager (parentless agent)
+      // 4. Fallback: first running agent
+      const targetId = p.to_swarm_id;
+      const directTarget = targetId
+        ? agents.find((a: any) => a.id === targetId)
+        : undefined;
+      const coordinator = agents.find((a: any) => !a.parent);
+      const target = directTarget ?? coordinator ?? agents[0];
+
+      await inboxAdapter.send("system", target.id, {
+        type: "event",
+        event: "EXTERNAL_MESSAGE",
+        data: {
+          from: p.from_swarm_id,
+          content_type: p.content_type,
+          content: p.content,
+          reply_to: p.reply_to,
+          metadata: p.metadata,
+        },
+      });
     } catch (err) {
       console.warn(
         `[map-sidecar] Failed to handle message.send: ${(err as Error).message}`,

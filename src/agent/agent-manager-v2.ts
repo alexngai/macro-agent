@@ -1073,12 +1073,13 @@ export function createAgentManagerV2(
       .find((a) => a.cwd === options.cwd);
 
     if (existing && activeSessions.has(existing.id as AgentId)) {
-      const session = activeSessions.get(existing.id as AgentId)!;
+      const sessionEntry = activeSessions.get(existing.id as AgentId)!;
+      const storedSession = agentStore.getSession(existing.id as AgentId);
       return {
         id: existing.id as AgentId,
-        session_id: "",
+        session_id: storedSession?.session_id ?? sessionEntry.session.id ?? "",
         agent: agentRecordToAgent(existing),
-        session: session.session,
+        session: sessionEntry.session,
       };
     }
 

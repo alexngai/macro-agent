@@ -98,6 +98,9 @@ export interface BootV2Config {
     trust?: { allowedSystems?: string[] };
   };
 
+  /** MAP server config (accept inbound connections from TUI/clients) */
+  mapServer?: { enabled?: boolean; port?: number; host?: string; path?: string; name?: string };
+
   /** MAP sidecar config (connect to OpenHive hub) */
   map?: {
     enabled?: boolean;
@@ -153,7 +156,10 @@ export interface MacroAgentSystemV2 {
   /** ACP WebSocket server (if enabled) */
   acpServer?: WebSocketACPServer;
 
-  /** MAP sidecar (if enabled) */
+  /** MAP server for inbound connections (if enabled) */
+  mapServerInstance?: import("./map/types.js").MAPServerInstance;
+
+  /** MAP sidecar for outbound hub connection (if enabled) */
   mapSidecar?: import("./map/types.js").MAPSidecar;
 
   /** Shut down all components */
@@ -356,7 +362,45 @@ export async function bootV2(
     await acpServer.start();
   }
 
-  // 11. MAP Sidecar (optional — connect to OpenHive hub)
+  // 11. MAP Server (optional — accept inbound connections from TUI/clients)
+  let mapServerInstance: import("./map/types.js").MAPServerInstance | null = null;
+  if (config.mapServer?.enabled) {
+    try {
+      const { createMAPServerInstance } = await import("./map/server.js");
+      mapServerInstance = createMAPServerInstance(
+        {
+          agentManager,
+          agentStore,
+          inboxAdapter,
+          tasksAdapter,
+          // Pass partial system ref for ACP-over-MAP bridge
+          system: {
+            agentManager,
+            agentStore,
+            inboxAdapter,
+            tasksAdapter,
+            triggerSystem,
+            controlServer,
+            roleRegistry,
+            controlSocketPath,
+          } as any,
+        },
+        {
+          port: config.mapServer.port,
+          host: config.mapServer.host,
+          path: config.mapServer.path,
+          name: config.mapServer.name,
+        },
+      );
+      await mapServerInstance.start();
+    } catch (err) {
+      console.warn(
+        `[boot-v2] MAP server failed to start: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // 12. MAP Sidecar (optional — connect to OpenHive hub)
   let mapSidecar: import("./map/types.js").MAPSidecar | null = null;
   if (config.map?.enabled && config.map.server) {
     try {
@@ -384,7 +428,7 @@ export async function bootV2(
     }
   }
 
-  // 12. Return system handle
+  // 13. Return system handle
   return {
     agentManager,
     agentStore,
@@ -396,11 +440,13 @@ export async function bootV2(
     controlSocketPath,
     ...(apiServer ? { apiServer } : {}),
     ...(acpServer ? { acpServer } : {}),
+    ...(mapServerInstance ? { mapServerInstance } : {}),
     ...(mapSidecar ? { mapSidecar } : {}),
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
       if (mapSidecar) await mapSidecar.stop();
+      if (mapServerInstance) await mapServerInstance.stop();
       if (federationCleanup) federationCleanup();
       if (acpServer) await acpServer.stop();
       if (apiServer) await apiServer.stop();

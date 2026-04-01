@@ -103,11 +103,13 @@ export {
 // Teams - template seeding
 export { seedDefaultTemplates } from './teams/seed-defaults.js';
 
-// MAP Sidecar
-export { createMAPSidecar } from './map/index.js';
+// MAP (sidecar + server)
+export { createMAPSidecar, createMAPServerInstance } from './map/index.js';
 export type {
   MAPSidecar,
   MAPSidecarConfig,
+  MAPServerInstance,
+  MapServerConfig,
   TrajectoryCheckpointPayload,
   TrajectoryCheckpointResult,
 } from './map/types.js';

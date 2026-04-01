@@ -208,3 +208,31 @@ export interface TrajectoryReporter {
   ): Promise<TrajectoryCheckpointResult | null>;
   stop(): void;
 }
+
+// =============================================================================
+// MAP Server Types (inbound connections)
+// =============================================================================
+
+/** Configuration for the MAP server that accepts inbound connections */
+export interface MapServerConfig {
+  /** Port for MAP WebSocket server (default: 3002) */
+  port?: number;
+  /** Host to bind (default: "127.0.0.1") */
+  host?: string;
+  /** WebSocket path (default: "/map") */
+  path?: string;
+  /** Server name for MAP protocol (default: "macro-agent") */
+  name?: string;
+}
+
+/** MAP server instance for accepting inbound MAP connections */
+export interface MAPServerInstance {
+  /** Start the server */
+  start(): Promise<void>;
+  /** Stop the server */
+  stop(): Promise<void>;
+  /** Get the WebSocket URL */
+  getUrl(): string;
+  /** Get number of active connections */
+  getConnectionCount(): number;
+}
