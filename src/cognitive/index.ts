@@ -1,9 +1,14 @@
 /**
- * Cognitive Module
+ * Cognitive Module — Bridge for cognitive-core integration
  *
- * Atlas compute backend for cognitive-core integration.
- * Implements cognitive-core's AgentBackend interface using
- * macro-agent's AgentManager for agent spawning and lifecycle.
+ * Provides:
+ * - MacroAgentBackend: Implements cognitive-core's AgentBackend interface
+ * - AnalystRole: Minimal role for cognitive analysis agents
+ * - SessionConverter: Converts ACP updates to cognitive session state
+ * - Types: Structural compatibility with cognitive-core (no direct import)
+ *
+ * Atlas, trajectory extraction, and ACP extensions are handled by OpenHive.
+ * This module focuses on: receive task → spawn agent → track session → return result.
  */
 
 // Types
@@ -20,11 +25,6 @@ export type {
   CognitiveBatchHandle,
   CognitiveBatchResult,
   CognitiveBatchTaskResult,
-  CognitiveTrajectory,
-  CognitiveStep,
-  CognitiveOutcome,
-  AtlasInstance,
-  CognitiveOperation,
   SessionCompleteEvent,
 } from "./types.js";
 
@@ -37,27 +37,13 @@ export {
 // Role
 export { AnalystRole } from "./analyst-role.js";
 
-// Session conversion
-export {
-  convertUpdatesToSession,
-  updateSessionFromEvent,
-} from "./session-converter.js";
+// Session conversion (used internally by MacroAgentBackend)
+export { updateSessionFromEvent } from "./session-converter.js";
 
-// Trajectory extraction
-export { extractTrajectory } from "./trajectory-extractor.js";
-
-// Team lifecycle
+// Workspace execution handler (bridge for OpenHive workspace.execute messages)
 export {
-  initCognitiveTeam,
-  type CognitiveTeamServices,
-  type CognitiveTeamHandle,
-} from "./team-lifecycle.js";
-
-// ACP extensions
-export {
-  handleCognitiveCommand,
-  handleCognitiveStatus,
-  handleCognitiveQuery,
-  COGNITIVE_EXTENSION_METHODS,
-  type CognitiveExtensionServices,
-} from "./acp-extension.js";
+  handleWorkspaceExecute,
+  isWorkspaceExecuteMessage,
+  type WorkspaceHandlerDeps,
+  type WorkspaceExecuteParams,
+} from "./workspace-handler.js";

@@ -4,20 +4,22 @@
  * Implements cognitive-core's AgentBackend interface, delegating to
  * macro-agent's AgentManager for agent spawning and lifecycle.
  *
- * V2 port: Uses TasksAdapter instead of TaskBackend, InboxAdapter instead
- * of MAP adapter for session.complete notifications.
+ * Stripped to essentials for OpenHive integration:
+ * - Spawns analyst agents in a workspace directory (cwd)
+ * - Tracks sessions and manages timeouts
+ * - Reports completion via callbacks and InboxAdapter
+ *
+ * Atlas, trajectory extraction, and team coordination are handled
+ * by OpenHive, not the swarm. The swarm is pure compute — receive
+ * task, execute agent, return result.
  */
 
 import { nanoid } from "nanoid";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentId } from "../store/types/index.js";
-import type { TasksAdapter } from "../adapters/types.js";
-import type { InboxAdapter } from "../adapters/types.js";
 import { AnalystRole } from "./analyst-role.js";
 import { updateSessionFromEvent } from "./session-converter.js";
-import { extractTrajectory } from "./trajectory-extractor.js";
 import type {
-  AtlasInstance,
   CognitiveAgentSession,
   CognitiveAgentSpawnConfig,
   CognitiveBatchConfig,
@@ -29,17 +31,9 @@ import type {
   SessionCompleteEvent,
 } from "./types.js";
 
-// ─────────────────────────────────────────────────────────────────
-// Config defaults
-// ─────────────────────────────────────────────────────────────────
-
 const DEFAULT_MAX_FOLLOW_UPS = 1;
 const DEFAULT_SOFT_TIMEOUT_RATIO = 0.8;
 const DEFAULT_MAX_CONCURRENCY = 4;
-
-// ─────────────────────────────────────────────────────────────────
-// MacroAgentBackend
-// ─────────────────────────────────────────────────────────────────
 
 export class MacroAgentBackend {
   readonly name = "macro-agent";
@@ -48,22 +42,16 @@ export class MacroAgentBackend {
   private readonly agentManager: AgentManager;
   private readonly maxFollowUps: number;
   private readonly softTimeoutRatio: number;
-  private readonly useTeam: boolean;
-  private readonly coordinatorAgentId: AgentId | undefined;
-  private readonly tasksAdapter: TasksAdapter | undefined;
-  private readonly atlas: AtlasInstance | undefined;
+  private readonly tasksAdapter: import("../adapters/types.js").TasksAdapter | undefined;
   private readonly onSessionComplete: ((event: SessionCompleteEvent) => void) | undefined;
-  private readonly inboxAdapter: InboxAdapter | undefined;
+  private readonly inboxAdapter: import("../adapters/types.js").InboxAdapter | undefined;
   private readonly sessions: Map<string, MacroSessionState> = new Map();
 
   constructor(agentManager: AgentManager, config?: MacroAgentBackendConfig) {
     this.agentManager = agentManager;
     this.maxFollowUps = config?.maxFollowUps ?? DEFAULT_MAX_FOLLOW_UPS;
     this.softTimeoutRatio = config?.softTimeoutRatio ?? DEFAULT_SOFT_TIMEOUT_RATIO;
-    this.useTeam = config?.useTeam ?? false;
-    this.coordinatorAgentId = config?.coordinatorAgentId;
     this.tasksAdapter = config?.tasksAdapter;
-    this.atlas = config?.atlas;
     this.onSessionComplete = config?.onSessionComplete;
     this.inboxAdapter = config?.inboxAdapter;
 
@@ -82,10 +70,7 @@ export class MacroAgentBackend {
     return true;
   }
 
-  async spawn(
-    config: CognitiveAgentSpawnConfig,
-  ): Promise<CognitiveAgentSession> {
-    // Create task in TasksAdapter when configured
+  async spawn(config: CognitiveAgentSpawnConfig): Promise<CognitiveAgentSession> {
     let taskId: string | undefined;
     if (this.tasksAdapter) {
       taskId = await this.tasksAdapter.createTask({
@@ -93,35 +78,29 @@ export class MacroAgentBackend {
         tags: config.task.domain ? [config.task.domain] : undefined,
       });
     }
-
     return this._spawnCore(config, taskId);
   }
 
-  async getSession(
-    sessionId: string,
-  ): Promise<CognitiveAgentSession | undefined> {
-    const state = this.sessions.get(sessionId);
-    return state?.session;
+  async getSession(sessionId: string): Promise<CognitiveAgentSession | undefined> {
+    return this.sessions.get(sessionId)?.session;
   }
 
   async terminate(sessionId: string): Promise<void> {
     const state = this.sessions.get(sessionId);
     if (!state) return;
 
+    // Don't corrupt completed sessions
+    if (state.session.state !== "running") return;
+
     state.session.state = "failed";
     state.session.error = "Terminated by caller";
     state.session.endTime = new Date();
 
-    // Fail the tracked task
     if (this.tasksAdapter && state.taskId) {
-      await this.tasksAdapter
-        .transitionTask(state.taskId, "fail")
-        .catch(() => {});
+      await this.tasksAdapter.transitionTask(state.taskId, "fail").catch(() => {});
     }
 
-    await this.agentManager
-      .terminate(state.agentId, "cancelled")
-      .catch(() => {});
+    await this.agentManager.terminate(state.agentId, "cancelled").catch(() => {});
   }
 
   async listSessions(): Promise<CognitiveAgentSession[]> {
@@ -138,7 +117,6 @@ export class MacroAgentBackend {
     const runningSessions = new Set<string>();
     const completionPromises: Promise<void>[] = [];
 
-    // Create all tasks upfront in TasksAdapter for immediate visibility
     const preCreatedTaskIds: (string | undefined)[] = [];
     if (this.tasksAdapter) {
       for (const task of tasks) {
@@ -165,17 +143,10 @@ export class MacroAgentBackend {
           runningSessions.add(session.id);
           results[idx].session = session;
 
-          // Wait for this session to complete, then fill the slot
           const state = this.sessions.get(session.id)!;
           const completionPromise = state.runPromise
-            .then(() => {
-              runningSessions.delete(session.id);
-              return spawnNext();
-            })
-            .catch(() => {
-              runningSessions.delete(session.id);
-              return spawnNext();
-            });
+            .then(() => { runningSessions.delete(session.id); return spawnNext(); })
+            .catch(() => { runningSessions.delete(session.id); return spawnNext(); });
 
           completionPromises.push(completionPromise);
         } catch (err) {
@@ -184,7 +155,6 @@ export class MacroAgentBackend {
       }
     };
 
-    // Kick off initial batch
     await spawnNext();
 
     const buildResult = (): CognitiveBatchResult => {
@@ -199,10 +169,7 @@ export class MacroAgentBackend {
 
     return {
       totalTasks: tasks.length,
-      waitForAll: async () => {
-        await Promise.all(completionPromises);
-        return buildResult();
-      },
+      waitForAll: async () => { await Promise.all(completionPromises); return buildResult(); },
       cancel: async () => {
         cancelled = true;
         for (const sessionId of runningSessions) {
@@ -216,33 +183,25 @@ export class MacroAgentBackend {
 
   // ── Internal ────────────────────────────────────────────────────
 
-  /**
-   * Core spawn logic used by both spawn() and submitBatch().
-   * Accepts an optional pre-created taskId to avoid double task creation.
-   */
   private async _spawnCore(
     config: CognitiveAgentSpawnConfig,
     taskId?: string,
   ): Promise<CognitiveAgentSession> {
-    // 1. Spawn macro-agent analyst
-    const parentId = this.useTeam ? this.coordinatorAgentId ?? null : null;
     const spawned = await this.agentManager.spawn({
       task: config.task.description,
       task_id: taskId,
       role: "analyst",
-      parent: parentId,
+      parent: null,
       cwd: config.cwd,
       config: config.env ? { env: config.env } : undefined,
       customPrompt: config.systemPromptAdditions,
     });
 
-    // 2. Assign task to agent and start it (pending -> assigned -> in_progress)
     if (this.tasksAdapter && taskId) {
       await this.tasksAdapter.assignTask(taskId, spawned.id as string);
       await this.tasksAdapter.transitionTask(taskId, "start");
     }
 
-    // 3. Create session
     const sessionId = `cognitive_${nanoid(12)}`;
     const session: CognitiveAgentSession = {
       id: sessionId,
@@ -252,15 +211,11 @@ export class MacroAgentBackend {
       messages: [],
       toolCalls: [],
       startTime: new Date(),
-      metadata: {
-        macroAgentId: spawned.id,
-      },
+      metadata: { macroAgentId: spawned.id },
     };
 
-    // 4. Start the prompt loop (fire-and-forget)
     const runPromise = this.runSession(spawned.id, session, config, taskId);
 
-    // 5. Track state
     this.sessions.set(sessionId, {
       agentId: spawned.id,
       session,
@@ -283,28 +238,20 @@ export class MacroAgentBackend {
     let hardTimer: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      // Set up timeout enforcement
       if (timeout && timeout > 0) {
         const softMs = timeout * this.softTimeoutRatio;
 
         softTimer = setTimeout(async () => {
           if (session.state !== "running") return;
           try {
-            // Best-effort nudge to wrap up
-            const canInject =
-              await this.agentManager.supportsInjection(agentId);
+            const canInject = await this.agentManager.supportsInjection(agentId);
             if (canInject) {
-              // Prefer context injection (non-blocking)
               for await (const _ of this.agentManager.prompt(
                 agentId,
                 "TIME WARNING: Please finalize your analysis, write output, and call done() immediately.",
-              )) {
-                // Drain the iterator
-              }
+              )) { /* drain */ }
             }
-          } catch {
-            // Soft timeout is best-effort
-          }
+          } catch { /* best-effort */ }
         }, softMs);
 
         hardTimer = setTimeout(() => {
@@ -316,7 +263,6 @@ export class MacroAgentBackend {
         }, timeout);
       }
 
-      // Prompt until done() is called
       const result = await this.agentManager.promptUntilDone(
         agentId,
         config.task.description,
@@ -324,34 +270,28 @@ export class MacroAgentBackend {
           maxFollowUps: this.maxFollowUps,
           onUpdate: (update) => {
             updateSessionFromEvent(session, update);
-            config.onMessage?.(
-              session.messages[session.messages.length - 1]!,
-            );
+            config.onMessage?.(session.messages[session.messages.length - 1]!);
           },
         },
       );
 
-      // Don't update state if already terminated externally or by timeout
       if (session.state === "running") {
         session.state = result.doneCalled ? "completed" : "failed";
-        if (!result.doneCalled) {
-          session.error = "Agent did not call done()";
-        }
+        if (!result.doneCalled) session.error = "Agent did not call done()";
         session.endTime = new Date();
         session.result = result.doneStatus;
       }
     } catch (error) {
       if (session.state === "running") {
         session.state = "failed";
-        session.error =
-          error instanceof Error ? error.message : String(error);
+        session.error = error instanceof Error ? error.message : String(error);
         session.endTime = new Date();
       }
     } finally {
       if (softTimer) clearTimeout(softTimer);
       if (hardTimer) clearTimeout(hardTimer);
 
-      // Belt-and-suspenders: update TasksAdapter status
+      // Update task status
       if (this.tasksAdapter && taskId) {
         try {
           if (session.state === "completed") {
@@ -359,74 +299,48 @@ export class MacroAgentBackend {
           } else if (session.state === "failed") {
             await this.tasksAdapter.transitionTask(taskId, "fail");
           }
-        } catch {
-          // Ignore -- task may already be in terminal state from done()
-        }
+        } catch { /* may already be terminal */ }
       }
 
-      // Session completion: extract trajectory and feed to Atlas
+      // Notify completion (no trajectory extraction — OpenHive handles that via sessionlog)
       if (session.state === "completed" || session.state === "failed") {
-        try {
-          const trajectory = extractTrajectory(session);
+        const completeEvent: SessionCompleteEvent = {
+          sessionId: session.id,
+          agentId: agentId as string,
+          state: session.state,
+          duration_ms: session.endTime
+            ? session.endTime.getTime() - session.startTime.getTime()
+            : 0,
+          message_count: session.messages.length,
+          tool_call_count: session.toolCalls.length,
+        };
 
-          // Feed to Atlas for learning (if available)
-          if (this.atlas) {
-            await this.atlas.processTrajectory(trajectory).catch(() => {});
-          }
+        this.onSessionComplete?.(completeEvent);
 
-          // Notify listener
-          const completeEvent: SessionCompleteEvent = {
-            sessionId: session.id,
-            agentId: agentId as string,
-            state: session.state,
-            trajectory,
-            duration_ms: session.endTime
-              ? session.endTime.getTime() - session.startTime.getTime()
-              : 0,
-            message_count: session.messages.length,
-            tool_call_count: session.toolCalls.length,
-          };
-
-          this.onSessionComplete?.(completeEvent);
-
-          // Send session.complete notification via InboxAdapter
-          if (this.inboxAdapter) {
-            await this.inboxAdapter.send(
-              agentId as string,
-              this.coordinatorAgentId ?? agentId as string,
-              {
-                type: "session.complete",
-                sessionId: session.id,
-                agentId: agentId as string,
-                state: session.state,
-                duration_ms: completeEvent.duration_ms,
-                message_count: completeEvent.message_count,
-                tool_call_count: completeEvent.tool_call_count,
-                outcome: session.state === "completed" ? "success" : "failure",
-              },
-              { subject: "session.complete" },
-            ).catch(() => {});
-          }
-        } catch {
-          // Session completion hooks are best-effort
+        if (this.inboxAdapter) {
+          await this.inboxAdapter.send(
+            agentId as string,
+            agentId as string,
+            {
+              type: "session.complete",
+              sessionId: session.id,
+              state: session.state,
+              duration_ms: completeEvent.duration_ms,
+              outcome: session.state === "completed" ? "success" : "failure",
+            },
+            { subject: "session.complete" },
+          ).catch(() => {});
         }
       }
 
-      // Clean up the agent process
+      // Clean up agent process
       if (session.state !== "running") {
-        const stopReason =
-          session.state === "completed" ? "completed" : "failed";
-        await this.agentManager
-          .terminate(agentId, stopReason)
-          .catch(() => {});
+        const stopReason = session.state === "completed" ? "completed" : "failed";
+        await this.agentManager.terminate(agentId, stopReason).catch(() => {});
       }
     }
   }
 }
-
-// ─────────────────────────────────────────────────────────────────
-// Factory function
-// ─────────────────────────────────────────────────────────────────
 
 export function createMacroAgentBackend(
   agentManager: AgentManager,
