@@ -16,12 +16,15 @@ import type {
   LandResult,
   OptimisticStrategyConfig,
 } from "./types.js";
-import type { EventStore } from "../../store/event-store.js";
+/** Minimal event store interface for emitting validation events */
+interface ValidationEventEmitter {
+  emit(event: { type: string; source: { agent_id: string }; payload: Record<string, unknown> }): void;
+}
 
 export class OptimisticIntegrationStrategy implements IntegrationStrategy {
   readonly name = "optimistic";
   private maxRetries: number;
-  private eventStore?: EventStore;
+  private eventEmitter?: ValidationEventEmitter;
 
   constructor(config?: Record<string, unknown>) {
     const typedConfig = config as OptimisticStrategyConfig | undefined;
@@ -32,8 +35,8 @@ export class OptimisticIntegrationStrategy implements IntegrationStrategy {
    * Set the EventStore for emitting validation events.
    * Called after construction since EventStore may not be available at strategy creation time.
    */
-  setEventStore(store: EventStore): void {
-    this.eventStore = store;
+  setEventStore(store: ValidationEventEmitter): void {
+    this.eventEmitter = store;
   }
 
   async land(request: LandRequest): Promise<LandResult> {
@@ -84,9 +87,9 @@ export class OptimisticIntegrationStrategy implements IntegrationStrategy {
         const commitHash = this.git(workspacePath, "rev-parse HEAD").trim();
 
         // Emit validation:requested event (RD5 — judge handles validation)
-        if (this.eventStore) {
+        if (this.eventEmitter) {
           try {
-            this.eventStore.emit({
+            this.eventEmitter.emit({
               type: "status",
               source: { agent_id: request.agentId },
               payload: {

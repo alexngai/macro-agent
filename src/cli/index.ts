@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
- * Multi-Agent CLI
+ * Multi-Agent CLI (V2)
  *
  * Command-line interface for inspecting and managing the multi-agent system.
- * For running the server, use `multiagent` instead.
  *
  * Usage:
  *   multiagent-cli <command> [options]
@@ -11,15 +10,8 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
-import { createEventStore } from "../store/event-store.js";
-import { createAgentManager } from "../agent/agent-manager.js";
-import { createTaskManager } from "../task/task-manager.js";
-import { createMessageRouter } from "../router/message-router.js";
-import { createAPIServer } from "../api/server.js";
-import { loadMergedConfig } from "../config/project-config.js";
-import { loadTeam, TeamRuntime } from "../teams/index.js";
-import { createTaskBackend, loadTaskConfigFromMerged } from "../task/backend/index.js";
-import type { Agent, Task } from "../store/types/index.js";
+import { bootV2 } from "../boot-v2.js";
+import type { Agent } from "../store/types/index.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Formatting Helpers
@@ -35,23 +27,6 @@ function formatState(state: string): string {
       return chalk.yellow("spawning");
     default:
       return state;
-  }
-}
-
-function formatStatus(status: string): string {
-  switch (status) {
-    case "pending":
-      return chalk.gray("pending");
-    case "assigned":
-      return chalk.blue("assigned");
-    case "in_progress":
-      return chalk.yellow("in_progress");
-    case "completed":
-      return chalk.green("completed");
-    case "failed":
-      return chalk.red("failed");
-    default:
-      return status;
   }
 }
 
@@ -74,24 +49,14 @@ function printAgent(agent: Agent, indent = 0): void {
   console.log(`${prefix}  Created: ${formatTimestamp(agent.created_at)}`);
 }
 
-function printTask(task: Task): void {
-  console.log(`${chalk.bold(task.id)} [${formatStatus(task.status)}]`);
-  console.log(`  Description: ${truncate(task.description, 60)}`);
-  if (task.assigned_agent) {
-    console.log(`  Assigned to: ${task.assigned_agent}`);
-  }
-  console.log(`  Created by: ${task.created_by}`);
-  console.log(`  Created: ${formatTimestamp(task.created_at)}`);
-}
-
 function printHierarchy(
   agent: Agent,
   getChildren: (id: string) => Agent[],
   indent = 0
 ): void {
-  const prefix = indent > 0 ? "  ".repeat(indent - 1) + "├─ " : "";
+  const prefix = indent > 0 ? "  ".repeat(indent - 1) + "|- " : "";
   const stateIcon =
-    agent.state === "running" ? chalk.green("●") : chalk.gray("○");
+    agent.state === "running" ? chalk.green("*") : chalk.gray("o");
 
   console.log(`${prefix}${stateIcon} ${agent.id}`);
   console.log(`${"  ".repeat(indent)}   ${truncate(agent.task ?? "No task", 50)}`);
@@ -123,150 +88,24 @@ program
   .option("-p, --port <port>", "Port to listen on", "3000")
   .option("-h, --host <host>", "Host to bind to", "localhost")
   .option("--cwd <path>", "Working directory for agents")
-  .option("--team <name>", "Load team template")
   .action(async (options) => {
-    console.log(chalk.blue("Starting multi-agent server..."));
+    console.log(chalk.blue("Starting multi-agent server (V2)..."));
 
     try {
-      // Load merged config (global → project → env vars)
-      const mergedConfig = loadMergedConfig(options.cwd);
-
-      // Initialize services
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const serverUrl = `http://${options.host}:${options.port}`;
-      const agentManager = createAgentManager(eventStore, messageRouter, {
-        serverUrl,
-        taskBackend: mergedConfig.task?.backend,
-        openTasksSocketPath: mergedConfig.task?.opentasks?.socket_path,
+      const system = await bootV2({
+        cwd: options.cwd ?? process.cwd(),
       });
-      const taskManager = createTaskManager(eventStore);
 
-      // Create task backend from merged config
-      const taskConfig = loadTaskConfigFromMerged(mergedConfig);
-      let taskBackendShutdown: (() => Promise<void>) | undefined;
-      let connectProject: ((projectPath: string) => Promise<void>) | undefined;
-      try {
-        const result = await createTaskBackend(taskConfig, eventStore);
-        taskBackendShutdown = result.shutdown;
-        connectProject = result.connectProject;
-        console.log(chalk.blue(`Task backend: ${taskConfig.backend.type}`));
+      console.log(chalk.green("System booted successfully."));
 
-        // Propagate runtime socket path to child agents so they skip daemon discovery
-        if (result.socketPath) {
-          agentManager.setOpenTasksSocketPath(result.socketPath);
-        }
-
-        // Auto-connect the server's own project directory on startup
-        if (connectProject) {
-          connectProject(options.cwd ?? process.cwd()).catch(() => {});
-        }
-      } catch (err) {
-        // Fall back to in-memory backend if opentasks connection fails
-        console.log(chalk.yellow(`Task backend creation failed (${err}), falling back to memory`));
-        try {
-          await createTaskBackend({ backend: { type: "memory" } }, eventStore);
-        } catch { /* non-critical */ }
-      }
-
-      // Determine team name: CLI flag > merged config
-      if (options.team) {
-        console.warn(chalk.yellow("[DEPRECATED] --team flag on multiagent-cli start is deprecated. Use 'multiagent' with .multiagent/config.json instead."));
-      }
-      const teamName = options.team ?? mergedConfig.team;
-
-      // Load and initialize team if specified
-      let teamRuntime: TeamRuntime | null = null;
-      if (teamName) {
-        console.log(chalk.blue(`Loading team template '${teamName}'...`));
-        const manifest = await loadTeam(
-          teamName,
-          agentManager.getRoleRegistry(),
-          options.cwd
-        );
-        teamRuntime = new TeamRuntime(manifest, {
-          agentManager,
-          messageRouter,
-          eventStore,
-        });
-        await teamRuntime.initialize();
-        console.log(
-          chalk.green(
-            `Team '${teamName}' loaded: ${manifest.roles.join(", ")}`
-          )
-        );
-      }
-
-      // Resolve auth from merged config
-      const noAuth = mergedConfig.auth?.disabled ?? false;
-      const serverToken = noAuth ? undefined : (mergedConfig.auth?.secret ?? undefined);
-
-      // Create API server
-      const server = createAPIServer(
-        { eventStore, agentManager, taskManager, messageRouter },
-        { port: parseInt(options.port), host: options.host, serverToken }
-      );
-
-      // Start server
-      await server.start();
-
-      console.log(
-        chalk.green(`Server running at http://${options.host}:${options.port}`)
-      );
-      if (serverToken) {
-        console.log(chalk.gray(`Server token: ${serverToken.substring(0, 8)}...`));
-      } else {
-        console.log(chalk.yellow(`Auth: disabled (MACRO_NO_AUTH)`));
-      }
-
-      // Bootstrap team agents after server is running
-      if (teamRuntime) {
-        const { rootId, companionIds } = await teamRuntime.bootstrap();
-        console.log(
-          chalk.green(
-            `Team '${teamName}' bootstrapped: root=${rootId}` +
-              (companionIds.length > 0
-                ? `, companions=${companionIds.join(", ")}`
-                : "")
-          )
-        );
-      }
-
-      // Connect-on-spawn: auto-connect project .opentasks/ dirs when agents spawn
-      if (connectProject) {
-        agentManager.onLifecycleEvent((event) => {
-          if (event.type === "spawned" && event.agent.cwd && connectProject) {
-            connectProject(event.agent.cwd).catch(() => {});
-          }
-        });
-      }
-
-      console.log(chalk.gray("Press Ctrl+C to stop"));
-
-      // Handle shutdown — best-effort, each step isolated
+      // Handle shutdown
       process.on("SIGINT", async () => {
         console.log(chalk.yellow("\nShutting down..."));
-        if (teamRuntime) {
-          try { await teamRuntime.teardown(); } catch (err) {
-            console.error(`[cleanup] Team teardown failed: ${err}`);
-          }
-        }
-        try { await server.stop(); } catch (err) {
-          console.error(`[cleanup] Server stop failed: ${err}`);
-        }
-        try { await agentManager.close(); } catch (err) {
-          console.error(`[cleanup] AgentManager close failed: ${err}`);
-        }
-        if (taskBackendShutdown) {
-          try { await taskBackendShutdown(); } catch (err) {
-            console.error(`[cleanup] Task backend shutdown failed: ${err}`);
-          }
-        }
-        try { await eventStore.close(); } catch (err) {
-          console.error(`[cleanup] EventStore close failed: ${err}`);
-        }
+        await system.shutdown();
         process.exit(0);
       });
+
+      console.log(chalk.gray("Press Ctrl+C to stop"));
     } catch (error) {
       console.error(chalk.red(`Failed to start server: ${error}`));
       process.exit(1);
@@ -284,17 +123,15 @@ program
   .action(async (options) => {
     const readline = await import("readline");
 
-    console.log(chalk.blue("Initializing multi-agent system..."));
+    console.log(chalk.blue("Initializing multi-agent system (V2)..."));
 
     try {
-      // Initialize services
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
-      const taskManager = createTaskManager(eventStore);
+      const system = await bootV2({
+        cwd: options.cwd ?? process.cwd(),
+      });
 
       // Create head manager
-      const headManager = await agentManager.getOrCreateHeadManager({
+      const headManager = await system.agentManager.getOrCreateHeadManager({
         cwd: options.cwd ?? process.cwd(),
       });
 
@@ -311,12 +148,7 @@ program
       // Handle Ctrl+C and SIGTERM to clean up child processes
       const cleanup = async () => {
         console.log(chalk.yellow("\nShutting down..."));
-        try { await agentManager.close(); } catch (err) {
-          console.error(`[cleanup] AgentManager close failed: ${err}`);
-        }
-        try { await eventStore.close(); } catch (err) {
-          console.error(`[cleanup] EventStore close failed: ${err}`);
-        }
+        await system.shutdown();
         rl.close();
         process.exit(0);
       };
@@ -329,26 +161,23 @@ program
 
           if (trimmed === "exit" || trimmed === "quit") {
             console.log(chalk.yellow("Goodbye!"));
-            await agentManager.close();
-            await eventStore.close();
+            await system.shutdown();
             rl.close();
             return;
           }
 
           if (trimmed === "/status") {
-            const agents = agentManager.list();
-            const tasks = taskManager.list();
+            const agents = system.agentManager.list();
             console.log();
             console.log(chalk.bold("System Status:"));
             console.log(`  Agents: ${agents.length} total, ${agents.filter((a) => a.state === "running").length} running`);
-            console.log(`  Tasks: ${tasks.length} total, ${tasks.filter((t) => t.status === "completed").length} completed`);
             console.log();
             prompt();
             return;
           }
 
           if (trimmed === "/agents") {
-            const agents = agentManager.list();
+            const agents = system.agentManager.list();
             console.log();
             if (agents.length === 0) {
               console.log(chalk.gray("No agents"));
@@ -362,29 +191,14 @@ program
             return;
           }
 
-          if (trimmed === "/tasks") {
-            const tasks = taskManager.list();
-            console.log();
-            if (tasks.length === 0) {
-              console.log(chalk.gray("No tasks"));
-            } else {
-              tasks.forEach((task) => {
-                printTask(task);
-                console.log();
-              });
-            }
-            prompt();
-            return;
-          }
-
           if (trimmed === "/hierarchy") {
-            const headManagers = agentManager.listHeadManagers();
+            const headManagers = system.agentManager.listHeadManagers();
             console.log();
             if (headManagers.length === 0) {
               console.log(chalk.gray("No agents"));
             } else {
               headManagers.forEach((hm) => {
-                printHierarchy(hm, (id) => agentManager.getChildren(id));
+                printHierarchy(hm, (id) => system.agentManager.getChildren(id));
                 console.log();
               });
             }
@@ -400,7 +214,7 @@ program
           try {
             process.stdout.write(chalk.green("Assistant: "));
 
-            for await (const update of agentManager.prompt(
+            for await (const update of system.agentManager.prompt(
               headManager.id,
               trimmed
             )) {
@@ -435,22 +249,21 @@ program
 // Status Command
 // ─────────────────────────────────────────────────────────────────
 
+// TODO: Read-only commands (status, agents, hierarchy) boot the full system via
+// bootV2(). This is heavier than necessary — a lightweight read-only boot mode
+// that only opens AgentStore (SQLite) without starting adapters would be ideal.
 program
   .command("status")
   .description("Show system status")
   .action(async () => {
     try {
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
-      const taskManager = createTaskManager(eventStore);
+      const system = await bootV2();
 
-      const agents = agentManager.list();
-      const tasks = taskManager.list();
+      const agents = system.agentManager.list();
 
       console.log();
       console.log(chalk.bold("Multi-Agent System Status"));
-      console.log("─".repeat(40));
+      console.log("-".repeat(40));
 
       console.log();
       console.log(chalk.bold("Agents:"));
@@ -459,16 +272,8 @@ program
       console.log(`  Stopped: ${chalk.gray(agents.filter((a) => a.state === "stopped").length)}`);
 
       console.log();
-      console.log(chalk.bold("Tasks:"));
-      console.log(`  Total: ${tasks.length}`);
-      console.log(`  Pending: ${chalk.gray(tasks.filter((t) => t.status === "pending").length)}`);
-      console.log(`  In Progress: ${chalk.yellow(tasks.filter((t) => t.status === "in_progress").length)}`);
-      console.log(`  Completed: ${chalk.green(tasks.filter((t) => t.status === "completed").length)}`);
-      console.log(`  Failed: ${chalk.red(tasks.filter((t) => t.status === "failed").length)}`);
 
-      console.log();
-
-      await eventStore.close();
+      await system.shutdown();
     } catch (error) {
       console.error(chalk.red(`Failed to get status: ${error}`));
       process.exit(1);
@@ -485,38 +290,28 @@ program
   .option("-s, --state <state>", "Filter by state (running, stopped)")
   .action(async (id, options) => {
     try {
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
+      const system = await bootV2();
 
       if (id) {
         // Show specific agent
-        const agent = agentManager.get(id);
+        const agent = system.agentManager.get(id);
         if (!agent) {
           console.error(chalk.red(`Agent not found: ${id}`));
-          await eventStore.close();
+          await system.shutdown();
           process.exit(1);
         }
 
         console.log();
         console.log(chalk.bold("Agent Details"));
-        console.log("─".repeat(40));
+        console.log("-".repeat(40));
         console.log(`  ID: ${agent.id}`);
         console.log(`  Session: ${agent.session_id}`);
         console.log(`  State: ${formatState(agent.state)}`);
         console.log(`  Task: ${agent.task ?? "No task"}`);
         console.log(`  Parent: ${agent.parent ?? "None (head manager)"}`);
-        console.log(`  Lineage: ${agent.lineage.length > 0 ? agent.lineage.join(" → ") : "None"}`);
         console.log(`  Created: ${formatTimestamp(agent.created_at)}`);
-        if (agent.started_at) {
-          console.log(`  Started: ${formatTimestamp(agent.started_at)}`);
-        }
-        if (agent.stopped_at) {
-          console.log(`  Stopped: ${formatTimestamp(agent.stopped_at)}`);
-          console.log(`  Stop Reason: ${agent.stop_reason ?? "Unknown"}`);
-        }
 
-        const children = agentManager.getChildren(id);
+        const children = system.agentManager.getChildren(id);
         if (children.length > 0) {
           console.log();
           console.log(chalk.bold("Children:"));
@@ -528,7 +323,7 @@ program
         console.log();
       } else {
         // List all agents
-        let agents = agentManager.list();
+        let agents = system.agentManager.list();
 
         if (options.state) {
           agents = agents.filter((a) => a.state === options.state);
@@ -539,7 +334,7 @@ program
           console.log(chalk.gray("No agents found"));
         } else {
           console.log(chalk.bold(`Agents (${agents.length}):`));
-          console.log("─".repeat(40));
+          console.log("-".repeat(40));
           agents.forEach((agent) => {
             printAgent(agent);
             console.log();
@@ -547,92 +342,9 @@ program
         }
       }
 
-      await eventStore.close();
+      await system.shutdown();
     } catch (error) {
       console.error(chalk.red(`Failed to list agents: ${error}`));
-      process.exit(1);
-    }
-  });
-
-// ─────────────────────────────────────────────────────────────────
-// Tasks Command
-// ─────────────────────────────────────────────────────────────────
-
-program
-  .command("tasks [id]")
-  .description("List tasks or show task details")
-  .option("-s, --status <status>", "Filter by status")
-  .action(async (id, options) => {
-    try {
-      const eventStore = await createEventStore({ inMemory: false });
-      const taskManager = createTaskManager(eventStore);
-
-      if (id) {
-        // Show specific task
-        const task = taskManager.get(id);
-        if (!task) {
-          console.error(chalk.red(`Task not found: ${id}`));
-          await eventStore.close();
-          process.exit(1);
-        }
-
-        console.log();
-        console.log(chalk.bold("Task Details"));
-        console.log("─".repeat(40));
-        console.log(`  ID: ${task.id}`);
-        console.log(`  Status: ${formatStatus(task.status)}`);
-        console.log(`  Description: ${task.description}`);
-        console.log(`  Created by: ${task.created_by}`);
-        if (task.assigned_agent) {
-          console.log(`  Assigned to: ${task.assigned_agent}`);
-        }
-        if (task.parent_task) {
-          console.log(`  Parent Task: ${task.parent_task}`);
-        }
-        console.log(`  Created: ${formatTimestamp(task.created_at)}`);
-        if (task.started_at) {
-          console.log(`  Started: ${formatTimestamp(task.started_at)}`);
-        }
-        if (task.completed_at) {
-          console.log(`  Completed: ${formatTimestamp(task.completed_at)}`);
-        }
-
-        if (task.subtasks && task.subtasks.length > 0) {
-          console.log();
-          console.log(chalk.bold("Subtasks:"));
-          task.subtasks.forEach((subtaskId) => {
-            const subtask = taskManager.get(subtaskId);
-            if (subtask) {
-              console.log(`  ${subtask.id} [${formatStatus(subtask.status)}]`);
-            }
-          });
-        }
-
-        console.log();
-      } else {
-        // List all tasks
-        let tasks = taskManager.list();
-
-        if (options.status) {
-          tasks = tasks.filter((t) => t.status === options.status);
-        }
-
-        console.log();
-        if (tasks.length === 0) {
-          console.log(chalk.gray("No tasks found"));
-        } else {
-          console.log(chalk.bold(`Tasks (${tasks.length}):`));
-          console.log("─".repeat(40));
-          tasks.forEach((task) => {
-            printTask(task);
-            console.log();
-          });
-        }
-      }
-
-      await eventStore.close();
-    } catch (error) {
-      console.error(chalk.red(`Failed to list tasks: ${error}`));
       process.exit(1);
     }
   });
@@ -646,37 +358,35 @@ program
   .description("Show agent hierarchy tree")
   .action(async (rootId) => {
     try {
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
+      const system = await bootV2();
 
       console.log();
       console.log(chalk.bold("Agent Hierarchy"));
-      console.log("─".repeat(40));
+      console.log("-".repeat(40));
       console.log();
 
       if (rootId) {
-        const agent = agentManager.get(rootId);
+        const agent = system.agentManager.get(rootId);
         if (!agent) {
           console.error(chalk.red(`Agent not found: ${rootId}`));
-          await eventStore.close();
+          await system.shutdown();
           process.exit(1);
         }
-        printHierarchy(agent, (id) => agentManager.getChildren(id));
+        printHierarchy(agent, (id) => system.agentManager.getChildren(id));
       } else {
-        const headManagers = agentManager.listHeadManagers();
+        const headManagers = system.agentManager.listHeadManagers();
         if (headManagers.length === 0) {
           console.log(chalk.gray("No agents found"));
         } else {
           headManagers.forEach((hm) => {
-            printHierarchy(hm, (id) => agentManager.getChildren(id));
+            printHierarchy(hm, (id) => system.agentManager.getChildren(id));
             console.log();
           });
         }
       }
 
       console.log();
-      await eventStore.close();
+      await system.shutdown();
     } catch (error) {
       console.error(chalk.red(`Failed to show hierarchy: ${error}`));
       process.exit(1);
@@ -718,11 +428,20 @@ program
       const path = await import("path");
       const os = await import("os");
 
-      const baseDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".multiagent");
-      const storagePath = path.join(baseDir, "store.json");
+      const baseDir = process.env.MACRO_AGENT_HOME || path.join(os.homedir(), ".macro-agent");
+      const dbFiles = ["agents.db", "inbox.db"];
+      let cleared = false;
 
-      if (fs.existsSync(storagePath)) {
-        fs.unlinkSync(storagePath);
+      for (const dbFile of dbFiles) {
+        const dbPath = path.join(baseDir, dbFile);
+        if (fs.existsSync(dbPath)) {
+          fs.unlinkSync(dbPath);
+          console.log(chalk.green(`Removed ${dbFile}`));
+          cleared = true;
+        }
+      }
+
+      if (cleared) {
         console.log(chalk.green("Data cleared successfully"));
       } else {
         console.log(chalk.gray("No data to clear"));
@@ -743,159 +462,38 @@ program
   .option("-a, --all", "Stop all running agents")
   .action(async (agentId, options) => {
     try {
-      const eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      const agentManager = createAgentManager(eventStore, messageRouter);
+      const system = await bootV2();
 
       if (options.all) {
-        const runningAgents = agentManager.list({ state: "running" });
+        const runningAgents = system.agentManager.list({ state: "running" });
         console.log(`Stopping ${runningAgents.length} agents...`);
 
         for (const agent of runningAgents) {
           try {
-            await agentManager.terminate(agent.id, "cancelled");
+            await system.agentManager.terminate(agent.id, "cancelled");
             console.log(chalk.green(`Stopped: ${agent.id}`));
           } catch (error) {
             console.error(chalk.red(`Failed to stop ${agent.id}: ${error}`));
           }
         }
       } else if (agentId) {
-        const agent = agentManager.get(agentId);
+        const agent = system.agentManager.get(agentId);
         if (!agent) {
           console.error(chalk.red(`Agent not found: ${agentId}`));
-          await eventStore.close();
+          await system.shutdown();
           process.exit(1);
         }
 
-        await agentManager.terminate(agentId, "cancelled");
+        await system.agentManager.terminate(agentId, "cancelled");
         console.log(chalk.green(`Stopped: ${agentId}`));
       } else {
         console.error(chalk.red("Please specify an agent ID or use --all"));
         process.exit(1);
       }
 
-      await eventStore.close();
+      await system.shutdown();
     } catch (error) {
       console.error(chalk.red(`Failed to stop agent: ${error}`));
-      process.exit(1);
-    }
-  });
-
-// ─────────────────────────────────────────────────────────────────
-// ACP Command
-// ─────────────────────────────────────────────────────────────────
-
-program
-  .command("acp")
-  .description("Run as an ACP-compliant agent (for use with acp-factory)")
-  .option("--cwd <path>", "Working directory for agents")
-  .action(async (options) => {
-    // Import and run the ACP server
-    // We dynamically import to avoid loading ACP dependencies in other commands
-    const { Readable } = await import("node:stream");
-    const { AgentSideConnection, ndJsonStream } = await import(
-      "@agentclientprotocol/sdk"
-    );
-    const { MacroAgent } = await import("../acp/macro-agent.js");
-
-    const defaultCwd = options.cwd ?? process.cwd();
-
-    let eventStore: Awaited<ReturnType<typeof createEventStore>> | null = null;
-    let agentManager: ReturnType<typeof createAgentManager> | null = null;
-
-    try {
-      // Initialize services
-      eventStore = await createEventStore({ inMemory: false });
-      const messageRouter = createMessageRouter(eventStore);
-      agentManager = createAgentManager(eventStore, messageRouter);
-      const taskManager = createTaskManager(eventStore);
-
-      // Create task backend from merged config
-      const acpMergedConfig = loadMergedConfig(defaultCwd);
-      const taskConfig = loadTaskConfigFromMerged(acpMergedConfig);
-      let acpTaskBackendShutdown: (() => Promise<void>) | undefined;
-      try {
-        const result = await createTaskBackend(taskConfig, eventStore);
-        acpTaskBackendShutdown = result.shutdown;
-      } catch {
-        // Fall back to memory if opentasks connection fails
-        try {
-          await createTaskBackend({ backend: { type: "memory" } }, eventStore);
-        } catch { /* non-critical */ }
-      }
-
-      // Create stdio streams for ACP communication
-      const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
-      const output = new WritableStream<Uint8Array>({
-        write(chunk) {
-          return new Promise((resolve, reject) => {
-            const canContinue = process.stdout.write(chunk, (err) => {
-              if (err) reject(err);
-              else if (canContinue) resolve();
-            });
-            if (!canContinue) {
-              process.stdout.once("drain", resolve);
-            }
-          });
-        },
-      });
-
-      const stream = ndJsonStream(output, input);
-
-      // Create ACP connection with MacroAgent
-      const connection = new AgentSideConnection(
-        (conn) =>
-          new MacroAgent(conn, {
-            agentManager: agentManager!,
-            eventStore: eventStore!,
-            taskManager,
-            defaultCwd,
-          }),
-        stream
-      );
-
-      // Handle graceful shutdown — best-effort, each step isolated
-      const cleanup = async () => {
-        if (agentManager) {
-          try { await agentManager.close(); } catch (err) {
-            console.error(`[cleanup] AgentManager close failed: ${err}`);
-          }
-        }
-        if (acpTaskBackendShutdown) {
-          try { await acpTaskBackendShutdown(); } catch (err) {
-            console.error(`[cleanup] Task backend shutdown failed: ${err}`);
-          }
-        }
-        if (eventStore) {
-          try { await eventStore.close(); } catch (err) {
-            console.error(`[cleanup] EventStore close failed: ${err}`);
-          }
-        }
-        process.exit(0);
-      };
-
-      process.on("SIGINT", cleanup);
-      process.on("SIGTERM", cleanup);
-
-      // Wait for connection to close
-      await connection.closed;
-      await cleanup();
-    } catch (error) {
-      console.error(`ACP server error: ${error}`);
-      if (agentManager) {
-        try {
-          await agentManager.close();
-        } catch {
-          // Ignore
-        }
-      }
-      if (eventStore) {
-        try {
-          await eventStore.close();
-        } catch {
-          // Ignore
-        }
-      }
       process.exit(1);
     }
   });

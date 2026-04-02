@@ -1,0 +1,292 @@
+/**
+ * InboxAdapter — Wraps agent-inbox for macro-agent's messaging needs.
+ *
+ * Embeds agent-inbox in-process (hybrid model):
+ * - macro-agent gets zero-latency event access via inbox.events
+ * - Agent MCP subprocesses connect via IPC socket
+ *
+ * Owns adapter-side policy enforcement:
+ * - Signal filtering (before delivery to handler)
+ * - Emission validation (before forwarding to inbox)
+ *
+ * @module adapters/inbox-adapter
+ */
+
+import {
+  createAgentInbox,
+  type AgentInbox,
+  type MessageContent,
+  type Message,
+  type Importance,
+} from "agent-inbox";
+import type {
+  InboxAdapter as IInboxAdapter,
+  InboxDeliveryEvent,
+  RegisterAgentOptions,
+  SendMessageOptions,
+  DeliveryHandler,
+  SignalFilterFn,
+  EmissionValidatorFn,
+} from "./types.js";
+
+// ─────────────────────────────────────────────────────────────────
+// Configuration
+// ─────────────────────────────────────────────────────────────────
+
+export interface InboxAdapterConfig {
+  /** Path to SQLite database for inbox persistence. */
+  sqlitePath?: string;
+  /** IPC socket path for agent subprocesses. */
+  socketPath: string;
+  /** Default scope for standalone agents (default: "default"). */
+  defaultScope?: string;
+  /** Federation config for cross-instance communication. */
+  federation?: {
+    systemId?: string;
+    peers?: Array<{
+      systemId: string;
+      url?: string;
+      meshPeerId?: string;
+    }>;
+    trust?: {
+      allowedServers?: string[];
+    };
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Implementation
+// ─────────────────────────────────────────────────────────────────
+
+export class DefaultInboxAdapter implements IInboxAdapter {
+  private inbox: AgentInbox | null = null;
+  private handlers: Set<DeliveryHandler> = new Set();
+  private signalFilters = new Map<string, SignalFilterFn>();
+  private emissionValidators = new Map<string, EmissionValidatorFn>();
+  private readonly config: InboxAdapterConfig;
+  private readonly defaultScope: string;
+
+  constructor(config: InboxAdapterConfig) {
+    this.config = config;
+    this.defaultScope = config.defaultScope ?? "default";
+  }
+
+  /**
+   * Initialize the embedded agent-inbox instance.
+   * Must be called before any other methods.
+   */
+  async initialize(): Promise<void> {
+    this.inbox = await createAgentInbox({
+      sqlitePath: this.config.sqlitePath,
+      enableFederation: !!this.config.federation?.peers?.length,
+      config: {
+        socketPath: this.config.socketPath,
+        scope: this.defaultScope,
+        // Federation config is passed through with compatible types
+        ...(this.config.federation && {
+          federation: {
+            systemId: this.config.federation.systemId,
+            peers: this.config.federation.peers,
+            trust: this.config.federation.trust
+              ? { allowedServers: this.config.federation.trust.allowedServers ?? [] }
+              : undefined,
+          } as any,
+        }),
+      },
+    });
+
+    // Subscribe to delivery events from agent-inbox
+    this.inbox.events.on(
+      "inbox.message",
+      (event: InboxDeliveryEvent) => {
+        this.handleDeliveryEvent(event);
+      }
+    );
+  }
+
+  get socketPath(): string {
+    return this.config.socketPath;
+  }
+
+  // ── Agent Lifecycle ──────────────────────────────────────────
+
+  async registerAgent(
+    agentId: string,
+    opts: RegisterAgentOptions
+  ): Promise<void> {
+    const inbox = this.requireInbox();
+    inbox.storage.putAgent({
+      agent_id: agentId,
+      display_name: opts.name,
+      scope: opts.scope,
+      status: "active",
+      metadata: {
+        role: opts.role,
+        ...opts.metadata,
+      },
+      registered_at: new Date().toISOString(),
+      last_active_at: new Date().toISOString(),
+    });
+  }
+
+  async deregisterAgent(agentId: string): Promise<void> {
+    const inbox = this.requireInbox();
+    const agent = inbox.storage.getAgent(agentId);
+    if (agent) {
+      inbox.storage.putAgent({
+        ...agent,
+        status: "offline",
+        last_active_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  // ── Messaging ────────────────────────────────────────────────
+
+  async send(
+    from: string,
+    to: string | string[],
+    content: MessageContent | string,
+    opts?: SendMessageOptions
+  ): Promise<string> {
+    const inbox = this.requireInbox();
+
+    // Normalize content
+    const normalizedContent: MessageContent =
+      typeof content === "string" ? { type: "text", text: content } : content;
+
+    // Build a partial message for validation
+    const validationMsg = {
+      content: normalizedContent,
+      metadata: {},
+    } as Message;
+
+    // Run emission validation (adapter-side) — first rejection wins
+    for (const validator of this.emissionValidators.values()) {
+      const rejection = validator(from, validationMsg);
+      if (rejection) {
+        throw new Error(`Emission rejected for ${from}: ${rejection}`);
+      }
+    }
+
+    // Route through agent-inbox
+    const message = await inbox.router.routeMessage({
+      from,
+      to,
+      payload: normalizedContent,
+      threadTag: opts?.threadTag,
+      importance: opts?.importance,
+      subject: opts?.subject,
+      inReplyTo: opts?.inReplyTo,
+      scope: opts?.scope,
+    });
+
+    return message.id;
+  }
+
+  // ── Delivery Subscription ────────────────────────────────────
+
+  onDelivery(handler: DeliveryHandler): void {
+    this.handlers.add(handler);
+  }
+
+  offDelivery(handler: DeliveryHandler): void {
+    this.handlers.delete(handler);
+  }
+
+  // ── Queries ──────────────────────────────────────────────────
+
+  async checkInbox(
+    agentId: string,
+    opts?: { unreadOnly?: boolean; limit?: number }
+  ): Promise<Message[]> {
+    const inbox = this.requireInbox();
+    return inbox.storage.getInbox(agentId, {
+      unreadOnly: opts?.unreadOnly,
+      limit: opts?.limit,
+    });
+  }
+
+  async readThread(threadTag: string, scope?: string): Promise<Message[]> {
+    const inbox = this.requireInbox();
+    return inbox.storage.getThread({
+      threadTag,
+      scope: scope ?? this.defaultScope,
+    });
+  }
+
+  // ── Policy Hooks ─────────────────────────────────────────────
+
+  setSignalFilter(filter: SignalFilterFn): void {
+    this.signalFilters.set("default", filter);
+  }
+
+  setEmissionValidator(validator: EmissionValidatorFn): void {
+    this.emissionValidators.set("default", validator);
+  }
+
+  // ── Multi-Team Policy Hooks ─────────────────────────────────
+
+  addSignalFilter(id: string, filter: SignalFilterFn): void {
+    this.signalFilters.set(id, filter);
+  }
+
+  removeSignalFilter(id: string): void {
+    this.signalFilters.delete(id);
+  }
+
+  addEmissionValidator(id: string, validator: EmissionValidatorFn): void {
+    this.emissionValidators.set(id, validator);
+  }
+
+  removeEmissionValidator(id: string): void {
+    this.emissionValidators.delete(id);
+  }
+
+  // ── Lifecycle ────────────────────────────────────────────────
+
+  async stop(): Promise<void> {
+    if (this.inbox) {
+      await this.inbox.stop();
+      this.inbox = null;
+    }
+    this.handlers.clear();
+  }
+
+  /** Get the underlying AgentInbox instance (for advanced use). */
+  getInbox(): AgentInbox {
+    return this.requireInbox();
+  }
+
+  // ── Private ──────────────────────────────────────────────────
+
+  private requireInbox(): AgentInbox {
+    if (!this.inbox) {
+      throw new Error(
+        "InboxAdapter not initialized. Call initialize() first."
+      );
+    }
+    return this.inbox;
+  }
+
+  private handleDeliveryEvent(event: InboxDeliveryEvent): void {
+    // Apply signal filters (adapter-side) — ALL must return true (AND logic)
+    for (const filter of this.signalFilters.values()) {
+      const allowed = filter(
+        event.message.sender_id,
+        event.agentId,
+        event.message
+      );
+      if (!allowed) return; // silently drop
+    }
+
+    // Dispatch to all registered handlers
+    for (const handler of this.handlers) {
+      try {
+        handler(event);
+      } catch {
+        // Handler errors should not break delivery to other handlers
+      }
+    }
+  }
+}

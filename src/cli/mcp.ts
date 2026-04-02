@@ -1,385 +1,305 @@
 #!/usr/bin/env node
 /**
- * MCP Server CLI Entry Point
+ * MCP Server Entry Point (V2)
  *
- * Runs the MCP server as a subprocess that agents can connect to.
- * Agent context is passed via environment variables.
+ * Runs as a subprocess inside each spawned agent. Provides macro-agent
+ * orchestration tools via MCP over stdio.
  *
- * Two modes:
- * - **Thin-client mode** (MACRO_SERVER_URL set): Tools forward to the main server
- *   via ephemeral MAP WebSocket connections. No local services needed.
- * - **Legacy mode** (MACRO_INSTANCE_ID set): Creates a full local service stack
- *   with shared SQLite. Used as fallback for backward compatibility.
+ * Lifecycle operations (spawn, terminate) go through the control socket
+ * to the main macro-agent process. Query operations read from the shared
+ * AgentStore (SQLite WAL). Messaging goes through agent-inbox IPC.
+ *
+ * Environment variables (set by AgentManagerV2.buildMcpServerConfig):
+ *   MACRO_AGENT_ID             — ID of the calling agent
+ *   MACRO_PARENT_ID            — Parent agent ID
+ *   MACRO_TASK_ID              — Task ID
+ *   MACRO_AGENT_CWD            — Working directory
+ *   MACRO_PERMISSION_MODE      — Permission mode
+ *   MACRO_STREAM_ID            — Workspace stream ID
+ *   MACRO_CONTROL_SOCKET_PATH  — Control socket for lifecycle RPC
+ *   INBOX_SOCKET_PATH          — agent-inbox IPC socket
+ *
+ * @module cli/mcp
  */
 
-import * as fs from "fs";
+import { AgentStore } from "../agent/agent-store.js";
+import { InboxClientAdapter } from "../adapters/inbox-client-adapter.js";
+import { DefaultTasksAdapter } from "../adapters/tasks-adapter.js";
+import { DefaultRoleRegistry } from "../roles/registry.js";
+import { ControlClient } from "../control/control-client.js";
+import { createMCPServerV2 } from "../mcp/mcp-server-v2.js";
+import type { ToolContext } from "../mcp/types.js";
+import type { AgentManager } from "../agent/agent-manager.js";
 import * as path from "path";
 import * as os from "os";
+import * as fs from "fs";
 
-// Debug logging to file (since stderr doesn't show up from MCP subprocess)
-const debugLogPath = path.join(os.tmpdir(), "macro-agent-mcp-debug.log");
-function debugLog(message: string) {
-  const timestamp = new Date().toISOString();
-  const line = `[${timestamp}] ${message}\n`;
-  fs.appendFileSync(debugLogPath, line);
-  console.error(message); // Also log to stderr in case it's visible
-}
+// ─────────────────────────────────────────────────────────────────
+// Read environment
+// ─────────────────────────────────────────────────────────────────
 
-// =============================================================================
-// Thin-Client Mode (MACRO_SERVER_URL)
-// =============================================================================
+const agentId = process.env.MACRO_AGENT_ID ?? "";
+const parentId = process.env.MACRO_PARENT_ID ?? "";
+const taskId = process.env.MACRO_TASK_ID ?? "";
+const agentCwd = process.env.MACRO_AGENT_CWD ?? process.cwd();
+const sessionId = process.env.MACRO_SESSION_ID ?? "";
+const lineage = process.env.MACRO_AGENT_LINEAGE
+  ? JSON.parse(process.env.MACRO_AGENT_LINEAGE)
+  : [];
 
-async function startThinClient() {
-  const agentId = process.env.MACRO_AGENT_ID!;
-  const taskId = process.env.MACRO_TASK_ID;
-  const agentCwd = process.env.MACRO_AGENT_CWD || process.cwd();
-  const serverUrl = process.env.MACRO_SERVER_URL!;
-  const lineageStr = process.env.MACRO_AGENT_LINEAGE || "[]";
-  const sessionId = process.env.MACRO_SESSION_ID || "";
-  const serverToken = process.env.MACRO_SERVER_TOKEN || "";
-  const agentToken = process.env.MACRO_AGENT_TOKEN || "";
+const baseDir =
+  process.env.MACRO_BASE_DIR ??
+  path.join(os.homedir(), ".macro-agent");
 
-  let lineage: string[];
-  try {
-    lineage = JSON.parse(lineageStr);
-  } catch {
-    lineage = [];
-  }
+const controlSocketPath =
+  process.env.MACRO_CONTROL_SOCKET_PATH ?? path.join(baseDir, "control.sock");
 
-  debugLog(`[MCP] Thin-client mode: agent=${agentId}, server=${serverUrl}`);
+const inboxSocketPath =
+  process.env.INBOX_SOCKET_PATH ?? path.join(baseDir, "inbox.sock");
 
-  const { createMCPServerThinClient } = await import("../mcp/mcp-server.js");
-  const { mapCall } = await import("../mcp/map-client.js");
+// ─────────────────────────────────────────────────────────────────
+// Build tool context
+// ─────────────────────────────────────────────────────────────────
 
-  const context = {
-    agent_id: agentId,
-    session_id: sessionId,
-    task_id: taskId ?? undefined,
-    lineage,
-    cwd: agentCwd,
-    agent_token: agentToken || undefined,
-  };
+const context: ToolContext = {
+  agent_id: agentId,
+  session_id: sessionId,
+  task_id: taskId || undefined,
+  lineage,
+  cwd: agentCwd,
+};
 
-  // Also pass permission mode for spawn_agent forwarding
-  const permissionMode = process.env.MACRO_PERMISSION_MODE;
-
-  // Build mapCall options with server token for WebSocket auth
-  const callOptions = serverToken ? { serverToken } : undefined;
-
-  const mcpServer = createMCPServerThinClient(
-    context,
-    async (method, params, options) => {
-      // Merge auth options with per-call options
-      const mergedOptions = { ...callOptions, ...options };
-      // Inject permission_mode into spawn_agent calls
-      if (method === "_macro/mcp/spawn_agent" && permissionMode) {
-        const p = (params ?? {}) as Record<string, unknown>;
-        p.permission_mode = permissionMode;
-        return mapCall(serverUrl, method, p, mergedOptions);
-      }
-      return mapCall(serverUrl, method, params, mergedOptions);
-    }
-  );
-
-  await mcpServer.start();
-
-  // Handle graceful shutdown
-  const shutdown = async () => {
-    await mcpServer.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-}
-
-// =============================================================================
-// Legacy Mode (MACRO_INSTANCE_ID)
-// =============================================================================
-
-async function startLegacy() {
-  const agentId = process.env.MACRO_AGENT_ID!;
-  const taskId = process.env.MACRO_TASK_ID;
-  const agentCwd = process.env.MACRO_AGENT_CWD || process.cwd();
-  const instanceId = process.env.MACRO_INSTANCE_ID!;
-  const baseDir = process.env.MACRO_BASE_DIR;
-
-  debugLog(`[MCP] Legacy mode: agent=${agentId}, instanceId=${instanceId}`);
-  debugLog(`[MCP] Debug log file: ${debugLogPath}`);
-
-  const { createEventStore } = await import("../store/event-store.js");
-  const { createAgentManager } = await import("../agent/agent-manager.js");
-  const { createTaskManager } = await import("../task/task-manager.js");
-  const { createMessageRouter } = await import("../router/message-router.js");
-  const { createMCPServer } = await import("../mcp/mcp-server.js");
-  const { createTaskBackend, loadTaskConfigFromEnv } = await import("../task/backend/index.js");
-  const { UnifiedTaskToolProvider } = await import("../task/backend/unified-tool-provider.js");
-  const {
-    createActivityWatcher,
-    subscribeAgentToEvents,
-    MONITOR_DEFAULT_EVENT_TYPES,
-  } = await import("../activity/index.js");
-  const {
-    createWakeHandler,
-    createSessionProviderFromAgentManager,
-  } = await import("../agent/wake.js");
-
-  // Initialize services with shared file-based storage
-  const eventStore = await createEventStore({ inMemory: false, instanceId, baseDir });
-  debugLog(`[MCP] EventStore created, path: ${eventStore.instancePath}`);
-  const messageRouter = createMessageRouter(eventStore);
-  const agentManager = createAgentManager(eventStore, messageRouter);
-  const taskManager = createTaskManager(eventStore);
-
-  // Create task backend from env config
-  const taskConfig = loadTaskConfigFromEnv();
-  let taskBackend: import("../task/backend/types.js").TaskBackend | undefined;
-  let taskToolProvider: InstanceType<typeof UnifiedTaskToolProvider> | undefined;
-  let openTasksClient: import("../task/backend/opentasks/client.js").OpenTasksClient | undefined;
-
-  try {
-    const result = await createTaskBackend(taskConfig, eventStore);
-    taskBackend = result.backend;
-    openTasksClient = result.openTasksClient;
-
-    taskToolProvider = new UnifiedTaskToolProvider(
-      taskBackend,
-      () => ({ agent_id: agentId! }),
-      openTasksClient
-    );
-    debugLog(`[MCP] Task backend created: ${taskConfig.backend.type}`);
-  } catch (err) {
-    debugLog(`[MCP] Failed to create task backend: ${err}. Falling back to legacy TaskManager only.`);
-  }
-
-  // Get agent lineage for authorization checks
-  let agent = eventStore.getAgent(agentId);
-  const allAgentsInitial = eventStore.listAgents();
-  debugLog(`[MCP] Initial check: agent found = ${!!agent}, total agents in store = ${allAgentsInitial.length}`);
-  if (allAgentsInitial.length > 0) {
-    debugLog(`[MCP] Agents in store: ${allAgentsInitial.map(a => a.id).join(', ')}`);
-  }
-
-  if (!agent) {
-    for (let i = 0; i < 10; i++) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      await eventStore.reload();
-      agent = eventStore.getAgent(agentId);
-      const allAgentsRetry = eventStore.listAgents();
-      debugLog(`[MCP] Retry ${i + 1}: agent found = ${!!agent}, total agents = ${allAgentsRetry.length}`);
-      if (agent) {
-        debugLog(`[MCP] Found agent ${agentId} after ${i + 1} retries`);
-        break;
-      }
-    }
-  } else {
-    debugLog(`[MCP] Agent ${agentId} found immediately (no retry needed)`);
-  }
-
-  if (!agent) {
-    debugLog(`[MCP] Warning: Agent ${agentId} not found in store after retries. ` +
-      `Continuing with limited context. This may affect authorization checks.`);
-    const events = eventStore.query({ limit: 50 });
-    debugLog(`[MCP] Events in store (${events.length}): ${events.map(e => `${e.type}:${e.payload?.agent_id || e.source?.agent_id}`).join(', ')}`);
-  }
-
-  const lineage = agent?.lineage ?? [];
-
-  // Create ActivityWatcher for wait_for_activity MCP tool
-  const sessionProvider = createSessionProviderFromAgentManager(agentManager);
-  const wakeHandler = createWakeHandler(sessionProvider, agentManager);
-  const activityWatcher = createActivityWatcher(
-    {
-      listAgents: () => agentManager.list(),
-      getAgent: (id) => agentManager.get(id),
-    },
-    wakeHandler
-  );
-
-  // Wire EventStore events to ActivityWatcher
-  eventStore.onAgentChange((changedAgentId, changedAgent) => {
-    if (!activityWatcher.isRunning()) return;
-    if (!changedAgent) return;
-
-    const eventType = changedAgent.state === "spawning" ? "agent_spawned"
-      : changedAgent.state === "running" ? "agent_started"
-      : changedAgent.state === "stopped" ? "agent_terminated"
-      : "agent_updated";
-
-    activityWatcher.processActivity({
-      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      type: eventType,
-      source: { agent_id: changedAgentId, role: changedAgent.role },
-      timestamp: Date.now(),
-      details: { state: changedAgent.state },
-    });
-  });
-
-  eventStore.onTaskChange((changedTaskId, task) => {
-    if (!activityWatcher.isRunning()) return;
-    if (!task) return;
-
-    const eventType = task.status === "pending" ? "task_created"
-      : task.status === "assigned" ? "task_assigned"
-      : task.status === "in_progress" ? "task_started"
-      : task.status === "completed" ? "task_completed"
-      : task.status === "failed" ? "task_failed"
-      : "task_updated";
-
-    activityWatcher.processActivity({
-      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      type: eventType,
-      source: { agent_id: task.assigned_agent ?? undefined, task_id: changedTaskId },
-      timestamp: Date.now(),
-      details: { status: task.status },
-    });
-  });
-
-  activityWatcher.start();
-
-  // Auto-subscribe Monitor agents to health events when they spawn
-  agentManager.onLifecycleEvent((event) => {
-    if (event.type === "spawned") {
-      const spawnedAgent = event.agent;
-      if (spawnedAgent.role === "monitor" || spawnedAgent.role?.startsWith("monitor.")) {
-        subscribeAgentToEvents(
-          activityWatcher,
-          spawnedAgent.id,
-          MONITOR_DEFAULT_EVENT_TYPES,
-          undefined,
-          "high"
-        );
-        debugLog(`[MCP] Auto-subscribed Monitor ${spawnedAgent.id} to health events`);
-      }
-    }
-  });
-
-  // Read team config from EventStore (scoped by MACRO_TEAM_NAME for multi-team)
-  let teamTaskMode: string | undefined;
-  const myTeamName = process.env.MACRO_TEAM_NAME;
-  const teamEvents = eventStore.query({ type: "status", limit: 50 });
-  const teamConfigEvent = teamEvents.find((e) => {
-    const tc = e.payload?.team_config as Record<string, unknown> | undefined;
-    if (!tc) return false;
-    // If agent has a team name, find that specific team's config
-    if (myTeamName) return tc.teamName === myTeamName;
-    // Fallback: first team_config found (backward compat)
-    return true;
-  });
-  if (teamConfigEvent?.payload?.team_config) {
-    const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
-    teamTaskMode = tc.taskMode as string | undefined;
-    debugLog(`[MCP] Found team config: team=${tc.teamName}, strategy=${tc.strategy}, taskMode=${tc.taskMode}`);
-  }
-
-  // Register team roles in local RoleRegistry
-  const roleRegistry = agentManager.getRoleRegistry();
-  let integrationStrategy: import("../workspace/strategies/types.js").IntegrationStrategy | undefined;
-
-  if (teamConfigEvent?.payload?.team_config) {
-    const tc = teamConfigEvent.payload.team_config as Record<string, unknown>;
-
-    const roles = tc.roles as Record<string, { name: string; capabilities: string[] }> | undefined;
-    if (roles) {
-      for (const roleDef of Object.values(roles)) {
-        roleRegistry.registerRole(roleDef as import("../roles/types.js").RoleDefinition);
-      }
-      debugLog(`[MCP] Registered ${Object.keys(roles).length} team roles in RoleRegistry`);
-    }
-
-    const strategyName = tc.strategy as string | undefined;
-    if (strategyName) {
-      // Queue strategy requires merge queue which is only available in the main process.
-      // Skip it so the worker handler falls through to MERGE_REQUEST signal emission,
-      // which the main server's TeamRuntime polls for and submits to the real merge queue.
-      if (strategyName === "queue") {
-        debugLog(`[MCP] Skipping queue strategy in subprocess (no merge queue available). ` +
-          `Worker done() will emit MERGE_REQUEST signal for main process to handle.`);
-      } else {
-        try {
-          const { defaultStrategyRegistry } = await import("../workspace/strategies/registry.js");
-          integrationStrategy = defaultStrategyRegistry.get(
-            strategyName,
-            tc.strategyConfig as Record<string, unknown> | undefined
-          );
-          debugLog(`[MCP] Instantiated '${strategyName}' integration strategy`);
-        } catch (err) {
-          debugLog(`[MCP] Failed to instantiate strategy '${strategyName}': ${err}`);
-        }
-      }
-    }
-  }
-
-  const mcpServer = createMCPServer(
-    {
-      agent_id: agentId,
-      session_id: agent?.session_id ?? "",
-      task_id: taskId ?? undefined,
-      lineage,
-      cwd: agentCwd,
-    },
-    {
-      eventStore,
-      agentManager,
-      taskManager,
-      messageRouter,
-      activityWatcher,
-      taskMode: teamTaskMode as "push" | "pull" | undefined,
-      roleRegistry,
-      integrationStrategy,
-      taskBackend,
-      taskToolProvider,
-    }
-  );
-
-  await mcpServer.start();
-
-  // Handle graceful shutdown
-  process.on("SIGINT", async () => {
-    activityWatcher.stop();
-    try { openTasksClient?.disconnect(); } catch { /* ignore */ }
-    await mcpServer.close();
-    await eventStore.close();
-    process.exit(0);
-  });
-
-  process.on("SIGTERM", async () => {
-    activityWatcher.stop();
-    try { openTasksClient?.disconnect(); } catch { /* ignore */ }
-    await mcpServer.close();
-    await eventStore.close();
-    process.exit(0);
-  });
-}
-
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────
 // Main
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────
 
 async function main() {
-  const agentId = process.env.MACRO_AGENT_ID;
-  const serverUrl = process.env.MACRO_SERVER_URL;
-  const instanceId = process.env.MACRO_INSTANCE_ID;
+  // AgentStore — shared SQLite (WAL mode = concurrent readers)
+  const agentStore = new AgentStore(path.join(baseDir, "agents.db"));
 
-  if (!agentId) {
-    console.error("Error: MACRO_AGENT_ID environment variable is required");
-    process.exit(1);
-  }
-
+  // Control client — lifecycle RPC to main process (with auto-reconnect)
+  const controlClient = new ControlClient(controlSocketPath, { reconnect: true });
   try {
-    if (serverUrl) {
-      // Thin-client mode: forward tool calls to main server via MAP WebSocket
-      await startThinClient();
-    } else if (instanceId) {
-      // Legacy mode: create full local service stack with shared SQLite
-      await startLegacy();
-    } else {
-      console.error("Error: Either MACRO_SERVER_URL or MACRO_INSTANCE_ID environment variable is required");
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error(`Failed to start MCP server: ${error}`);
-    process.exit(1);
+    await controlClient.connect();
+  } catch {
+    // Control socket may not be available — lifecycle tools will fail
+    console.error("[mcp] Warning: control socket not available at", controlSocketPath);
   }
+
+  // InboxAdapter — client-only, connects to main process inbox via IPC
+  const inboxAdapter = new InboxClientAdapter(inboxSocketPath);
+  try {
+    await inboxAdapter.connect();
+  } catch {
+    console.error("[mcp] Warning: inbox socket not available at", inboxSocketPath);
+  }
+
+  // TasksAdapter
+  const tasksAdapter = new DefaultTasksAdapter();
+  try {
+    await tasksAdapter.connect();
+  } catch {
+    // Non-fatal
+  }
+
+  const roleRegistry = new DefaultRoleRegistry();
+  const taskMode = (process.env.MACRO_TASK_MODE as "push" | "pull") || undefined;
+
+  // Build AgentManager that delegates lifecycle to control socket,
+  // reads queries from shared AgentStore
+  const agentManager = createControlBackedAgentManager(
+    agentStore,
+    controlClient
+  );
+
+  // Create and start MCP server
+  const mcpServer = createMCPServerV2(context, {
+    agentStore,
+    agentManager,
+    inboxAdapter,
+    tasksAdapter,
+    roleRegistry,
+    taskMode,
+  });
+
+  await mcpServer.start();
+
+  // Send periodic health checks to control server
+  const healthInterval = setInterval(async () => {
+    if (controlClient.connected) {
+      try {
+        await controlClient.healthCheck(agentId, process.pid);
+      } catch { /* best effort */ }
+    }
+  }, 15000); // Every 15 seconds
+  healthInterval.unref();
+
+  // Cleanup on exit
+  process.on("SIGINT", async () => {
+    clearInterval(healthInterval);
+    await mcpServer.close();
+    controlClient.disconnect();
+    await inboxAdapter.stop();
+    tasksAdapter.disconnect();
+    agentStore.close();
+    process.exit(0);
+  });
 }
 
-main();
+// ─────────────────────────────────────────────────────────────────
+// Control-Backed AgentManager
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * AgentManager that reads from shared AgentStore for queries
+ * and delegates lifecycle operations to the control socket.
+ */
+function createControlBackedAgentManager(
+  agentStore: AgentStore,
+  controlClient: ControlClient
+): AgentManager {
+  function recordToAgent(r: any) {
+    return {
+      id: r.id,
+      name: r.name,
+      session_id: "",
+      parent: r.parent_id,
+      lineage: r.lineage,
+      state: r.state,
+      stop_reason: r.stop_reason,
+      task: r.task,
+      task_id: r.task_id,
+      role: r.role,
+      config: r.config ?? {},
+      cwd: r.cwd,
+      plan: [],
+      metadata: r.metadata,
+      created_at: r.created_at,
+    };
+  }
+
+  return {
+    // ── Lifecycle (via control socket) ──────────────────────
+    async spawn(options: any) {
+      if (!controlClient.connected) {
+        throw new Error(
+          "Cannot spawn: control socket not connected. " +
+          "Main macro-agent process may not be running."
+        );
+      }
+
+      const result = await controlClient.spawn({
+        task: options.task,
+        parent: options.parent ?? agentId, // Default parent = calling agent
+        role: options.role,
+        cwd: options.cwd,
+        team_instance: options.team_instance,
+        customPrompt: options.customPrompt,
+      });
+
+      // Read fresh agent record from shared store
+      const agent = agentStore.getAgent(result.agent_id);
+
+      return {
+        id: result.agent_id,
+        session_id: result.session_id,
+        agent: agent ? recordToAgent(agent) : { id: result.agent_id, state: "running" },
+        session: null as any, // Session lives in main process
+      };
+    },
+
+    async terminate(targetId: string, reason: string) {
+      if (!controlClient.connected) {
+        throw new Error("Cannot terminate: control socket not connected.");
+      }
+      await controlClient.terminate(targetId, reason);
+    },
+
+    // ── Queries (from shared AgentStore) ────────────────────
+    get(id: string) {
+      const r = agentStore.getAgent(id);
+      return r ? recordToAgent(r) : null;
+    },
+
+    list(filter?: any) {
+      const records = agentStore.listAgents(
+        filter?.state ? { state: filter.state } : undefined
+      );
+      let result = records.map(recordToAgent);
+      if (filter?.parent !== undefined) {
+        result = result.filter((a: any) =>
+          filter.parent === null ? !a.parent : a.parent === filter.parent
+        );
+      }
+      if (filter?.headManagersOnly) {
+        result = result.filter((a: any) => !a.parent);
+      }
+      return result;
+    },
+
+    getChildren(pid: string) {
+      return agentStore.getChildren(pid).map(recordToAgent);
+    },
+
+    getHierarchy(rootId: string, options?: any) {
+      const r = agentStore.getAgent(rootId);
+      if (!r) return null;
+
+      function buildTree(id: string, depth: number): any {
+        const agent = agentStore.getAgent(id);
+        if (!agent) return null;
+        const maxD = options?.depth;
+        const children =
+          maxD !== undefined && depth >= maxD
+            ? []
+            : agentStore
+                .getChildren(id)
+                .map((c) => buildTree(c.id, depth + 1))
+                .filter(Boolean);
+        return { agent: recordToAgent(agent), children };
+      }
+
+      const root = buildTree(rootId, 0);
+      if (!root) return null;
+
+      function count(n: any): number {
+        return 1 + (n.children?.reduce((s: number, c: any) => s + count(c), 0) ?? 0);
+      }
+      function maxD(n: any, d: number): number {
+        if (!n.children?.length) return d;
+        return Math.max(...n.children.map((c: any) => maxD(c, d + 1)));
+      }
+
+      return { root, depth: maxD(root, 0), totalAgents: count(root) };
+    },
+
+    // ── Stubs for unused methods in MCP context ─────────────
+    hasActiveSession() { return false; },
+    getSession() { return null; },
+    isPrompting() { return false; },
+    async prompt() { throw new Error("prompt not available in MCP subprocess"); },
+    async continueAgent() { throw new Error("continueAgent not available in MCP subprocess"); },
+    async forkAgent() { throw new Error("forkAgent not available in MCP subprocess"); },
+    async resume() { throw new Error("resume not available in MCP subprocess"); },
+    listHeadManagers() { return agentStore.listAgents({ parent_id: null }).map(recordToAgent); },
+    async getOrCreateHeadManager() { throw new Error("getOrCreateHeadManager not available in MCP subprocess"); },
+    async promptUntilDone() { throw new Error("promptUntilDone not available in MCP subprocess"); },
+    async supportsInjection() { return false; },
+    isProcessRunning() { return false; },
+    respondToPermission() { return false; },
+    cancelPermission() { return false; },
+    setPermissionMode() { return false; },
+    getPermissionMode() { return null; },
+    getRoleRegistry() { return new DefaultRoleRegistry(); },
+    setSpawnInterceptor() {},
+    setOpenTasksSocketPath() {},
+    setMailServices() {},
+    onLifecycleEvent() { return () => {}; },
+    async close() {},
+  } as any as AgentManager;
+}
+
+main().catch((err) => {
+  console.error(`[mcp] Fatal error: ${err}`);
+  process.exit(1);
+});

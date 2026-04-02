@@ -1,11 +1,10 @@
 /**
- * Lifecycle Module
+ * Lifecycle Module (V2)
  *
  * Agent lifecycle management including done() signaling,
- * cleanup status detection, and role-specific handlers.
+ * cleanup status detection, and cascade termination.
  *
  * @module lifecycle
- * @see s-32xs Self-Cleaning Workers spec
  */
 
 // =============================================================================
@@ -51,7 +50,6 @@ export {
   hasUncommittedChanges,
   getUncommittedFiles,
   getCurrentBranch,
-  getPendingMessageCount,
 
   // Helper functions
   commitChanges,
@@ -59,30 +57,6 @@ export {
   // Types
   type CleanupDependencies,
 } from "./cleanup.js";
-
-// =============================================================================
-// Handlers
-// =============================================================================
-
-export {
-  // Registry and dispatch
-  createHandlerRegistry,
-  getHandler,
-  dispatchDone,
-
-  // Individual handlers
-  handleWorkerDone,
-  handleIntegratorDone,
-  handleMonitorDone,
-  handleGenericDone,
-
-  // Types
-  type AllHandlerDeps,
-  type WorkerHandlerDeps,
-  type IntegratorHandlerDeps,
-  type MonitorHandlerDeps,
-  type GenericHandlerDeps,
-} from "./handlers/index.js";
 
 // =============================================================================
 // Cascade Termination

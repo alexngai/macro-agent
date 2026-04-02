@@ -1,280 +1,151 @@
 /**
- * Metrics Module
+ * Metrics collection for macro-agent.
  *
- * Computes throughput, utilization, and error metrics from EventStore data.
- * No new events needed — aggregates existing spawn, terminate, task, and
- * status events.
+ * Single entry point: `collectMetrics()` gathers agent, task, and
+ * system metrics into a point-in-time snapshot.
  *
  * @module metrics/metrics
  */
 
-import type { EventStore } from "../store/event-store.js";
-import type { Agent } from "../store/types/index.js";
+import type { MacroAgentSystemV2 } from "../boot-v2.js";
+import type {
+  AgentMetrics,
+  TaskMetrics,
+  SystemMetrics,
+  MetricsSnapshot,
+} from "./types.js";
 
-// =============================================================================
-// Types
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────
 
-export interface ThroughputMetrics {
-  /** Tasks completed in the time window */
-  tasksCompleted: number;
+/** Threshold for considering an agent unhealthy (ms). */
+const UNHEALTHY_THRESHOLD_MS = 60_000;
 
-  /** Tasks failed in the time window */
-  tasksFailed: number;
-
-  /** Total tasks created in the time window */
-  tasksCreated: number;
-
-  /** Average completion time in ms (completed tasks only) */
-  avgCompletionTimeMs: number | null;
-
-  /** Tasks per minute (completed) */
-  completedPerMinute: number;
-
-  /** Time window start */
-  windowStart: number;
-
-  /** Time window end */
-  windowEnd: number;
-}
-
-export interface UtilizationMetrics {
-  /** Currently running agents */
-  activeAgents: number;
-
-  /** Total agents spawned in the time window */
-  totalSpawned: number;
-
-  /** Total agents stopped in the time window */
-  totalStopped: number;
-
-  /** Agents by role */
-  agentsByRole: Record<string, number>;
-
-  /** Agents by state */
-  agentsByState: Record<string, number>;
-}
-
-export interface ErrorMetrics {
-  /** Total errors in the time window */
-  totalErrors: number;
-
-  /** Errors by type */
-  errorsByType: Record<string, number>;
-
-  /** Recent errors (last N) */
-  recentErrors: ErrorEntry[];
-}
-
-export interface ErrorEntry {
-  /** Timestamp */
-  timestamp: number;
-
-  /** Agent ID */
-  agentId: string;
-
-  /** Error type/category */
-  type: string;
-
-  /** Error summary */
-  summary: string;
-}
-
-// =============================================================================
-// Implementation
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────
 
 /**
- * Compute throughput metrics for a time window.
+ * Collect a point-in-time metrics snapshot from the running system.
  *
- * @param eventStore - EventStore to query
- * @param windowMs - Time window in milliseconds (default: 5 minutes)
+ * @param system - The booted MacroAgentSystemV2 instance.
+ * @param startTime - `Date.now()` value captured at boot, used for uptime.
  */
-export function getThroughputMetrics(
-  eventStore: EventStore,
-  windowMs: number = 5 * 60 * 1000
-): ThroughputMetrics {
-  const now = Date.now();
-  const windowStart = now - windowMs;
+export async function collectMetrics(
+  system: MacroAgentSystemV2,
+  startTime: number
+): Promise<MetricsSnapshot> {
+  const [agents, tasks, systemMetrics] = await Promise.all([
+    collectAgentMetrics(system),
+    collectTaskMetrics(system),
+    collectSystemMetrics(system, startTime),
+  ]);
 
-  const taskEvents = eventStore.query({
-    type: "task",
-    after: windowStart,
-  });
+  return {
+    timestamp: new Date().toISOString(),
+    agents,
+    tasks,
+    system: systemMetrics,
+  };
+}
 
-  let tasksCompleted = 0;
-  let tasksFailed = 0;
-  let tasksCreated = 0;
-  let totalCompletionTimeMs = 0;
-  let completedWithTime = 0;
+// ─────────────────────────────────────────────────────────────────
+// Agent Metrics
+// ─────────────────────────────────────────────────────────────────
 
-  for (const event of taskEvents) {
-    const action = event.payload?.action as string | undefined;
+async function collectAgentMetrics(
+  system: MacroAgentSystemV2
+): Promise<AgentMetrics> {
+  const agents = system.agentStore.listAgents();
 
-    if (action === "created") {
-      tasksCreated++;
-    } else if (action === "completed") {
-      tasksCompleted++;
+  const byState: Record<string, number> = {};
+  const byRole: Record<string, number> = {};
+  const byTeam: Record<string, number> = {};
 
-      // Try to compute completion time
-      const taskId = event.payload?.task_id as string | undefined;
-      if (taskId) {
-        const task = eventStore.getTask(taskId);
-        if (task?.created_at && task?.completed_at) {
-          totalCompletionTimeMs += task.completed_at - task.created_at;
-          completedWithTime++;
-        }
-      }
-    } else if (action === "failed") {
-      tasksFailed++;
+  for (const agent of agents) {
+    // Count by state
+    byState[agent.state] = (byState[agent.state] ?? 0) + 1;
+
+    // Count by role
+    byRole[agent.role] = (byRole[agent.role] ?? 0) + 1;
+
+    // Count by team (skip agents without a team)
+    if (agent.team) {
+      byTeam[agent.team] = (byTeam[agent.team] ?? 0) + 1;
     }
   }
 
-  const windowMinutes = windowMs / 60000;
-  const completedPerMinute =
-    windowMinutes > 0 ? tasksCompleted / windowMinutes : 0;
+  const unhealthy =
+    system.controlServer.getUnhealthyAgents(UNHEALTHY_THRESHOLD_MS).length;
 
   return {
-    tasksCompleted,
-    tasksFailed,
-    tasksCreated,
-    avgCompletionTimeMs:
-      completedWithTime > 0
-        ? Math.round(totalCompletionTimeMs / completedWithTime)
-        : null,
-    completedPerMinute: Math.round(completedPerMinute * 100) / 100,
-    windowStart,
-    windowEnd: now,
+    total: agents.length,
+    byState,
+    byRole,
+    byTeam,
+    unhealthy,
   };
 }
 
-/**
- * Compute utilization metrics (current snapshot + window).
- *
- * @param eventStore - EventStore to query
- * @param windowMs - Time window for spawn/stop counts (default: 5 minutes)
- */
-export function getUtilizationMetrics(
-  eventStore: EventStore,
-  windowMs: number = 5 * 60 * 1000
-): UtilizationMetrics {
-  const now = Date.now();
-  const windowStart = now - windowMs;
+// ─────────────────────────────────────────────────────────────────
+// Task Metrics
+// ─────────────────────────────────────────────────────────────────
 
-  // Current agents
-  const allAgents = eventStore.listAgents();
-  const activeAgents = allAgents.filter(
-    (a: Agent) => a.state === "running" || a.state === "spawning"
-  );
-
-  // Agents by role
-  const agentsByRole: Record<string, number> = {};
-  for (const agent of activeAgents) {
-    const role = agent.role ?? "unknown";
-    agentsByRole[role] = (agentsByRole[role] ?? 0) + 1;
+async function collectTaskMetrics(
+  system: MacroAgentSystemV2
+): Promise<TaskMetrics | null> {
+  // If the tasks adapter is not connected, return null
+  if (!system.tasksAdapter.connected) {
+    return null;
   }
 
-  // Agents by state
-  const agentsByState: Record<string, number> = {};
-  for (const agent of allAgents) {
-    agentsByState[agent.state] = (agentsByState[agent.state] ?? 0) + 1;
+  try {
+    const [allTasks, readyTasks] = await Promise.all([
+      system.tasksAdapter.listTasks(),
+      system.tasksAdapter.queryReady(),
+    ]);
+
+    const byStatus: Record<string, number> = {};
+    let blocked = 0;
+
+    for (const task of allTasks) {
+      byStatus[task.status] = (byStatus[task.status] ?? 0) + 1;
+      if (task.status === "blocked") {
+        blocked++;
+      }
+    }
+
+    return {
+      byStatus,
+      ready: readyTasks.length,
+      blocked,
+    };
+  } catch {
+    // opentasks daemon may have disconnected — non-fatal
+    return null;
   }
-
-  // Count spawn and terminate events in window
-  const spawnEvents = eventStore.query({
-    type: "spawn",
-    after: windowStart,
-  });
-  const terminateEvents = eventStore.query({
-    type: "stop",
-    after: windowStart,
-  });
-
-  return {
-    activeAgents: activeAgents.length,
-    totalSpawned: spawnEvents.length,
-    totalStopped: terminateEvents.length,
-    agentsByRole,
-    agentsByState,
-  };
 }
 
-/**
- * Compute error metrics for a time window.
- *
- * @param eventStore - EventStore to query
- * @param windowMs - Time window in milliseconds (default: 30 minutes)
- * @param maxRecent - Maximum recent errors to return (default: 20)
- */
-export function getErrorMetrics(
-  eventStore: EventStore,
-  windowMs: number = 30 * 60 * 1000,
-  maxRecent: number = 20
-): ErrorMetrics {
-  const now = Date.now();
-  const windowStart = now - windowMs;
+// ─────────────────────────────────────────────────────────────────
+// System Metrics
+// ─────────────────────────────────────────────────────────────────
 
-  // Query status events that indicate errors
-  const statusEvents = eventStore.query({
-    type: "status",
-    after: windowStart,
-  });
+async function collectSystemMetrics(
+  system: MacroAgentSystemV2,
+  startTime: number
+): Promise<SystemMetrics> {
+  const uptime = Date.now() - startTime;
+  const triggerQueueDepth =
+    system.triggerSystem.queue.getAgentsWithEvents().length;
 
-  const errors: ErrorEntry[] = [];
-  const errorsByType: Record<string, number> = {};
-
-  for (const event of statusEvents) {
-    const statusType = event.payload?.status_type as string | undefined;
-    if (statusType !== "failed") continue;
-
-    const agentId =
-      (event.source as { agent_id?: string })?.agent_id ?? "unknown";
-    const summary =
-      (event.payload?.summary as string) ?? "Unknown error";
-    const errorType =
-      (event.payload?.details as Record<string, unknown>)?.signal as string ??
-      "agent_failed";
-
-    errors.push({
-      timestamp: event.timestamp,
-      agentId,
-      type: errorType,
-      summary,
-    });
-
-    errorsByType[errorType] = (errorsByType[errorType] ?? 0) + 1;
-  }
-
-  // Also count task failures
-  const taskEvents = eventStore.query({
-    type: "task",
-    after: windowStart,
-  });
-
-  for (const event of taskEvents) {
-    if (event.payload?.action !== "failed") continue;
-
-    const agentId =
-      (event.source as { agent_id?: string })?.agent_id ?? "unknown";
-    const taskId = (event.payload?.task_id as string) ?? "unknown";
-
-    errors.push({
-      timestamp: event.timestamp,
-      agentId,
-      type: "task_failed",
-      summary: `Task ${taskId} failed`,
-    });
-
-    errorsByType["task_failed"] = (errorsByType["task_failed"] ?? 0) + 1;
-  }
-
-  // Sort by timestamp descending and limit
-  errors.sort((a, b) => b.timestamp - a.timestamp);
-  const recentErrors = errors.slice(0, maxRecent);
+  // CronService.list() returns all enabled jobs
+  const cronJobs = await system.triggerSystem.cronService.list();
+  const cronJobCount = cronJobs.length;
 
   return {
-    totalErrors: errors.length,
-    errorsByType,
-    recentErrors,
+    uptime,
+    triggerQueueDepth,
+    cronJobCount,
   };
 }

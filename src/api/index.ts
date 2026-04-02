@@ -1,6 +1,8 @@
 /**
- * API module exports
+ * REST API public exports.
+ *
+ * @module api
  */
 
-export * from "./types.js";
-export * from "./server.js";
+export { createApiServer } from "./server.js";
+export type { ApiServer, ApiServerConfig, HealthResponse, ErrorResponse } from "./types.js";

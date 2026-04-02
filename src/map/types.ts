@@ -1,416 +1,244 @@
 /**
- * MAP (Multi-Agent Protocol) Core Types
+ * MAP Sidecar Types
  *
- * This module defines the core addressing and messaging types for MAP integration.
- * These types replace the channel-based addressing in MessageRouter with
- * MAP-native hierarchical addressing.
+ * Configuration, interfaces, and wire format types for the MAP hub sidecar.
+ * The sidecar connects macro-agent to an OpenHive MAP hub for agent observability,
+ * trajectory reporting, task bridging, and cross-swarm coordination.
  *
- * @see specs/s-5qir_map_integration_for_macro_agent.md
+ * @module map/types
  */
 
-import type { AgentId, TaskId } from "../store/types/index.js";
+import type { AgentManager } from "../agent/agent-manager.js";
+import type { AgentStore } from "../agent/agent-store.js";
+import type { InboxAdapter, TasksAdapter } from "../adapters/types.js";
 
 // =============================================================================
-// ID Types
+// Configuration
 // =============================================================================
 
-/**
- * Scope identifier for MAP scopes (equivalent to topics/channels).
- * Scopes are explicitly created containers for agent communication.
- */
-export type ScopeId = string;
+export interface MAPSidecarConfig {
+  /** MAP hub WebSocket URL (e.g., "ws://localhost:8080" or "wss://hub.openhive.dev") */
+  server: string;
 
-// =============================================================================
-// Address Types
-// =============================================================================
+  /** Authentication token (appended as ?token= query param) */
+  token?: string;
 
-/**
- * Direct address targeting a single agent.
- */
-export interface AgentAddress {
-  agent: AgentId;
-}
+  /** MAP scope for broadcasting events (default: "swarm:macro-agent") */
+  scope?: string;
 
-/**
- * Direct address targeting multiple agents.
- */
-export interface AgentsAddress {
-  agents: AgentId[];
-}
+  /** System ID for federation (default: "macro-agent") */
+  systemId?: string;
 
-/**
- * Scope-based address targeting all members of a scope.
- */
-export interface ScopeAddress {
-  scope: ScopeId;
-}
+  /** Opaque credential for server-driven auth (verified mode) */
+  credential?: string;
 
-/**
- * Role-based address targeting agents by role.
- * Optionally scoped to a specific scope.
- */
-export interface RoleAddress {
-  role: string;
-  /** Optional scope to limit role resolution */
-  within?: ScopeId;
-}
+  /** Agent name for MAP registration (default: "macro-agent-sidecar") */
+  agentName?: string;
 
-/**
- * Address targeting the sender's parent agent.
- */
-export interface ParentAddress {
-  parent: true;
-}
+  /** Trajectory sync level */
+  trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
 
-/**
- * Address targeting the sender's direct children.
- */
-export interface ChildrenAddress {
-  children: true;
-  /** Max depth (1 = direct children only, default: 1) */
-  depth?: number;
-}
+  /** Mesh transport (agentic-mesh P2P) */
+  mesh?: {
+    enabled?: boolean;
+    peerId?: string;
+  };
 
-/**
- * Address targeting the sender's ancestors (parent, grandparent, etc.).
- */
-export interface AncestorsAddress {
-  ancestors: true;
-  /** Max depth (default: Infinity) */
-  depth?: number;
-}
+  /** Reconnection settings (SDK-level) */
+  reconnection?: {
+    enabled?: boolean;
+    maxRetries?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+  };
 
-/**
- * Address targeting the sender's descendants (children, grandchildren, etc.).
- */
-export interface DescendantsAddress {
-  descendants: true;
-  /** Max depth (default: Infinity) */
-  depth?: number;
-}
-
-/**
- * Address targeting the sender's siblings (agents with same parent).
- */
-export interface SiblingsAddress {
-  siblings: true;
-}
-
-/**
- * Broadcast address targeting all agents in the system.
- */
-export interface BroadcastAddress {
-  broadcast: true;
-}
-
-/**
- * Task-based address (macro-agent extension).
- * Routes to the agent assigned to the specified task.
- */
-export interface TaskAddress {
-  task: TaskId;
+  /** Slow reconnect interval after SDK retries exhausted (ms, default: 60000) */
+  reconnectIntervalMs?: number;
 }
 
 // =============================================================================
-// Federation Address Types
+// Dependencies
 // =============================================================================
 
-/**
- * System identifier for federated systems.
- * Format: `<domain>/<system>/<instance>`
- * Example: `example.com/macro-agent/prod-east`
- */
-export type SystemId = string;
-
-/**
- * Address targeting an agent in a federated system.
- * Used for cross-system message routing.
- */
-export interface FederatedAgentAddress {
-  /** Target system identifier */
-  system: SystemId;
-  /** Agent ID within the target system */
-  agent: AgentId;
-}
-
-/**
- * Address targeting a scope in a federated system.
- * Used for cross-system scope-based messaging.
- */
-export interface FederatedScopeAddress {
-  /** Target system identifier */
-  system: SystemId;
-  /** Scope ID within the target system */
-  scope: ScopeId;
-}
-
-/**
- * Union of all federated address types.
- */
-export type FederatedAddress = FederatedAgentAddress | FederatedScopeAddress;
-
-/**
- * Union of all hierarchical address types.
- */
-export type HierarchicalAddress =
-  | ParentAddress
-  | ChildrenAddress
-  | AncestorsAddress
-  | DescendantsAddress
-  | SiblingsAddress;
-
-/**
- * MAP Address type for message routing.
- *
- * Addresses specify where messages should be delivered. They replace
- * the channel-based addressing in the legacy MessageRouter.
- *
- * Address types:
- * - Direct: { agent } or { agents } - target specific agent(s)
- * - Structural: { scope } or { role } - target by scope or role
- * - Hierarchical: { parent }, { children }, { ancestors }, { descendants }, { siblings }
- * - Broadcast: { broadcast: true } - all agents
- * - Extension: { task } - macro-agent specific task addressing
- * - Federated: { system, agent } or { system, scope } - cross-system addressing
- */
-export type Address =
-  // Direct addressing
-  | AgentAddress
-  | AgentsAddress
-  // Structural addressing
-  | ScopeAddress
-  | RoleAddress
-  // Hierarchical addressing (relative to sender)
-  | HierarchicalAddress
-  // Broadcast
-  | BroadcastAddress
-  // Extension (macro-agent specific)
-  | TaskAddress
-  // Federated addressing (cross-system)
-  | FederatedAddress;
-
-// =============================================================================
-// Type Guards
-// =============================================================================
-
-/**
- * Check if address targets a single agent.
- */
-export function isAgentAddress(addr: Address): addr is AgentAddress {
-  return "agent" in addr;
-}
-
-/**
- * Check if address targets multiple agents.
- */
-export function isAgentsAddress(addr: Address): addr is AgentsAddress {
-  return "agents" in addr;
-}
-
-/**
- * Check if address targets a scope.
- */
-export function isScopeAddress(addr: Address): addr is ScopeAddress {
-  return "scope" in addr;
-}
-
-/**
- * Check if address targets by role.
- */
-export function isRoleAddress(addr: Address): addr is RoleAddress {
-  return "role" in addr;
-}
-
-/**
- * Check if address targets parent.
- */
-export function isParentAddress(addr: Address): addr is ParentAddress {
-  return "parent" in addr;
-}
-
-/**
- * Check if address targets children.
- */
-export function isChildrenAddress(addr: Address): addr is ChildrenAddress {
-  return "children" in addr;
-}
-
-/**
- * Check if address targets ancestors.
- */
-export function isAncestorsAddress(addr: Address): addr is AncestorsAddress {
-  return "ancestors" in addr;
-}
-
-/**
- * Check if address targets descendants.
- */
-export function isDescendantsAddress(
-  addr: Address
-): addr is DescendantsAddress {
-  return "descendants" in addr;
-}
-
-/**
- * Check if address targets siblings.
- */
-export function isSiblingsAddress(addr: Address): addr is SiblingsAddress {
-  return "siblings" in addr;
-}
-
-/**
- * Check if address is hierarchical (relative to sender).
- */
-export function isHierarchicalAddress(
-  addr: Address
-): addr is HierarchicalAddress {
-  return (
-    isParentAddress(addr) ||
-    isChildrenAddress(addr) ||
-    isAncestorsAddress(addr) ||
-    isDescendantsAddress(addr) ||
-    isSiblingsAddress(addr)
-  );
-}
-
-/**
- * Check if address is a broadcast.
- */
-export function isBroadcastAddress(addr: Address): addr is BroadcastAddress {
-  return "broadcast" in addr;
-}
-
-/**
- * Check if address targets a task (macro-agent extension).
- */
-export function isTaskAddress(addr: Address): addr is TaskAddress {
-  return "task" in addr;
-}
-
-/**
- * Check if address is a direct address (agent or agents).
- */
-export function isDirectAddress(
-  addr: Address
-): addr is AgentAddress | AgentsAddress {
-  return isAgentAddress(addr) || isAgentsAddress(addr);
-}
-
-/**
- * Check if address is structural (scope or role).
- */
-export function isStructuralAddress(
-  addr: Address
-): addr is ScopeAddress | RoleAddress {
-  return isScopeAddress(addr) || isRoleAddress(addr);
-}
-
-/**
- * Check if address targets an agent in a federated system.
- */
-export function isFederatedAgentAddress(
-  addr: Address
-): addr is FederatedAgentAddress {
-  return "system" in addr && "agent" in addr;
-}
-
-/**
- * Check if address targets a scope in a federated system.
- */
-export function isFederatedScopeAddress(
-  addr: Address
-): addr is FederatedScopeAddress {
-  return "system" in addr && "scope" in addr;
-}
-
-/**
- * Check if address is a federated address (cross-system).
- */
-export function isFederatedAddress(addr: Address): addr is FederatedAddress {
-  return "system" in addr;
+export interface MAPSidecarDeps {
+  agentManager: AgentManager;
+  agentStore: AgentStore;
+  inboxAdapter: InboxAdapter;
+  tasksAdapter: TasksAdapter;
 }
 
 // =============================================================================
-// Message Options
+// Sidecar Interface
 // =============================================================================
 
-/**
- * Message priority levels.
- * Higher priority messages may wake sleeping agents.
- * Re-exported from router/types.ts to maintain single source of truth.
- */
-import type { MessagePriority } from "../router/types.js";
-export type { MessagePriority };
+export interface MAPSidecar {
+  /** Start the sidecar (connect to hub, subscribe to events) */
+  start(): Promise<void>;
 
-/**
- * Delivery hint for message routing.
- *
- * - queue: Add to recipient's message queue (default)
- * - inject: Attempt to inject into active session
- * - interrupt: Interrupt current activity to deliver
- */
-export type DeliveryHint = "queue" | "inject" | "interrupt";
+  /** Stop the sidecar (disconnect, unsubscribe) */
+  stop(): Promise<void>;
 
-/**
- * Options for sending messages.
- */
-export interface SendOptions {
-  /** Message priority (default: 'normal') */
-  priority?: MessagePriority;
+  /** Whether the sidecar is connected to the hub */
+  readonly connected: boolean;
 
-  /** Delivery hint for the router (default: 'queue') */
-  delivery?: DeliveryHint;
-
-  /** Correlation ID for request/response tracking */
-  correlationId?: string;
-
-  /** Optional timeout in milliseconds */
-  timeoutMs?: number;
+  /** Report a trajectory checkpoint manually */
+  reportCheckpoint(
+    checkpoint: TrajectoryCheckpointPayload,
+  ): Promise<TrajectoryCheckpointResult | null>;
 }
 
 // =============================================================================
-// Utility Functions
+// Trajectory Wire Format
 // =============================================================================
 
 /**
- * Get a human-readable description of an address.
+ * Trajectory checkpoint payload — matches cc-swarm wire format.
+ * Top-level fields are snake_case per the OpenHive trajectory protocol.
  */
-export function describeAddress(addr: Address): string {
-  // Check federated addresses first (they have 'system' + another field)
-  if (isFederatedAgentAddress(addr))
-    return `federated:${addr.system}/agent:${addr.agent}`;
-  if (isFederatedScopeAddress(addr))
-    return `federated:${addr.system}/scope:${addr.scope}`;
-  if (isAgentAddress(addr)) return `agent:${addr.agent}`;
-  if (isAgentsAddress(addr)) return `agents:[${addr.agents.join(", ")}]`;
-  if (isScopeAddress(addr)) return `scope:${addr.scope}`;
-  if (isRoleAddress(addr))
-    return addr.within ? `role:${addr.role}@${addr.within}` : `role:${addr.role}`;
-  if (isParentAddress(addr)) return "parent";
-  if (isChildrenAddress(addr))
-    return addr.depth ? `children(depth=${addr.depth})` : "children";
-  if (isAncestorsAddress(addr))
-    return addr.depth ? `ancestors(depth=${addr.depth})` : "ancestors";
-  if (isDescendantsAddress(addr))
-    return addr.depth ? `descendants(depth=${addr.depth})` : "descendants";
-  if (isSiblingsAddress(addr)) return "siblings";
-  if (isBroadcastAddress(addr)) return "broadcast";
-  if (isTaskAddress(addr)) return `task:${addr.task}`;
-  return "unknown";
+export interface TrajectoryCheckpointPayload {
+  /** Checkpoint ID (e.g., "<sessionId>-step<N>") */
+  id: string;
+  /** Session identifier */
+  session_id: string;
+  /** Agent name (e.g., "macro-agent-sidecar") */
+  agent: string;
+  /** Git branch (nullable) */
+  branch: string | null;
+  /** Files touched in this checkpoint period */
+  files_touched: string[];
+  /** Total checkpoint count in session */
+  checkpoints_count: number;
+  /** Token usage metrics (when sync level >= "metrics") */
+  token_usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_tokens?: number;
+    cache_read_tokens?: number;
+    api_call_count?: number;
+  };
+  /** Additional metadata */
+  metadata?: {
+    project?: string;
+    projectPath?: string;
+    template?: string;
+    firstPrompt?: string;
+    phase?: string;
+    [key: string]: unknown;
+  };
 }
 
-/**
- * Normalize an address by applying default values.
- */
-export function normalizeAddress<T extends Address>(addr: T): T {
-  if (isChildrenAddress(addr) && addr.depth === undefined) {
-    return { ...addr, depth: 1 } as T;
-  }
-  if (isDescendantsAddress(addr) && addr.depth === undefined) {
-    return { ...addr, depth: Infinity } as T;
-  }
-  if (isAncestorsAddress(addr) && addr.depth === undefined) {
-    return { ...addr, depth: Infinity } as T;
-  }
-  return addr;
+/** Response from trajectory/checkpoint extension call */
+export interface TrajectoryCheckpointResult {
+  ok: boolean;
+  resource_id?: string;
+  created?: boolean;
+  checkpoint_id?: string;
+}
+
+/** Inbound content request from the hub */
+export interface TrajectoryContentRequest {
+  request_id: string;
+  checkpoint_id: string;
+}
+
+// =============================================================================
+// Coordination Wire Format
+// =============================================================================
+
+/** Inbound task assignment from hub */
+export interface CoordinationTaskAssign {
+  title: string;
+  description?: string;
+  assigned_to?: string;
+  assigned_by: string;
+  priority?: string;
+  context?: Record<string, unknown>;
+  deadline?: string;
+}
+
+/** Inbound task status update from hub */
+export interface CoordinationTaskStatus {
+  task_id: string;
+  status: string;
+  progress?: number;
+  result?: unknown;
+  error?: string;
+}
+
+/** Inbound context share from hub */
+export interface CoordinationContextShare {
+  hive_id?: string;
+  source_swarm_id: string;
+  context_type: string;
+  data: unknown;
+  target_swarm_ids?: string[];
+  ttl_seconds?: number;
+}
+
+/** Inbound message from hub */
+export interface CoordinationMessage {
+  hive_id?: string;
+  from_swarm_id: string;
+  to_swarm_id: string;
+  content_type: string;
+  content: unknown;
+  reply_to?: string;
+  metadata?: Record<string, unknown>;
+}
+
+// =============================================================================
+// Internal Bridge Types
+// =============================================================================
+
+/** Task bridge interface for emitting task events to MAP */
+export interface TaskBridge {
+  taskCreated(task: {
+    id: string;
+    title: string;
+    status: string;
+    assignee?: string;
+  }): Promise<void>;
+  taskStatusChanged(
+    taskId: string,
+    previous: string,
+    current: string,
+    agentId?: string,
+  ): Promise<void>;
+  taskAssigned(taskId: string, assignee: string): Promise<void>;
+}
+
+/** Trajectory reporter interface */
+export interface TrajectoryReporter {
+  reportCheckpoint(
+    checkpoint: TrajectoryCheckpointPayload,
+  ): Promise<TrajectoryCheckpointResult | null>;
+  stop(): void;
+}
+
+// =============================================================================
+// MAP Server Types (inbound connections)
+// =============================================================================
+
+/** Configuration for the MAP server that accepts inbound connections */
+export interface MapServerConfig {
+  /** Port for MAP WebSocket server (default: 3002) */
+  port?: number;
+  /** Host to bind (default: "127.0.0.1") */
+  host?: string;
+  /** WebSocket path (default: "/map") */
+  path?: string;
+  /** Server name for MAP protocol (default: "macro-agent") */
+  name?: string;
+}
+
+/** MAP server instance for accepting inbound MAP connections */
+export interface MAPServerInstance {
+  /** Start the server */
+  start(): Promise<void>;
+  /** Stop the server */
+  stop(): Promise<void>;
+  /** Get the WebSocket URL */
+  getUrl(): string;
+  /** Get number of active connections */
+  getConnectionCount(): number;
 }

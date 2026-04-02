@@ -1,0 +1,6 @@
+cache.db
+cache.db-wal
+cache.db-shm
+write.lock
+daemon.sock
+daemon.lock
