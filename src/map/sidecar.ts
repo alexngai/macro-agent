@@ -102,7 +102,7 @@ export function createMAPSidecar(
       );
 
       const url = buildUrl();
-      const connectOpts = {
+      const connectOpts: Record<string, unknown> = {
         name: agentName,
         role: "sidecar",
         scopes: [scope],
@@ -148,9 +148,9 @@ export function createMAPSidecar(
       if (!isConnected) {
       // Try open mode first (single call connect+register).
       // If server requires auth, fall back to verified mode.
-      if (config.credential) {
+      if (config.credential && (AgentConnection as any).createConnection) {
         // Verified mode: connectOnly → check authRequired → authenticate → register
-        connection = await AgentConnection.createConnection(url, connectOpts);
+        connection = await (AgentConnection as any).createConnection(url, connectOpts);
         const result = await connection.connectOnly();
         if (result.authRequired) {
           const method = result.authRequired.methods?.[0] ?? "x-agent-iam";
@@ -162,7 +162,7 @@ export function createMAPSidecar(
         await connection.register();
       } else {
         // Open mode: single call connect+register
-        connection = await AgentConnection.connect(url, connectOpts);
+        connection = await (AgentConnection as any).connect(url, connectOpts);
       }
       isConnected = true;
       } // end if (!isConnected)
