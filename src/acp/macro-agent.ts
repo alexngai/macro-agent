@@ -34,6 +34,7 @@ import type { MacroAgentSystemV2 } from "../boot-v2.js";
 import { SessionMapper } from "./session-mapper.js";
 import { ACPError } from "./types.js";
 import type { MacroAgentInitConfig } from "./types.js";
+import type { TrajectoryCheckpointPayload } from "../map/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration
@@ -146,6 +147,9 @@ export function createMacroAgent(
   const sessionMapper = new SessionMapper();
 
   const defaultCwd = initConfig?.defaultCwd ?? process.cwd();
+
+  // Per-session checkpoint counter for trajectory IDs
+  let checkpointCounter = 0;
 
   // ── Helpers ──────────────────────────────────────────────────
 
@@ -457,11 +461,75 @@ export function createMacroAgent(
 
       sessionMapper.setProcessing(params.sessionId, true);
 
+      // Track data for trajectory checkpoint
+      const filesTouched = new Set<string>();
+      let toolCallCount = 0;
+      const promptStartTime = Date.now();
+
+      // Update agent state to "busy" in MAP server (if available)
+      try {
+        const mapServer = (system as any).mapServerInstance;
+        if (mapServer) {
+          // Find the agent's MAP ID and update state
+          const agents = mapServer.agents?.list?.() ?? [];
+          const mapAgent = agents.find(
+            (a: any) => a.metadata?.localAgentId === agentId,
+          );
+          if (mapAgent) {
+            mapServer.agents.updateState(mapAgent.id, "busy");
+          }
+        }
+      } catch {
+        // Best effort
+      }
+
       try {
         // Stream updates from agentManager.prompt()
         const updates = agentManager.prompt(agentId, message);
 
         for await (const update of updates) {
+          // Track tool calls and files for trajectory checkpoint.
+          // Also emit task bridge events for TaskCreate/TaskUpdate tool calls
+          // (fills the gap left by cc-swarm's PostToolUse hooks).
+          if ("sessionUpdate" in update) {
+            const su = update as any;
+            if (su.sessionUpdate === "tool_call") {
+              toolCallCount++;
+              // Extract file paths from tool inputs
+              const input = su.rawInput as Record<string, unknown> | undefined;
+              if (input?.file_path) filesTouched.add(input.file_path as string);
+              if (input?.filePath) filesTouched.add(input.filePath as string);
+              if (input?.path) filesTouched.add(input.path as string);
+            }
+
+            // Emit task bridge events when tool results complete
+            if (su.sessionUpdate === "tool_call_update" && su.output !== undefined) {
+              const toolName = su.title ?? "";
+              const sidecar = (system as any).mapSidecar;
+              if (sidecar?.connected && toolName) {
+                if (toolName === "TaskCreate" || toolName.includes("TaskCreate")) {
+                  // Task was created — bridge to MAP
+                  try {
+                    const taskData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `task-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: {
+                        phase: "active",
+                        event: "task.created",
+                        task: taskData,
+                      },
+                    }).catch(() => {});
+                  } catch { /* ignore parse errors */ }
+                }
+              }
+            }
+          }
 
           // Handle permission requests from the underlying agent.
           // When the agent is in interactive mode, it yields
@@ -518,12 +586,51 @@ export function createMacroAgent(
           }
         }
 
+        // Emit trajectory checkpoint after prompt completes.
+        // This fills the gap left by cc-swarm's Stop hook which doesn't
+        // fire for programmatic sessions.
+        const sidecar = (system as any).mapSidecar;
+        if (sidecar?.connected) {
+          checkpointCounter++;
+          const checkpoint: TrajectoryCheckpointPayload = {
+            id: `${params.sessionId}-step${checkpointCounter}`,
+            session_id: params.sessionId,
+            agent: agentId,
+            branch: null, // Could be enriched with git info
+            files_touched: Array.from(filesTouched),
+            checkpoints_count: checkpointCounter,
+            metadata: {
+              phase: "active",
+              project: defaultCwd.split("/").pop() ?? "",
+              duration_ms: Date.now() - promptStartTime,
+              toolCallCount,
+            },
+          };
+          sidecar.reportCheckpoint(checkpoint).catch(() => {});
+        }
+
         return { stopReason: "end_turn" };
       } catch (err) {
         // If prompt fails, still return a valid response
         return { stopReason: "cancelled" };
       } finally {
         sessionMapper.setProcessing(params.sessionId, false);
+
+        // Update agent state back to "idle" in MAP server
+        try {
+          const mapServer = (system as any).mapServerInstance;
+          if (mapServer) {
+            const agents = mapServer.agents?.list?.() ?? [];
+            const mapAgent = agents.find(
+              (a: any) => a.metadata?.localAgentId === agentId,
+            );
+            if (mapAgent) {
+              mapServer.agents.updateState(mapAgent.id, "idle");
+            }
+          }
+        } catch {
+          // Best effort
+        }
       }
     },
 

@@ -147,6 +147,7 @@ export function createAgentManagerV2(
   const lifecycleListeners = new Set<AgentLifecycleCallback>();
   let spawnInterceptor: SpawnInterceptor | null = null;
   let isShuttingDown = false;
+  let mapServerUrl: string | undefined;
 
   // ── Helpers ──────────────────────────────────────────────────
 
@@ -424,6 +425,18 @@ export function createAgentManagerV2(
       const env: Record<string, string> = {
         ...agentConfig?.env,
       };
+
+      // Configure cc-swarm to connect to macro-agent's local MAP server.
+      // These env vars are read by cc-swarm hooks in the Claude Code process
+      // (not the MCP subprocess), so they must be in the agent process env.
+      if (mapServerUrl) {
+        env.SWARM_MAP_SERVER = mapServerUrl;
+        env.SWARM_MAP_ENABLED = "true";
+        env.SWARM_MAP_SCOPE = `swarm:${agentId}`;
+        env.SWARM_SESSIONLOG_ENABLED = "true";
+        env.SWARM_SESSIONLOG_SYNC = "metrics";
+      }
+
       handle = await AgentFactory.spawn(agentType, {
         permissionMode,
         env,
@@ -490,10 +503,12 @@ export function createAgentManagerV2(
         })) ?? []),
       ];
 
-      const agentMeta =
-        permissionMode === "interactive"
-          ? { claudeCode: { options: { settingSources: [] } } }
-          : undefined;
+      // Build agentMeta with optional cc-swarm hooks
+      let agentMeta: Record<string, any> | undefined;
+
+      if (permissionMode === "interactive") {
+        agentMeta = { claudeCode: { options: { settingSources: [] } } };
+      }
 
       // Create session
       const session = await handle.createSession(effectiveCwd, {
@@ -1291,6 +1306,10 @@ export function createAgentManagerV2(
     // No-op: opentasks client auto-discovers socket
   }
 
+  function setMapServerUrl(url: string): void {
+    mapServerUrl = url;
+  }
+
   function setMailServices(): void {
     // No-op: agent-inbox handles conversation tracking
   }
@@ -1348,6 +1367,7 @@ export function createAgentManagerV2(
     setSpawnInterceptor: setSpawnInterceptorFn,
     getRoleRegistry,
     setOpenTasksSocketPath,
+    setMapServerUrl,
     setMailServices,
     close,
   } as AgentManager;

@@ -393,6 +393,10 @@ export async function bootV2(
         },
       );
       await mapServerInstance.start();
+
+      // Tell AgentManager the MAP server URL so spawned agents' cc-swarm
+      // hooks connect to this local server instead of an external hub.
+      agentManager.setMapServerUrl(mapServerInstance.getUrl());
     } catch (err) {
       console.warn(
         `[boot-v2] MAP server failed to start: ${(err as Error).message}`,

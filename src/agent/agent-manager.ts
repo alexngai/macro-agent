@@ -266,6 +266,13 @@ export interface AgentManager {
    */
   setOpenTasksSocketPath(socketPath: string): void;
 
+  /**
+   * Set the MAP server URL for propagation to child agents via SWARM_MAP_SERVER.
+   * When set, spawned agents with cc-swarm hooks will connect to macro-agent's
+   * local MAP server instead of directly to an external hub.
+   */
+  setMapServerUrl(url: string): void;
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   /**

@@ -178,6 +178,27 @@ export function createMAPServerInstance(
       }
     };
 
+    // ── Trajectory ─────────────────────────────────────────────────
+    // Receives trajectory checkpoints from cc-swarm agents connected
+    // to this MAP server. Forwards upstream to OpenHive via the sidecar.
+    handlers["trajectory/checkpoint"] = async (params: any) => {
+      const checkpoint = params?.checkpoint;
+      if (!checkpoint) return { ok: false, error: "missing checkpoint" };
+
+      // Forward to the sidecar for upstream delivery to OpenHive
+      const sidecar = (deps.system as any)?.mapSidecar;
+      if (sidecar?.connected) {
+        try {
+          const result = await sidecar.reportCheckpoint(checkpoint);
+          return result ?? { ok: true };
+        } catch {
+          return { ok: true, note: "forwarding failed, received locally" };
+        }
+      }
+
+      return { ok: true, note: "received locally, no upstream sidecar" };
+    };
+
     // ── Ping ──────────────────────────────────────────────────────
     handlers["ping"] = async () => ({ pong: true });
 
