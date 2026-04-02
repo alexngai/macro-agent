@@ -35,6 +35,7 @@ import { SessionMapper } from "./session-mapper.js";
 import { ACPError } from "./types.js";
 import type { MacroAgentInitConfig } from "./types.js";
 import type { TrajectoryCheckpointPayload } from "../map/types.js";
+import { execSync } from "node:child_process";
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration
@@ -148,8 +149,28 @@ export function createMacroAgent(
 
   const defaultCwd = initConfig?.defaultCwd ?? process.cwd();
 
-  // Per-session checkpoint counter for trajectory IDs
+  // Per-session state for trajectory tracking
   let checkpointCounter = 0;
+  let firstPrompt: string | null = null;
+  const sessionStartedAt = new Date().toISOString();
+
+  // Git info (cached — read once per session)
+  let gitInfo: { branch: string | null; commitHash: string | null; remoteUrl: string | null } | null = null;
+  function getGitInfo(cwd: string): { branch: string | null; commitHash: string | null; remoteUrl: string | null } {
+    if (gitInfo) return gitInfo;
+    try {
+      const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, timeout: 3000 }).toString().trim() || null;
+      const commitHash = execSync("git rev-parse HEAD", { cwd, timeout: 3000 }).toString().trim() || null;
+      let remoteUrl: string | null = null;
+      try {
+        remoteUrl = execSync("git remote get-url origin", { cwd, timeout: 3000 }).toString().trim() || null;
+      } catch { /* no remote */ }
+      gitInfo = { branch, commitHash, remoteUrl };
+    } catch {
+      gitInfo = { branch: null, commitHash: null, remoteUrl: null };
+    }
+    return gitInfo;
+  }
 
   // ── Helpers ──────────────────────────────────────────────────
 
@@ -405,6 +426,17 @@ export function createMacroAgent(
         headManager.id,
       );
 
+      // Annotate sessionlog with swarm metadata (best effort)
+      try {
+        const { annotateSession } = await import("../integrations/sessionlog.js");
+        annotateSession(cwd, {
+          swarmId: headManager.id,
+          scope: "macro-agent",
+        });
+      } catch {
+        // sessionlog not available — non-fatal
+      }
+
       return {
         sessionId: mapping.acpSessionId,
       };
@@ -461,16 +493,21 @@ export function createMacroAgent(
 
       sessionMapper.setProcessing(params.sessionId, true);
 
+      // Capture first prompt for trajectory metadata (used as session description in OpenHive UI)
+      if (!firstPrompt) {
+        firstPrompt = message.slice(0, 200);
+      }
+
       // Track data for trajectory checkpoint
       const filesTouched = new Set<string>();
       let toolCallCount = 0;
       const promptStartTime = Date.now();
+      let tokenUsage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
 
-      // Update agent state to "busy" in MAP server (if available)
+      // Update agent state to "busy" — both local MAP server and upstream sidecar
       try {
         const mapServer = (system as any).mapServerInstance;
         if (mapServer) {
-          // Find the agent's MAP ID and update state
           const agents = mapServer.agents?.list?.() ?? [];
           const mapAgent = agents.find(
             (a: any) => a.metadata?.localAgentId === agentId,
@@ -479,54 +516,141 @@ export function createMacroAgent(
             mapServer.agents.updateState(mapAgent.id, "busy");
           }
         }
-      } catch {
-        // Best effort
-      }
+      } catch { /* best effort */ }
+
+      // Update upstream sidecar state (so OpenHive sees activity)
+      try {
+        const sidecarConn = (system as any).mapSidecar;
+        if (sidecarConn?.connected) {
+          // The sidecar's underlying AgentConnection has updateState
+          // but it's not directly exposed. Emit via the eventBus instead.
+        }
+      } catch { /* best effort */ }
 
       try {
         // Stream updates from agentManager.prompt()
         const updates = agentManager.prompt(agentId, message);
 
         for await (const update of updates) {
-          // Track tool calls and files for trajectory checkpoint.
-          // Also emit task bridge events for TaskCreate/TaskUpdate tool calls
-          // (fills the gap left by cc-swarm's PostToolUse hooks).
+          // Track tool calls, files, and token usage for trajectory checkpoint.
+          // Also emit task bridge events for TaskCreate/TaskUpdate tool calls.
           if ("sessionUpdate" in update) {
             const su = update as any;
             if (su.sessionUpdate === "tool_call") {
               toolCallCount++;
-              // Extract file paths from tool inputs
               const input = su.rawInput as Record<string, unknown> | undefined;
               if (input?.file_path) filesTouched.add(input.file_path as string);
               if (input?.filePath) filesTouched.add(input.filePath as string);
               if (input?.path) filesTouched.add(input.path as string);
+              if (input?.command) filesTouched.add(`[bash] ${(input.command as string).slice(0, 50)}`);
             }
 
-            // Emit task bridge events when tool results complete
+            // Track token usage from session info updates
+            if (su.sessionUpdate === "session_info_update" && su.usage) {
+              const u = su.usage;
+              if (u.inputTokens) tokenUsage.input_tokens += u.inputTokens;
+              if (u.outputTokens) tokenUsage.output_tokens += u.outputTokens;
+              if (u.cacheReadTokens) tokenUsage.cache_read_tokens += u.cacheReadTokens;
+              if (u.cacheCreationTokens) tokenUsage.cache_creation_tokens += u.cacheCreationTokens;
+            }
+
+            // Bridge tool call completions to MAP events
             if (su.sessionUpdate === "tool_call_update" && su.output !== undefined) {
               const toolName = su.title ?? "";
               const sidecar = (system as any).mapSidecar;
               if (sidecar?.connected && toolName) {
-                if (toolName === "TaskCreate" || toolName.includes("TaskCreate")) {
-                  // Task was created — bridge to MAP
-                  try {
+                try {
+                  // Native task lifecycle events
+                  if (toolName === "TaskCreate" || toolName.includes("TaskCreate")) {
                     const taskData = typeof su.output === "string"
                       ? JSON.parse(su.output) : su.output;
                     sidecar.reportCheckpoint?.({
-                      id: `task-${Date.now()}`,
+                      id: `task-created-${Date.now()}`,
                       session_id: params.sessionId,
                       agent: agentId,
                       branch: null,
                       files_touched: [],
                       checkpoints_count: checkpointCounter,
-                      metadata: {
-                        phase: "active",
-                        event: "task.created",
-                        task: taskData,
-                      },
+                      metadata: { phase: "active", event: "task.created", task: taskData },
                     }).catch(() => {});
-                  } catch { /* ignore parse errors */ }
-                }
+                  } else if (toolName === "TaskUpdate" || toolName.includes("TaskUpdate")) {
+                    const taskData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `task-updated-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "task.status", task: taskData },
+                    }).catch(() => {});
+                  }
+
+                  // Gap 3: Opentasks MCP bridge — bridge opentasks tool calls to MAP events
+                  else if (toolName === "opentasks__create_task" || toolName.includes("create_task")) {
+                    const taskData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `opentasks-created-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "task.created", source: "opentasks", task: taskData },
+                    }).catch(() => {});
+                  } else if (toolName === "opentasks__update_task" || toolName.includes("update_task")) {
+                    const taskData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `opentasks-status-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "task.status", source: "opentasks", task: taskData },
+                    }).catch(() => {});
+                  } else if (toolName === "opentasks__link" || toolName.includes("opentasks") && toolName.includes("link")) {
+                    const linkData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `opentasks-linked-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "task.linked", source: "opentasks", link: linkData },
+                    }).catch(() => {});
+                  } else if (toolName === "opentasks__annotate" || toolName.includes("opentasks") && toolName.includes("annotate")) {
+                    const annotateData = typeof su.output === "string"
+                      ? JSON.parse(su.output) : su.output;
+                    sidecar.reportCheckpoint?.({
+                      id: `opentasks-sync-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "task.sync", source: "opentasks", annotation: annotateData },
+                    }).catch(() => {});
+                  }
+
+                  // Gap 2: Memory sync — detect minimem write tools
+                  else if (toolName.includes("memory_append") || toolName.includes("memory_upsert")) {
+                    sidecar.reportCheckpoint?.({
+                      id: `memory-sync-${Date.now()}`,
+                      session_id: params.sessionId,
+                      agent: agentId,
+                      branch: null,
+                      files_touched: [],
+                      checkpoints_count: checkpointCounter,
+                      metadata: { phase: "active", event: "memory.sync" },
+                    }).catch(() => {});
+                  }
+                } catch { /* ignore parse errors */ }
               }
             }
           }
@@ -586,27 +710,69 @@ export function createMacroAgent(
           }
         }
 
-        // Emit trajectory checkpoint after prompt completes.
-        // This fills the gap left by cc-swarm's Stop hook which doesn't
-        // fire for programmatic sessions.
+        // Emit enriched trajectory checkpoint after prompt completes.
+        // Matches cc-swarm's wire format so OpenHive UI can display session data.
         const sidecar = (system as any).mapSidecar;
-        if (sidecar?.connected) {
+        if (sidecar) {
           checkpointCounter++;
+          const agentRecord = (system as any).agentStore?.getAgent?.(agentId);
+          const agentCwd = agentRecord?.cwd ?? defaultCwd;
+          const git = getGitInfo(agentCwd);
+
+          // Determine sync level from sessionlog config (default: "full")
+          const syncLevel: string = (system as any)._sessionlogSyncLevel ?? "full";
+
+          // Build checkpoint with sync-level gating:
+          // - lifecycle: phase, turnId, startedAt, label
+          // - metrics: above + token_usage, files_touched, checkpoints_count, toolCallCount, duration_ms
+          // - full: everything
+          const isMetrics = syncLevel === "metrics" || syncLevel === "full";
+          const isFull = syncLevel === "full";
+
           const checkpoint: TrajectoryCheckpointPayload = {
             id: `${params.sessionId}-step${checkpointCounter}`,
             session_id: params.sessionId,
-            agent: agentId,
-            branch: null, // Could be enriched with git info
-            files_touched: Array.from(filesTouched),
-            checkpoints_count: checkpointCounter,
+            agent: agentRecord?.name ?? agentId,
+            branch: git.branch,
+            files_touched: isMetrics ? Array.from(filesTouched) : [],
+            checkpoints_count: isMetrics ? checkpointCounter : 0,
+            // Token usage — only at metrics level or above
+            ...(isMetrics && (tokenUsage.input_tokens > 0 || tokenUsage.output_tokens > 0)
+              ? { token_usage: tokenUsage }
+              : {}),
             metadata: {
+              // lifecycle fields (always included)
               phase: "active",
-              project: defaultCwd.split("/").pop() ?? "",
-              duration_ms: Date.now() - promptStartTime,
-              toolCallCount,
+              startedAt: sessionStartedAt,
+              label: `Step ${checkpointCounter} (${toolCallCount} tool calls)`,
+              // metrics fields
+              ...(isMetrics ? {
+                duration_ms: Date.now() - promptStartTime,
+                toolCallCount,
+              } : {}),
+              // full fields
+              ...(isFull ? {
+                project: agentCwd.split("/").pop() ?? "",
+                projectPath: agentCwd,
+                firstPrompt: firstPrompt ?? undefined,
+                gitCommitHash: git.commitHash ?? undefined,
+                gitRemoteUrl: git.remoteUrl ?? undefined,
+              } : {}),
             },
           };
-          sidecar.reportCheckpoint(checkpoint).catch(() => {});
+          // Enrich with sessionlog state if available (adds turn IDs, better token usage)
+          let enrichedCheckpoint = checkpoint;
+          try {
+            const { findActiveSession, enrichCheckpoint } = await import("../integrations/sessionlog.js");
+            const sessionState = findActiveSession(agentCwd);
+            if (sessionState) {
+              enrichedCheckpoint = enrichCheckpoint(sessionState, checkpoint);
+            }
+          } catch {
+            // sessionlog not available — use base checkpoint
+          }
+
+          sidecar.reportCheckpoint(enrichedCheckpoint).catch(() => {});
         }
 
         return { stopReason: "end_turn" };
@@ -616,7 +782,7 @@ export function createMacroAgent(
       } finally {
         sessionMapper.setProcessing(params.sessionId, false);
 
-        // Update agent state back to "idle" in MAP server
+        // Update agent state back to "idle" — local MAP server
         try {
           const mapServer = (system as any).mapServerInstance;
           if (mapServer) {
@@ -628,9 +794,7 @@ export function createMacroAgent(
               mapServer.agents.updateState(mapAgent.id, "idle");
             }
           }
-        } catch {
-          // Best effort
-        }
+        } catch { /* best effort */ }
       }
     },
 

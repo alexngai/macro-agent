@@ -127,8 +127,45 @@ export function createMAPSidecar(
         },
       };
 
-      connection = await AgentConnection.connect(url, connectOpts);
+      // Try mesh transport first if enabled (encrypted P2P via agentic-mesh)
+      if (config.mesh?.enabled) {
+        try {
+          connection = await (AgentConnection as any).connectMesh({
+            ...connectOpts,
+            peer: { peerId: config.mesh.peerId ?? `${agentName}-mesh` },
+            server: config.server,
+          });
+          isConnected = true;
+          console.log(`[map-sidecar] Connected via MeshPeer to ${config.server}`);
+        } catch (meshErr) {
+          console.warn(
+            `[map-sidecar] MeshPeer failed, falling back to WebSocket: ${(meshErr as Error).message}`,
+          );
+        }
+      }
+
+      // WebSocket connection (direct or fallback from mesh)
+      if (!isConnected) {
+      // Try open mode first (single call connect+register).
+      // If server requires auth, fall back to verified mode.
+      if (config.credential) {
+        // Verified mode: connectOnly → check authRequired → authenticate → register
+        connection = await AgentConnection.createConnection(url, connectOpts);
+        const result = await connection.connectOnly();
+        if (result.authRequired) {
+          const method = result.authRequired.methods?.[0] ?? "x-agent-iam";
+          await connection.authenticate({
+            method,
+            token: config.credential,
+          });
+        }
+        await connection.register();
+      } else {
+        // Open mode: single call connect+register
+        connection = await AgentConnection.connect(url, connectOpts);
+      }
       isConnected = true;
+      } // end if (!isConnected)
 
       // Monitor connection state
       connection.onStateChange(

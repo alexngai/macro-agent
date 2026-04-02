@@ -38,6 +38,12 @@ export interface MAPSidecarConfig {
   /** Trajectory sync level */
   trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
 
+  /** Mesh transport (agentic-mesh P2P) */
+  mesh?: {
+    enabled?: boolean;
+    peerId?: string;
+  };
+
   /** Reconnection settings (SDK-level) */
   reconnection?: {
     enabled?: boolean;

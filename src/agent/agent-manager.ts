@@ -273,6 +273,29 @@ export interface AgentManager {
    */
   setMapServerUrl(url: string): void;
 
+  /**
+   * Configure swarmkit integrations (minimem, skill-tree, sessionlog).
+   * Called by boot-v2 after system initialization.
+   */
+  setIntegrationConfigs(configs: {
+    minimem?: { enabled: boolean; dir?: string; provider?: string; global?: boolean };
+    skilltree?: { enabled: boolean; basePath?: string; defaultProfile?: string };
+    sessionlog?: { enabled: boolean; sync?: string };
+  }): void;
+
+  /**
+   * Set a compiled skill-tree loadout for a role.
+   * Called by TeamRuntime during team bootstrap.
+   */
+  setSkillLoadout(role: string, content: string): void;
+
+  /**
+   * Set the MAP sidecar reference for trajectory reporting.
+   * Called by boot-v2 after the sidecar is created.
+   * Enables session-end checkpoint emission on terminate.
+   */
+  setSidecar(sidecar: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null): void;
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   /**

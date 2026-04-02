@@ -149,6 +149,15 @@ export function createAgentManagerV2(
   let isShuttingDown = false;
   let mapServerUrl: string | undefined;
 
+  // Swarmkit integration configs (set via late-binding setters from boot-v2)
+  let minimemConfig: { enabled: boolean; dir?: string; provider?: string; global?: boolean } | undefined;
+  let skilltreeConfig: { enabled: boolean; basePath?: string; defaultProfile?: string } | undefined;
+  let sessionlogConfig: { enabled: boolean; sync?: string } | undefined;
+  // Compiled skill loadouts per role (populated by team runtime)
+  const skillLoadouts = new Map<string, string>();
+  // MAP sidecar reference for trajectory reporting (set via setSidecar)
+  let sidecarRef: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null = null;
+
   // ── Helpers ──────────────────────────────────────────────────
 
   function notifyLifecycle(event: AgentLifecycleEvent): void {
@@ -503,17 +512,71 @@ export function createAgentManagerV2(
         })) ?? []),
       ];
 
-      // Build agentMeta with optional cc-swarm hooks
+      // Register minimem MCP server (agent-type independent — works for any MCP-capable agent)
+      if (minimemConfig?.enabled) {
+        mcpServers.push({
+          name: "minimem",
+          command: "minimem",
+          args: [
+            "mcp",
+            "--dir", minimemConfig.dir ?? ".swarm/minimem/",
+            "--provider", minimemConfig.provider ?? "auto",
+            ...(minimemConfig.global ? ["--global"] : []),
+          ],
+          env: [],
+        } as any);
+      }
+
+      // Build agentMeta
       let agentMeta: Record<string, any> | undefined;
 
       if (permissionMode === "interactive") {
         agentMeta = { claudeCode: { options: { settingSources: [] } } };
       }
 
+      // Build capabilities context + skill-tree loadout for system prompt
+      // Matches cc-swarm's context injection pattern (role-aware, tool-specific)
+      let contextSuffix = "";
+      try {
+        const { buildCapabilitiesContext } = await import("../integrations/context-builder.js");
+        contextSuffix = buildCapabilitiesContext({
+          role: parent ? (role ?? "worker") : null, // null = orchestrator, string = spawned agent
+          teamName: team_instance ?? undefined,
+          minimem: minimemConfig
+            ? { enabled: minimemConfig.enabled, status: "ready" }
+            : undefined,
+          skilltree: skilltreeConfig
+            ? { enabled: skilltreeConfig.enabled, status: "ready", profile: skilltreeConfig.defaultProfile }
+            : undefined,
+          sessionlog: sessionlogConfig
+            ? { enabled: sessionlogConfig.enabled, sync: sessionlogConfig.sync }
+            : undefined,
+          mesh: mapServerUrl ? { enabled: false } : undefined, // mesh state from config
+          map: mapServerUrl
+            ? { enabled: true, scope: `swarm:${agentId}`, status: "connected" }
+            : undefined,
+          opentasks: tasksAdapter.connected
+            ? { enabled: true, status: "connected" }
+            : undefined,
+          inbox: { enabled: true },
+        });
+      } catch { /* context builder not available */ }
+
+      // Inject skill-tree loadout if available for this role
+      const roleLoadout = role ? skillLoadouts.get(role) : undefined;
+      if (roleLoadout) {
+        contextSuffix += `\n\n## Skills\n\n${roleLoadout}`;
+      }
+
+      // Merge context into system prompt
+      const enrichedPrompt = contextSuffix
+        ? `${systemPrompt ?? ""}\n\n${contextSuffix}`.trim()
+        : systemPrompt;
+
       // Create session
       const session = await handle.createSession(effectiveCwd, {
         mcpServers,
-        systemPrompt,
+        systemPrompt: enrichedPrompt ?? systemPrompt,
         ...(agentMeta && { agentMeta }),
       } as any);
 
@@ -712,6 +775,24 @@ export function createAgentManagerV2(
       stop_reason: reason as any,
       stopped_at: Date.now(),
     });
+
+    // Emit final trajectory checkpoint with phase: "ended"
+    if (sidecarRef?.connected) {
+      try {
+        const session = agentStore.getSession(agentId);
+        sidecarRef.reportCheckpoint({
+          id: `${session?.session_id ?? agentId}-ended`,
+          session_id: session?.session_id ?? agentId,
+          agent: record.name ?? agentId,
+          branch: null,
+          files_touched: [],
+          checkpoints_count: 0,
+          metadata: { phase: "ended", reason },
+        }).catch(() => {});
+      } catch {
+        // best effort
+      }
+    }
 
     // Notify lifecycle
     const updatedAgent = agentRecordToAgent(agentStore.getAgent(agentId)!);
@@ -1310,6 +1391,24 @@ export function createAgentManagerV2(
     mapServerUrl = url;
   }
 
+  function setIntegrationConfigs(configs: {
+    minimem?: typeof minimemConfig;
+    skilltree?: typeof skilltreeConfig;
+    sessionlog?: typeof sessionlogConfig;
+  }): void {
+    if (configs.minimem) minimemConfig = configs.minimem;
+    if (configs.skilltree) skilltreeConfig = configs.skilltree;
+    if (configs.sessionlog) sessionlogConfig = configs.sessionlog;
+  }
+
+  function setSkillLoadout(role: string, content: string): void {
+    skillLoadouts.set(role, content);
+  }
+
+  function setSidecar(sidecar: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null): void {
+    sidecarRef = sidecar;
+  }
+
   function setMailServices(): void {
     // No-op: agent-inbox handles conversation tracking
   }
@@ -1368,6 +1467,9 @@ export function createAgentManagerV2(
     getRoleRegistry,
     setOpenTasksSocketPath,
     setMapServerUrl,
+    setIntegrationConfigs,
+    setSkillLoadout,
+    setSidecar,
     setMailServices,
     close,
   } as AgentManager;

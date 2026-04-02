@@ -119,6 +119,33 @@ export interface BootV2Config {
       maxDelayMs?: number;
     };
   };
+
+  /** minimem (agent memory) — registers as MCP server for all agents */
+  minimem?: {
+    enabled?: boolean;
+    dir?: string;          // default: ".swarm/minimem/"
+    provider?: string;     // "auto" | "openai" | "gemini" | "local"
+    global?: boolean;      // also search ~/.minimem
+  };
+
+  /** skill-tree (per-role skills) — compiles loadouts at team start, injects into prompts */
+  skilltree?: {
+    enabled?: boolean;
+    basePath?: string;     // default: ".swarm/skill-tree/"
+    defaultProfile?: string;
+  };
+
+  /** sessionlog — enriches trajectory checkpoints with session state data */
+  sessionlog?: {
+    enabled?: boolean;
+    sync?: "off" | "lifecycle" | "metrics" | "full";
+  };
+
+  /** agentic-mesh — P2P encrypted transport for MAP sidecar */
+  mesh?: {
+    enabled?: boolean;
+    peerId?: string;
+  };
 }
 
 // =============================================================================
@@ -161,6 +188,9 @@ export interface MacroAgentSystemV2 {
 
   /** MAP sidecar for outbound hub connection (if enabled) */
   mapSidecar?: import("./map/types.js").MAPSidecar;
+
+  /** Sessionlog sync level for trajectory checkpoint gating */
+  _sessionlogSyncLevel?: string;
 
   /** Shut down all components */
   shutdown(): Promise<void>;
@@ -404,7 +434,35 @@ export async function bootV2(
     }
   }
 
-  // 12. MAP Sidecar (optional — connect to OpenHive hub)
+  // 12. Swarmkit integrations (minimem, skill-tree, sessionlog)
+  agentManager.setIntegrationConfigs({
+    minimem: config.minimem?.enabled ? config.minimem as any : undefined,
+    skilltree: config.skilltree?.enabled ? config.skilltree as any : undefined,
+    sessionlog: config.sessionlog?.enabled ? config.sessionlog as any : undefined,
+  });
+
+  // 12b. Skill-tree loadout compilation (if enabled)
+  if (config.skilltree?.enabled) {
+    try {
+      const { compileAllRoleLoadouts } = await import("./integrations/skilltree.js");
+      // Gather roles from the role registry
+      const registeredRoles = roleRegistry.listRoles();
+      const roleNames = registeredRoles.map((r) => r.name);
+      if (roleNames.length > 0) {
+        const loadouts = await compileAllRoleLoadouts(
+          roleNames.filter(Boolean),
+          config.skilltree,
+        );
+        for (const [role, content] of loadouts) {
+          agentManager.setSkillLoadout(role, content);
+        }
+      }
+    } catch {
+      // skill-tree not available — non-fatal
+    }
+  }
+
+  // 13. MAP Sidecar (optional — connect to OpenHive hub)
   let mapSidecar: import("./map/types.js").MAPSidecar | null = null;
   if (config.map?.enabled && config.map.server) {
     try {
@@ -421,9 +479,12 @@ export async function bootV2(
           trajectorySyncLevel: config.map.trajectorySyncLevel,
           reconnectIntervalMs: config.map.reconnectIntervalMs,
           reconnection: config.map.reconnection,
+          mesh: config.mesh?.enabled ? config.mesh : undefined,
         },
       );
       await mapSidecar.start();
+      // Wire sidecar into agent manager for session-end checkpoints
+      agentManager.setSidecar(mapSidecar);
     } catch (err) {
       // Non-fatal — MAP hub connectivity is optional
       console.warn(
@@ -446,6 +507,7 @@ export async function bootV2(
     ...(acpServer ? { acpServer } : {}),
     ...(mapServerInstance ? { mapServerInstance } : {}),
     ...(mapSidecar ? { mapSidecar } : {}),
+    _sessionlogSyncLevel: config.sessionlog?.sync ?? config.map?.trajectorySyncLevel ?? "full",
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
