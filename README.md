@@ -2,20 +2,25 @@
 
 A multi-agent orchestration system for spawning and managing hierarchical AI coding agents. Interact with multiple agents as if they were one.
 
-macro-agent handles **orchestration** (agent lifecycle, team topology, workspace isolation, trigger/wake) and delegates **messaging** to [agent-inbox](https://github.com/alexngai/agent-inbox) and **task management** to [opentasks](https://github.com/alexngai/opentasks).
+macro-agent handles **orchestration** (agent lifecycle, team topology, workspace isolation, trigger/wake) and delegates **messaging** to [agent-inbox](https://github.com/alexngai/agent-inbox) and **task management** to [opentasks](https://github.com/alexngai/opentasks). It exposes ACP (WebSocket) and REST API servers, supports cross-instance federation, and can serve as a compute backend for [cognitive-core](https://github.com/alexngai/cognitive-core)/OpenHive.
 
 ## Features
 
 - **Hierarchical Agent Management** — Head manager spawns and coordinates child agents via acp-factory
-- **Role-Based Agents** — Worker, Integrator, Coordinator, Monitor roles with distinct capabilities
+- **Role-Based Agents** — Worker, Integrator, Coordinator, Monitor, Analyst roles with distinct capabilities
 - **Team Templates** — Declarative YAML configs for multi-agent topologies with composite signal filtering
 - **Workspace Isolation** — Each worker gets an isolated git worktree via git-cascade
 - **Merge Queue** — Serialized integration of worker changes with conflict resolution
 - **Control Socket** — NDJSON-over-UNIX-socket RPC for MCP subprocess lifecycle operations
-- **Trigger System** — Pluggable routing strategies for wake, cron, and webhook-based agent activation
+- **Trigger System** — Pluggable routing strategies (direct, role, head, AI router) for wake, cron, and webhook-based agent activation
 - **MCP Tools** — 5 core orchestration tools + 3 pull-mode claim tools per agent
 - **Task Modes** — Push (coordinator assigns) or pull (agents claim from pool)
 - **Agent Detection** — Auto-discovers installed CLI coding agents (Claude Code, Codex, etc.)
+- **ACP Protocol Server** — WebSocket transport bridging ACP protocol to macro-agent services
+- **REST API** — HTTP endpoints for agents, tasks, teams, and metrics
+- **Federation** — Cross-instance communication via federated agent-inbox (addressable as `agentId@systemId`)
+- **Cognitive-Core Backend** — Serves as compute backend for OpenHive (analyst agent spawning, batch execution)
+- **Metrics** — Point-in-time snapshots of agent, task, and system health
 
 ## Installation
 
@@ -77,37 +82,37 @@ npx multiagent --acp
 ## Architecture
 
 ```
-                    CLI / ACP Client
-                         │
-                    ┌────▼────┐
-                    │ bootV2  │  Wires all components
-                    └────┬────┘
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-    ┌─────▼─────┐  ┌────▼────┐  ┌──────▼──────┐
-    │  Agent    │  │ Trigger │  │  Control    │
-    │  Manager  │  │ System  │  │  Socket     │
-    │           │  │         │  │  (lifecycle │
-    │  spawn    │  │ router  │  │   RPC)      │
-    │  prompt   │  │ wake    │  └──────┬──────┘
-    │  terminate│  │ cron    │         │
-    └─────┬─────┘  │ webhook │    MCP subprocesses
-          │        └─────────┘    (per agent)
-          │
-    ┌─────┼──────────────┐
-    │     │              │
-┌───▼──┐ ┌▼──────────┐ ┌▼───────────┐
-│Roles │ │ Workspace  │ │  Adapters  │
-│      │ │ Worktrees  │ │            │
-│      │ │ Strategies │ │ InboxAdapter ──► agent-inbox (embedded)
-│      │ │ MergeQueue │ │ TasksAdapter ──► opentasks  (IPC daemon)
-└──────┘ └────────────┘ └────────────┘
+              CLI / ACP stdio / WebSocket / REST API
+                              │
+                         ┌────▼────┐
+                         │ bootV2  │  Wires all components
+                         └────┬────┘
+                              │
+       ┌──────────┬───────────┼───────────┬──────────┐
+       │          │           │           │          │
+ ┌─────▼─────┐ ┌─▼───────┐ ┌▼────────┐ ┌▼───────┐ ┌▼──────────┐
+ │  Agent    │ │ Trigger  │ │ Control │ │  ACP   │ │ REST API  │
+ │  Manager  │ │ System   │ │ Socket  │ │ Server │ │ Server    │
+ │           │ │          │ │ (RPC)   │ │ (WS)   │ │ (HTTP)    │
+ │  spawn    │ │ router   │ └────┬────┘ └────────┘ └───────────┘
+ │  prompt   │ │ wake     │      │
+ │  terminate│ │ cron     │  MCP subprocesses
+ └─────┬─────┘ │ webhook  │  (per agent)
+       │       │ ai-router│
+ ┌─────┼───────┘──────────┐
+ │     │                  │
+┌▼────┐┌▼──────────┐ ┌───▼────────┐
+│Roles││ Workspace  │ │  Adapters  │
+│    ││ Worktrees  │ │            │
+│    ││ Strategies │ │ InboxAdapter ──► agent-inbox (embedded)
+│    ││ MergeQueue │ │ TasksAdapter ──► opentasks  (IPC daemon)
+└────┘└────────────┘ │ Federation ──► remote instances
+                     └────────────┘
 ```
 
 **Three subsystems:**
-- **macro-agent** — Orchestration, lifecycle, teams, workspace, triggers
-- **agent-inbox** — Messaging (embedded in-process, IPC server for subprocesses)
+- **macro-agent** — Orchestration, lifecycle, teams, workspace, triggers, ACP/REST servers, federation, cognitive backend, metrics
+- **agent-inbox** — Messaging (embedded in-process, IPC server for subprocesses, federation)
 - **opentasks** — Task management (separate daemon, IPC client)
 
 ## Team Templates
@@ -163,6 +168,61 @@ Each agent gets tools from three sources:
 
 Custom roles extend built-in roles via YAML with `capabilities_add`/`capabilities_remove`.
 
+## ACP Protocol Server
+
+The ACP server bridges the [Agent Client Protocol](https://github.com/anthropics/acp) to macro-agent:
+
+```typescript
+const system = await bootV2({
+  acp: { enabled: true, port: 8080 },
+});
+```
+
+- Maps `session/new` → head manager creation, `session/prompt` → streaming responses
+- Extension methods: `_macro/spawnAgent`, `_macro/getHierarchy`, `_macro/mountAgent`, `_macro/forkAgent`, etc.
+- WebSocket transport for real-time communication
+
+## REST API
+
+```typescript
+const system = await bootV2({
+  api: { enabled: true, port: 3000 },
+});
+```
+
+HTTP endpoints for agents, tasks, teams, and metrics. Used for dashboards and external tooling.
+
+## Federation
+
+Connect multiple macro-agent instances for cross-instance agent communication:
+
+```typescript
+const system = await bootV2({
+  federation: {
+    systemId: 'dev-laptop',
+    peers: [{ systemId: 'ci-server', url: 'ws://ci:8080' }],
+    trust: { allowedSystems: ['ci-server'] },
+  },
+});
+```
+
+Agents address across instances with `agentId@systemId` (e.g., `coordinator@ci-server`).
+
+## Cognitive-Core Backend
+
+macro-agent can serve as a compute backend for [cognitive-core](https://github.com/alexngai/cognitive-core) / OpenHive:
+
+```typescript
+import { MacroAgentBackend } from 'macro-agent/cognitive';
+
+const backend = new MacroAgentBackend(system.agentManager, {
+  tasksAdapter: system.tasksAdapter,
+  inboxAdapter: system.inboxAdapter,
+});
+```
+
+Spawns analyst agents, manages sessions with timeouts, and reports completion. The swarm is pure compute — atlas, trajectory extraction, and team coordination are handled by OpenHive.
+
 ## Dependencies
 
 | Package | Purpose |
@@ -172,6 +232,8 @@ Custom roles extend built-in roles via YAML with `capabilities_add`/`capabilitie
 | [acp-factory](https://github.com/alexngai/acp-factory) | Agent process management |
 | [openteams](https://github.com/alexngai/openteams) | Team template resolution |
 | [git-cascade](https://github.com/alexngai/git-cascade) | Git worktree and merge operations |
+| [express](https://expressjs.com/) | REST API server |
+| [ws](https://github.com/websockets/ws) | ACP WebSocket transport |
 
 ## Testing
 

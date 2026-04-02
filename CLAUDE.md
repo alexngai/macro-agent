@@ -1,11 +1,11 @@
 # macro-agent
 
-A multi-agent orchestration system for spawning and managing hierarchical Claude Code agents. Delegates messaging to **agent-inbox** and task management to **opentasks**.
+A multi-agent orchestration system for spawning and managing hierarchical AI coding agents. Delegates messaging to **agent-inbox** and task management to **opentasks**. Exposes ACP (WebSocket) and REST API servers, supports cross-instance federation, and can serve as a compute backend for cognitive-core/OpenHive.
 
 ## Project Overview
 
 macro-agent enables coordinated work across multiple AI agents with:
-- **Role-based agents** (Worker, Integrator, Coordinator, Monitor + custom team roles)
+- **Role-based agents** (Worker, Integrator, Coordinator, Monitor, Analyst + custom team roles)
 - **Team templates** for declarative multi-agent topologies (YAML config)
 - **Pluggable integration strategies** (queue, trunk, optimistic)
 - **Workspace isolation** via git worktrees (powered by git-cascade)
@@ -14,24 +14,30 @@ macro-agent enables coordinated work across multiple AI agents with:
 - **Task management** via opentasks (graph-based dependencies, providers, claiming)
 - **Control socket** for MCP subprocess lifecycle RPC (NDJSON over UNIX socket)
 - **Composite signal filtering and emission enforcement** for multi-team communication topology
-- **Trigger system** with pluggable routing strategies, wake management, cron, and webhooks
+- **Trigger system** with pluggable routing strategies (including AI router), wake management, cron, and webhooks
 - **Agent detection** for discovering installed CLI coding agents (Claude Code, Codex, etc.)
 - **Health check heartbeats** from MCP subprocesses to the control server
+- **ACP protocol server** with WebSocket transport for external client integration
+- **REST API server** for HTTP-based agent, task, team, and metrics management
+- **Federation** for cross-instance communication between macro-agent instances
+- **Cognitive-core backend** for serving as compute backend for OpenHive
+- **Metrics collection** for point-in-time system observability
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      External Clients                       │
-│                     (CLI, ACP stdio)                        │
+│             (CLI, ACP stdio, WebSocket, REST API)           │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
 │                   boot-v2.ts (System Wiring)                │
-│  1. AgentStore (SQLite)      5. AgentManagerV2              │
-│  2. InboxAdapter (embedded)  6. TriggerSystemV2             │
-│  3. TasksAdapter (IPC)       7. ControlServer               │
-│  4. RoleRegistry             8. Return MacroAgentSystemV2   │
+│  1. AgentStore (SQLite)       6. TriggerSystemV2            │
+│  2. InboxAdapter (embedded)   7. ControlServer              │
+│  3. TasksAdapter (IPC)        8. Federation (optional)      │
+│  4. RoleRegistry              9. REST API server (optional)  │
+│  5. AgentManagerV2           10. ACP WebSocket (optional)    │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -116,12 +122,21 @@ macro-agent enables coordinated work across multiple AI agents with:
 
 ```
 src/
+├── acp/                     # ACP protocol server
+│   ├── macro-agent.ts          # ACP-to-macro-agent bridge (session/new, session/prompt, extensions)
+│   ├── websocket-server.ts     # WebSocket server for ACP clients
+│   ├── session-mapper.ts       # Maps ACP sessions to agent states
+│   ├── map-bridge.ts           # Bridges between MAP and macro-agent protocols
+│   ├── types.ts                # Protocol type definitions (MacroAgentInitConfig, ACPError)
+│   └── index.ts                # Public exports
+│
 ├── adapters/                # Subsystem integration layer
 │   ├── types.ts                # InboxAdapter + TasksAdapter interfaces
 │   ├── inbox-adapter.ts        # Wraps agent-inbox (embedded, hybrid IPC)
 │   ├── inbox-client-adapter.ts # IPC-only client for MCP subprocesses
 │   ├── tasks-adapter.ts        # Wraps opentasks client (IPC to daemon)
 │   ├── opentasks-daemon.ts     # Daemon lifecycle helper (start/stop/probe)
+│   ├── federation.ts           # Cross-instance communication via federated inboxes
 │   └── index.ts                # Public exports
 │
 ├── agent/                   # Agent lifecycle
@@ -142,6 +157,11 @@ src/
 │   ├── command-builder.ts      # Builds headless invocation commands
 │   └── index.ts                # Public exports
 │
+├── api/                     # REST API server
+│   ├── server.ts               # HTTP endpoints for agents, tasks, teams, metrics
+│   ├── types.ts                # ApiServer, ApiServerConfig interfaces
+│   └── index.ts                # Public exports
+│
 ├── auth/                    # Authentication
 │   ├── token.ts                # AgentTokenManager for per-agent auth tokens
 │   └── index.ts                # Public exports
@@ -154,6 +174,14 @@ src/
 │   ├── mcp.ts                  # multiagent-mcp subprocess entry point
 │   ├── parse-args.ts           # Argument parsing helpers
 │   └── stable-instance-id.ts   # Stable instance ID generation
+│
+├── cognitive/               # cognitive-core backend integration
+│   ├── macro-agent-backend.ts  # Implements cognitive-core AgentBackend interface
+│   ├── session-converter.ts    # Converts sessions between cognitive-core and macro-agent formats
+│   ├── workspace-handler.ts    # Workspace operations for cognitive backend
+│   ├── analyst-role.ts         # Analyst role definition for cognitive system
+│   ├── types.ts                # CognitiveAgentSession, CognitiveBatchConfig, etc.
+│   └── index.ts                # Public exports
 │
 ├── config/                  # Project configuration
 │   ├── project-config.ts       # .multiagent/config.json loader
@@ -179,6 +207,11 @@ src/
 │   ├── tools/
 │   │   └── done-v2.ts          # done() tool using adapters
 │   ├── types.ts                # ToolContext, HierarchyNode, MCPToolError
+│   └── index.ts                # Public exports
+│
+├── metrics/                 # Metrics collection and reporting
+│   ├── metrics.ts              # collectMetrics() — point-in-time agent/task/system snapshot
+│   ├── types.ts                # AgentMetrics, TaskMetrics, SystemMetrics, MetricsSnapshot
 │   └── index.ts                # Public exports
 │
 ├── roles/                   # Role system
@@ -224,6 +257,8 @@ src/
 │   │   ├── wake-manager.ts     # Heartbeat + coalesce + inject→interrupt→prompt
 │   │   ├── types.ts
 │   │   └── index.ts
+│   ├── strategies/             # Pluggable routing strategies
+│   │   └── ai-router.ts       # AI-powered routing via temporary Claude session
 │   ├── sources/                # Trigger event sources
 │   │   ├── cron/
 │   │   │   ├── cron-service.ts
@@ -396,6 +431,58 @@ The `agent-detection/` module discovers installed CLI coding agents on the syste
 - Builds headless invocation commands with proper flags
 - Supports custom agent definitions via `additionalAgents` config
 
+### ACP Protocol Server
+
+The `acp/` module bridges the Agent Client Protocol (ACP) to macro-agent's V2 services:
+- **MacroAgent** (`macro-agent.ts`): Implements the ACP Agent interface — maps `session/new` → `agentManager.getOrCreateHeadManager()`, `session/prompt` → streaming `agentManager.prompt()`, and extension methods for spawn/mount/fork/hierarchy/tasks
+- **WebSocketACPServer** (`websocket-server.ts`): Optional WebSocket transport for ACP clients (enabled via `config.acp.enabled` in boot)
+- **SessionMapper** (`session-mapper.ts`): Maps ACP sessions to macro-agent agent states
+- **MAPBridge** (`map-bridge.ts`): Bridges MAP protocol to macro-agent for external observability
+
+### REST API Server
+
+The `api/` module provides HTTP endpoints for external integration:
+- Agent CRUD and listing
+- Task operations
+- Team management
+- Metrics endpoint (powered by `metrics/` module)
+- Enabled via `config.api.enabled` in boot, configurable host/port
+
+### Cognitive-Core Backend
+
+The `cognitive/` module implements cognitive-core's `AgentBackend` interface, enabling macro-agent to serve as a compute backend for OpenHive:
+- **MacroAgentBackend** (`macro-agent-backend.ts`): Spawns analyst agents, tracks sessions, manages timeouts, reports completion via callbacks and InboxAdapter
+- **AnalystRole** (`analyst-role.ts`): Custom role definition for cognitive analysis tasks
+- **SessionConverter** (`session-converter.ts`): Converts between cognitive-core and macro-agent session formats
+- **WorkspaceHandler** (`workspace-handler.ts`): Workspace operations for cognitive backend tasks
+- Design principle: the swarm is pure compute — receive task, execute agent, return result. Atlas, trajectory extraction, and team coordination are handled by OpenHive.
+
+### Federation
+
+The `adapters/federation.ts` module enables cross-instance communication:
+- Multiple macro-agent instances federate their embedded agent-inbox instances
+- Federated addressing: `agentId@systemId` (e.g., `coordinator@dev-laptop`)
+- Cross-instance spawn via convention-based inbox messages (`remote_spawn_request` events)
+- Trust policy: configurable `allowedSystems` whitelist
+- Setup via `config.federation` in boot, cleanup on shutdown
+
+### Metrics
+
+The `metrics/` module provides point-in-time system observability:
+- `collectMetrics()` gathers agent, task, and system metrics into a `MetricsSnapshot`
+- Agent metrics: total/running/stopped/failed counts, unhealthy agent detection
+- Task metrics: total/open/in-progress/closed counts
+- System metrics: uptime, health check status
+- Used by the REST API server's `/metrics` endpoint
+
+### AI Router Strategy
+
+The `trigger/strategies/ai-router.ts` provides an AI-powered routing strategy:
+- Spawns a temporary Claude session to make routing decisions for trigger events
+- Falls back to "head" strategy if spawning fails or times out
+- Selected when `routing.target.type === "ai-router"`
+- Expensive — intended for events that genuinely need intelligent routing
+
 ### Communication Topology
 
 Teams configure communication via:
@@ -434,8 +521,8 @@ All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforc
 
 ### Testing
 
-- **Unit tests**: `*.test.ts` — Fast, mocked dependencies (41 test files)
-- **E2E tests**: `*.e2e.test.ts` — Full system tests (10 test files)
+- **Unit tests**: `*.test.ts` — Fast, mocked dependencies (~40 test files)
+- **E2E tests**: `*.e2e.test.ts` — Full system tests (11 test files)
 
 Run tests:
 ```bash
@@ -447,6 +534,7 @@ npm run test:e2e-full-agents          # E2E tests with real agent spawning (RUN_
 
 E2E test files:
 - `agent-lifecycle.e2e.test.ts` — Spawn, prompt, terminate flows
+- `cognitive-workspace.e2e.test.ts` — Cognitive-core backend workspace operations
 - `done-scenarios.e2e.test.ts` — Done handler scenarios per role
 - `workspace-lifecycle.e2e.test.ts` — Worktree allocation and cleanup
 - `trigger-wake.e2e.test.ts` — Trigger delivery and wake flows
@@ -511,6 +599,18 @@ E2E test files:
 | `MACRO_TEAMS` | Comma-separated team templates to auto-start | -- |
 | `MACRO_AGENT_HOME` | Alternative base directory (used by CLI clear) | `~/.macro-agent` |
 
+### Boot config options (BootV2Config)
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `api.enabled` | Start REST API server | `false` |
+| `api.port` | REST API port | -- |
+| `acp.enabled` | Start ACP WebSocket server | `false` |
+| `acp.port` | ACP WebSocket port | -- |
+| `federation.systemId` | Unique instance ID for federation | -- |
+| `federation.peers` | Peer instances to federate with | `[]` |
+| `federation.trust.allowedSystems` | Trusted system ID whitelist | -- |
+
 ### Injected into MCP subprocesses (by AgentManagerV2)
 
 | Variable | Description |
@@ -555,6 +655,8 @@ E2E test files:
 | `js-yaml` | Team YAML config parsing |
 | `nanoid` | ID generation |
 | `unique-names-generator` | Human-readable agent names |
+| `express` | REST API server |
+| `ws` | ACP WebSocket transport |
 
 ### Dev
 
