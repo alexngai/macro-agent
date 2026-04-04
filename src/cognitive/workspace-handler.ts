@@ -1,20 +1,22 @@
 /**
  * Workspace Execution Handler
  *
- * Bridge between OpenHive's workspace.execute MAP messages and
+ * Bridge between workspace task execution MAP messages and
  * macro-agent's MacroAgentBackend. Receives workspace tasks from
- * OpenHive, spawns analyst agents, and sends results back.
+ * a hub, spawns analyst agents, and sends results back.
  *
  * Registered as a MAP notification handler on the swarm's inbound
- * WebSocket connection to the OpenHive hub.
+ * WebSocket connection to the hub.
  *
- * Protocol:
- *   Hive → Swarm: x-openhive/learning.workspace.execute
+ * Protocol (defined by agent-workspace):
+ *   Hub → Swarm: x-workspace/task.execute
  *     { request_id, prompt, cwd, system_context, timeout }
- *   Swarm → Hive: x-openhive/learning.workspace.result
+ *   Swarm → Hub: x-workspace/task.result
  *     { request_id, success, output, structured, duration_ms }
  */
 
+import { WORKSPACE_METHODS, WORKSPACE_METHODS_LEGACY } from "agent-workspace";
+import type { WorkspaceExecuteParams, WorkspaceResultParams } from "agent-workspace";
 import type { MacroAgentBackend } from "./macro-agent-backend.js";
 import type { CognitiveAgentSpawnConfig } from "./types.js";
 
@@ -24,13 +26,8 @@ export interface WorkspaceHandlerDeps {
   sendToHub: (message: object) => void;
 }
 
-export interface WorkspaceExecuteParams {
-  request_id: string;
-  prompt: string;
-  cwd: string;
-  system_context?: string;
-  timeout?: number;
-}
+// Re-export the protocol type for consumers
+export type { WorkspaceExecuteParams } from "agent-workspace";
 
 /**
  * Handle an incoming workspace.execute request from OpenHive.
@@ -79,7 +76,7 @@ export async function handleWorkspaceExecute(
       await backend.terminate(session.id).catch(() => {});
       sendToHub({
         jsonrpc: "2.0",
-        method: "x-openhive/learning.workspace.result",
+        method: WORKSPACE_METHODS.RESULT,
         params: {
           request_id,
           success: false,
@@ -128,7 +125,7 @@ export async function handleWorkspaceExecute(
 
     sendToHub({
       jsonrpc: "2.0",
-      method: "x-openhive/learning.workspace.result",
+      method: WORKSPACE_METHODS.RESULT,
       params: {
         request_id,
         success: finalSession.state === "completed",
@@ -141,7 +138,7 @@ export async function handleWorkspaceExecute(
   } catch (err) {
     sendToHub({
       jsonrpc: "2.0",
-      method: "x-openhive/learning.workspace.result",
+      method: WORKSPACE_METHODS.RESULT,
       params: {
         request_id,
         success: false,
@@ -158,6 +155,6 @@ export async function handleWorkspaceExecute(
  */
 export function isWorkspaceExecuteMessage(
   msg: { method?: string },
-): msg is { method: "x-openhive/learning.workspace.execute"; params: WorkspaceExecuteParams } {
-  return msg.method === "x-openhive/learning.workspace.execute";
+): boolean {
+  return msg.method === WORKSPACE_METHODS.EXECUTE || msg.method === WORKSPACE_METHODS_LEGACY.EXECUTE;
 }

@@ -52,7 +52,15 @@ function createMockBackend(session?: CognitiveAgentSession): MacroAgentBackend {
 }
 
 describe("isWorkspaceExecuteMessage", () => {
-  it("should return true for workspace.execute messages", () => {
+  it("should return true for x-workspace/task.execute", () => {
+    expect(
+      isWorkspaceExecuteMessage({
+        method: "x-workspace/task.execute",
+      }),
+    ).toBe(true);
+  });
+
+  it("should return true for legacy x-openhive/learning.workspace.execute", () => {
     expect(
       isWorkspaceExecuteMessage({
         method: "x-openhive/learning.workspace.execute",
@@ -111,7 +119,7 @@ describe("handleWorkspaceExecute", () => {
     expect(sentMessages.length).toBe(1);
     const result = sentMessages[0] as any;
     expect(result.jsonrpc).toBe("2.0");
-    expect(result.method).toBe("x-openhive/learning.workspace.result");
+    expect(result.method).toBe("x-workspace/task.result");
     expect(result.params.request_id).toBe("req-001");
     expect(result.params.success).toBe(true);
     expect(result.params.duration_ms).toBeGreaterThanOrEqual(0);

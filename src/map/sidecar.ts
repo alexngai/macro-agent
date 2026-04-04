@@ -253,14 +253,31 @@ export function createMAPSidecar(
     const { createTrajectoryReporter } = await import("./trajectory-reporter.js");
     trajectoryReporter = createTrajectoryReporter(connection, config);
 
-    // 4. Coordination Handler
+    // 4. Workspace Handler (for x-workspace/task.execute)
+    const { MacroAgentBackend } = await import("../cognitive/macro-agent-backend.js");
+    const { handleWorkspaceExecute, isWorkspaceExecuteMessage } = await import("../cognitive/workspace-handler.js");
+    const workspaceBackend = new MacroAgentBackend(agentManager, {});
+    const sendToHub = (msg: { method?: string; params?: unknown }) => {
+      if (msg.method && msg.params) {
+        connection.sendNotification(msg.method, msg.params as Record<string, unknown>);
+      }
+    };
+    const workspaceHandler = {
+      handleWorkspaceExecute: (params: unknown) =>
+        handleWorkspaceExecute(
+          { backend: workspaceBackend, sendToHub },
+          params as import("agent-workspace").WorkspaceExecuteParams,
+        ),
+      isWorkspaceExecuteMessage,
+    };
+
+    // 5. Coordination Handler
     const { setupCoordinationHandlers } = await import("./coordination-handler.js");
     coordinationCleanup = setupCoordinationHandlers({
       connection,
-      agentManager,
       inboxAdapter,
       tasksAdapter,
-      trajectoryReporter,
+      workspaceHandler,
     });
   }
 

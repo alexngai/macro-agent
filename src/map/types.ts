@@ -145,46 +145,8 @@ export interface TrajectoryContentRequest {
 // Coordination Wire Format
 // =============================================================================
 
-/** Inbound task assignment from hub */
-export interface CoordinationTaskAssign {
-  title: string;
-  description?: string;
-  assigned_to?: string;
-  assigned_by: string;
-  priority?: string;
-  context?: Record<string, unknown>;
-  deadline?: string;
-}
-
-/** Inbound task status update from hub */
-export interface CoordinationTaskStatus {
-  task_id: string;
-  status: string;
-  progress?: number;
-  result?: unknown;
-  error?: string;
-}
-
-/** Inbound context share from hub */
-export interface CoordinationContextShare {
-  hive_id?: string;
-  source_swarm_id: string;
-  context_type: string;
-  data: unknown;
-  target_swarm_ids?: string[];
-  ttl_seconds?: number;
-}
-
-/** Inbound message from hub */
-export interface CoordinationMessage {
-  hive_id?: string;
-  from_swarm_id: string;
-  to_swarm_id: string;
-  content_type: string;
-  content: unknown;
-  reply_to?: string;
-  metadata?: Record<string, unknown>;
-}
+// Coordination uses generic MAP scope messages — see coordination-handler.ts.
+// Wire format types are inlined there; no custom types needed here.
 
 // =============================================================================
 // Internal Bridge Types
