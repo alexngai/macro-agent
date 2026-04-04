@@ -149,7 +149,7 @@ describe("Cognitive Workspace E2E", () => {
       expect(sentMessages.length).toBe(1);
       const result = sentMessages[0] as any;
       expect(result.jsonrpc).toBe("2.0");
-      expect(result.method).toBe("x-openhive/learning.workspace.result");
+      expect(result.method).toBe("x-workspace/task.result");
       expect(result.params.request_id).toBe("e2e-001");
       expect(result.params.duration_ms).toBeGreaterThanOrEqual(0);
       // Success or failure depends on whether mocked agent wrote output

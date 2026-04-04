@@ -125,7 +125,7 @@ export async function handleWorkspaceExecute(
 
     sendToHub({
       jsonrpc: "2.0",
-      method: "x-openhive/learning.workspace.result",
+      method: WORKSPACE_METHODS.RESULT,
       params: {
         request_id,
         success: finalSession.state === "completed",
@@ -138,7 +138,7 @@ export async function handleWorkspaceExecute(
   } catch (err) {
     sendToHub({
       jsonrpc: "2.0",
-      method: "x-openhive/learning.workspace.result",
+      method: WORKSPACE_METHODS.RESULT,
       params: {
         request_id,
         success: false,

@@ -275,10 +275,8 @@ export function createMAPSidecar(
     const { setupCoordinationHandlers } = await import("./coordination-handler.js");
     coordinationCleanup = setupCoordinationHandlers({
       connection,
-      agentManager,
       inboxAdapter,
       tasksAdapter,
-      trajectoryReporter,
       workspaceHandler,
     });
   }
