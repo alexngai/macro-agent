@@ -1,12 +1,13 @@
 /**
  * Coordination Handler — dispatches inbound coordination messages from the MAP hub.
  *
- * Handles x-openhive/* JSON-RPC notifications for task assignment, status updates,
- * context sharing, messaging, and workspace execution.
+ * Handles x-openhive/* and x-workspace/* JSON-RPC notifications for task assignment,
+ * status updates, context sharing, messaging, and workspace execution.
  *
  * @module map/coordination-handler
  */
 
+import { WORKSPACE_METHODS, WORKSPACE_METHODS_LEGACY } from "agent-workspace";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { InboxAdapter, TasksAdapter } from "../adapters/types.js";
 import type {
@@ -48,7 +49,8 @@ const METHODS = {
   TASK_STATUS: "x-openhive/task.status",
   CONTEXT_SHARE: "x-openhive/context.share",
   MESSAGE_SEND: "x-openhive/message.send",
-  WORKSPACE_EXECUTE: "x-openhive/learning.workspace.execute",
+  WORKSPACE_EXECUTE: WORKSPACE_METHODS.EXECUTE,
+  WORKSPACE_EXECUTE_LEGACY: WORKSPACE_METHODS_LEGACY.EXECUTE,
 } as const;
 
 /**
@@ -199,7 +201,7 @@ export function setupCoordinationHandlers(
   // --- Workspace Execute (delegate to cognitive module) ---
   if (deps.workspaceHandler) {
     const wh = deps.workspaceHandler;
-    register(METHODS.WORKSPACE_EXECUTE, async (params: unknown) => {
+    const workspaceHandler = async (params: unknown) => {
       try {
         await wh.handleWorkspaceExecute(params);
       } catch (err) {
@@ -207,7 +209,9 @@ export function setupCoordinationHandlers(
           `[map-sidecar] Failed to handle workspace.execute: ${(err as Error).message}`,
         );
       }
-    });
+    };
+    register(METHODS.WORKSPACE_EXECUTE, workspaceHandler);
+    register(METHODS.WORKSPACE_EXECUTE_LEGACY, workspaceHandler);
   }
 
   // Return cleanup function
