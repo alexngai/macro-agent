@@ -1,8 +1,11 @@
 /**
- * Tests for Trajectory Reporter — checkpoint building & reporting.
+ * Tests for Trajectory Reporter — checkpoint reporting & content serving.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import {
   createTrajectoryReporter,
   type TrajectoryConnection,
@@ -168,6 +171,255 @@ describe("TrajectoryReporter", () => {
     expect(conn.sendNotification).toHaveBeenCalledWith(
       "trajectory/content.response",
       expect.objectContaining({ request_id: "req-1" }),
+    );
+  });
+});
+
+// =============================================================================
+// Tests — Content Serving via sessionlog
+// =============================================================================
+
+describe("TrajectoryReporter — content serving", () => {
+  let conn: ReturnType<typeof mockConnection>;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    conn = mockConnection();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trajectory-content-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Write a sessionlog-compatible flat state file: <sessionsDir>/<sessionId>.json */
+  function writeSessionState(
+    sessionsDir: string,
+    sessionId: string,
+    state: Record<string, unknown>,
+    transcript?: string,
+  ): string {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+
+    const transcriptPath = path.join(sessionsDir, `${sessionId}.jsonl`);
+    if (transcript) {
+      fs.writeFileSync(transcriptPath, transcript);
+    }
+
+    fs.writeFileSync(
+      path.join(sessionsDir, `${sessionId}.json`),
+      JSON.stringify({
+        sessionID: sessionId,
+        phase: "active",
+        baseCommit: "abc123",
+        startedAt: new Date().toISOString(),
+        agentType: "claude",
+        transcriptPath: transcript ? transcriptPath : undefined,
+        ...state,
+      }),
+    );
+
+    return transcriptPath;
+  }
+
+  it("serves transcript from live session matching session ID", async () => {
+    const sessionsDir = path.join(tmpDir, "sessions");
+    const transcript = [
+      JSON.stringify({ type: "user", message: "Fix the bug" }),
+      JSON.stringify({ type: "assistant", message: "I'll look into it" }),
+    ].join("\n");
+
+    writeSessionState(sessionsDir, "sess-abc", {
+      stepCount: 3,
+      filesTouched: ["src/main.ts"],
+      firstPrompt: "Fix the bug",
+    }, transcript);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [sessionsDir],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-1", checkpoint_id: "sess-abc-step2" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        request_id: "req-1",
+        transcript: expect.stringContaining("Fix the bug"),
+        prompts: "Fix the bug",
+        metadata: expect.objectContaining({
+          sessionID: "sess-abc",
+          source: "live",
+        }),
+      }),
+    );
+  });
+
+  it("serves transcript matching checkpoint ID in turnCheckpointIDs", async () => {
+    const sessionsDir = path.join(tmpDir, "sessions");
+    const transcript = JSON.stringify({ type: "user", message: "Deploy it" }) + "\n";
+
+    writeSessionState(sessionsDir, "sess-xyz", {
+      turnCheckpointIDs: ["sess-xyz-step1", "sess-xyz-step2"],
+      firstPrompt: "Deploy it",
+    }, transcript);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [sessionsDir],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-2", checkpoint_id: "sess-xyz-step2" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        request_id: "req-2",
+        transcript: expect.stringContaining("Deploy it"),
+      }),
+    );
+  });
+
+  it("uses promptAttributions for multi-prompt sessions", async () => {
+    const sessionsDir = path.join(tmpDir, "sessions");
+    const transcript = JSON.stringify({ type: "user", message: "First" }) + "\n"
+      + JSON.stringify({ type: "user", message: "Second" }) + "\n";
+
+    writeSessionState(sessionsDir, "sess-multi", {
+      firstPrompt: "First",
+      promptAttributions: [
+        { prompt: "First", timestamp: "2026-01-01T00:00:00Z", agentLines: 10 },
+        { prompt: "Second", timestamp: "2026-01-01T00:01:00Z", agentLines: 5 },
+      ],
+    }, transcript);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [sessionsDir],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-3", checkpoint_id: "sess-multi-step1" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        prompts: "First\n---\nSecond",
+      }),
+    );
+  });
+
+  it("returns empty response when no session found", async () => {
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [path.join(tmpDir, "nonexistent")],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-4", checkpoint_id: "unknown-session-step1" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        request_id: "req-4",
+        transcript: "",
+        metadata: expect.objectContaining({ source: "macro-agent" }),
+      }),
+    );
+  });
+
+  it("serves transcripts from ended sessions (content is still valid)", async () => {
+    const sessionsDir = path.join(tmpDir, "sessions");
+    const transcript = JSON.stringify({ type: "user", message: "Old session" }) + "\n";
+
+    writeSessionState(sessionsDir, "sess-ended", {
+      phase: "ended",
+    }, transcript);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [sessionsDir],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-5", checkpoint_id: "sess-ended-step1" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        request_id: "req-5",
+        transcript: expect.stringContaining("Old session"),
+      }),
+    );
+  });
+
+  it("skips sessions with missing transcript path", async () => {
+    const sessionsDir = path.join(tmpDir, "sessions");
+
+    // Write state without transcript file
+    writeSessionState(sessionsDir, "sess-no-file", {});
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [sessionsDir],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-6", checkpoint_id: "sess-no-file-step1" });
+
+    const call = conn.sendNotification.mock.calls[0];
+    expect(call[1]).toHaveProperty("transcript", "");
+  });
+
+  it("sends error response when content handler throws", async () => {
+    conn.sendNotification
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce(undefined);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [path.join(tmpDir, "nonexistent")],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-7", checkpoint_id: "any" });
+
+    // First call fails, second call sends error response
+    expect(conn.sendNotification).toHaveBeenCalledTimes(2);
+    expect(conn.sendNotification).toHaveBeenLastCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        request_id: "req-7",
+        error: "Content serving failed",
+      }),
+    );
+  });
+
+  it("searches multiple session directories", async () => {
+    const dir1 = path.join(tmpDir, "dir1");
+    const dir2 = path.join(tmpDir, "dir2");
+    const transcript = JSON.stringify({ type: "user", message: "Found in dir2" }) + "\n";
+
+    // Only dir2 has the session
+    fs.mkdirSync(dir1, { recursive: true });
+    writeSessionState(dir2, "sess-multi-dir", {}, transcript);
+
+    createTrajectoryReporter(conn, {
+      trajectorySyncLevel: "full",
+      sessionDirs: [dir1, dir2],
+    });
+
+    const handler = conn.onNotification.mock.calls[0][1];
+    await handler({ request_id: "req-8", checkpoint_id: "sess-multi-dir-step1" });
+
+    expect(conn.sendNotification).toHaveBeenCalledWith(
+      "trajectory/content.response",
+      expect.objectContaining({
+        transcript: expect.stringContaining("Found in dir2"),
+      }),
     );
   });
 });
