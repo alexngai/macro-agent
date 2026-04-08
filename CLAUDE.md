@@ -15,6 +15,7 @@ macro-agent enables coordinated work across multiple AI agents with:
 - **Control socket** for MCP subprocess lifecycle RPC (NDJSON over UNIX socket)
 - **Composite signal filtering and emission enforcement** for multi-team communication topology
 - **Trigger system** with pluggable routing strategies (including AI router), wake management, cron, and webhooks
+- **Task dispatch** (opt-in) — autonomous mode that polls opentasks for ready work, spawns agents, tracks lifecycle, retries failures, and reconciles external state changes
 - **Agent detection** for discovering installed CLI coding agents (Claude Code, Codex, etc.)
 - **Health check heartbeats** from MCP subprocesses to the control server
 - **ACP protocol server** with WebSocket transport for external client integration
@@ -258,7 +259,16 @@ src/
 │   │   ├── types.ts
 │   │   └── index.ts
 │   ├── strategies/             # Pluggable routing strategies
-│   │   └── ai-router.ts       # AI-powered routing via temporary Claude session
+│   │   ├── ai-router.ts       # AI-powered routing via temporary Claude session
+│   │   ├── task-dispatch.ts   # Autonomous task dispatch (poll → claim → spawn)
+│   │   └── task-reconcile.ts  # External state reconciliation (detect closed/reassigned)
+│   ├── dispatch/               # Task dispatch system (opt-in autonomous mode)
+│   │   ├── types.ts              # DispatchConfig, DispatchRecord, RetryConfig, etc.
+│   │   ├── dispatch-tracker.ts   # In-memory tracker: concurrency, retries, recovery
+│   │   ├── dispatch-lifecycle.ts # Lifecycle listener (onLifecycleEvent + signal filter)
+│   │   ├── eligibility.ts        # Task eligibility: static filters + heuristic scoring
+│   │   ├── prompt-pipeline.ts    # Composable prompt assembly (task-core, retry, role)
+│   │   └── index.ts              # Public exports
 │   ├── sources/                # Trigger event sources
 │   │   ├── cron/
 │   │   │   ├── cron-service.ts
@@ -415,6 +425,8 @@ Routes external events and inbox delivery events to agents via pluggable routing
 | **role** | Route to all agents with a given role | `routing.target.type === "role"` |
 | **head** | Route to all running root agents (default) | Fallback when no strategy matches |
 | **custom** | User-defined strategies via `registerStrategy()` | By name or `canHandle()` |
+| **task-dispatch** | Autonomous task dispatch (poll → claim → spawn) | `strategyName: "task-dispatch"` (cron) |
+| **task-reconcile** | External state reconciliation | `strategyName: "task-reconcile"` (cron) |
 
 Strategy resolution order: explicit `strategyName` > first `canHandle()` match > default strategy.
 
@@ -422,6 +434,50 @@ Strategy resolution order: explicit `strategyName` > first `canHandle()` match >
 - `InboxAdapter.onDelivery` fires on every message delivery
 - Importance is mapped to wake action: `urgent` → interrupt/wake, `high` → inject/wake, `normal` → queue/wake, `low` → queue
 - Events are enqueued in SystemEventQueue, then WakeManager handles delivery
+
+### Task Dispatch (Autonomous Mode)
+
+The `trigger/dispatch/` module provides an opt-in autonomous dispatch mode that polls opentasks for ready work and spawns agents to execute it. Enabled via `config.dispatch.enabled` in boot.
+
+**Components:**
+- **DispatchTracker** (`dispatch-tracker.ts`): In-memory tracker for active dispatches, retry queue with exponential backoff, multi-dimensional concurrency counting (global, per-project, per-tracker, per-role, per-tag), and state reconstruction from opentasks on boot
+- **TaskDispatch strategy** (`strategies/task-dispatch.ts`): Routing strategy that queries `queryReady()`, filters via eligibility checker, claims tasks, builds prompts via pipeline, spawns parentless root agents
+- **TaskReconcile strategy** (`strategies/task-reconcile.ts`): Separate cron-driven strategy that detects external state changes (task closed, reassigned, blocked, deleted) and terminates stale agents
+- **DispatchLifecycleListener** (`dispatch-lifecycle.ts`): Hooks into `AgentManager.onLifecycleEvent()` for completion/failure tracking and `InboxAdapter.addSignalFilter()` for HELP_NEEDED status observation
+- **EligibilityChecker** (`eligibility.ts`): Two-layer task filtering — static config filters (tags, priority, age, required fields) + heuristic scoring (description quality, failure history, acceptance criteria)
+- **PromptPipeline** (`prompt-pipeline.ts`): Composable prompt assembly with ordered stages: `taskCoreStage` (title, description, metadata), `retryContextStage` (attempt number, previous error), `rolePromptStage` (role context)
+
+**Dispatch flow:**
+1. CronService fires `task-dispatch-poll` every N ms
+2. Strategy queries `tasksAdapter.queryReady()` for unblocked tasks
+3. EligibilityChecker filters and scores tasks
+4. For each eligible task with available concurrency: claim → build prompt → spawn agent
+5. DispatchTracker records the dispatch
+6. On agent stop: lifecycle listener calls `tracker.complete()` or `tracker.fail()` (queues retry)
+7. Reconcile cron checks external state and terminates agents for closed/reassigned tasks
+
+**Configuration** (in `BootV2Config.dispatch`):
+```yaml
+dispatch:
+  enabled: true
+  pollIntervalMs: 15000      # Dispatch poll cadence
+  maxConcurrent: 3           # Global concurrency limit
+  defaultRole: worker        # Role for spawned agents
+  tags: [auto]               # Only dispatch tasks with these tags
+  maxRetries: 3              # Retry attempts per task
+  reconcile:
+    enabled: true
+    intervalMs: 60000         # Reconciliation cadence
+  eligibility:
+    minPriority: 2
+    excludeTags: [wip]
+    minScore: 0.3
+```
+
+**Key design decisions:**
+- Agents spawn parentless (`parent: null`) — the dispatcher is the coordination layer, not a parent agent
+- `tracker.complete()` runs before `terminateAgents()` in reconciliation to prevent the lifecycle listener from re-queuing as retry
+- Each dispatcher instance uses a unique `claimantId` (`hostname:pid:instanceHash`) for multi-instance awareness
 
 ### Agent Detection
 
@@ -522,7 +578,7 @@ All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforc
 ### Testing
 
 - **Unit tests**: `*.test.ts` — Fast, mocked dependencies (~40 test files)
-- **E2E tests**: `*.e2e.test.ts` — Full system tests (11 test files)
+- **E2E tests**: `*.e2e.test.ts` — Full system tests (14 test files)
 
 Run tests:
 ```bash
@@ -542,6 +598,9 @@ E2E test files:
 - `pull-mode.e2e.test.ts` — Task claiming workflows
 - `opentasks-integration.e2e.test.ts` — TasksAdapter integration
 - `live-agent.e2e.test.ts` — Full agent with real Claude Code (requires `RUN_FULL_AGENT_TESTS`)
+- `dispatch.e2e.test.ts` — Task dispatch boot wiring, config, cron jobs (mocked agents)
+- `dispatch-live.e2e.test.ts` — Task dispatch with real agents (requires `RUN_FULL_AGENT_TESTS`)
+- `dispatch-opentasks.e2e.test.ts` — Task dispatch with real agents + real opentasks daemon (requires `RUN_FULL_AGENT_TESTS`)
 - `conflict-resolution-git.e2e.test.ts` — Git merge conflict handling
 - `real-git-operations.e2e.test.ts` — Real git worktree operations
 
@@ -610,6 +669,14 @@ E2E test files:
 | `federation.systemId` | Unique instance ID for federation | -- |
 | `federation.peers` | Peer instances to federate with | `[]` |
 | `federation.trust.allowedSystems` | Trusted system ID whitelist | -- |
+| `dispatch.enabled` | Enable autonomous task dispatch mode | `false` |
+| `dispatch.pollIntervalMs` | Dispatch poll cadence (ms) | `15000` |
+| `dispatch.maxConcurrent` | Max concurrent dispatched agents | `3` |
+| `dispatch.defaultRole` | Role for spawned agents | `"worker"` |
+| `dispatch.tags` | Only dispatch tasks with these tags | -- |
+| `dispatch.maxRetries` | Retry attempts per failed task | `3` |
+| `dispatch.reconcile.enabled` | Enable external state reconciliation | `true` |
+| `dispatch.reconcile.intervalMs` | Reconciliation cadence (ms) | `60000` |
 
 ### Injected into MCP subprocesses (by AgentManagerV2)
 

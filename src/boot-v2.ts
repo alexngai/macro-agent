@@ -146,6 +146,20 @@ export interface BootV2Config {
     enabled?: boolean;
     peerId?: string;
   };
+
+  /** Task dispatch config — opt-in autonomous task dispatch mode */
+  dispatch?: {
+    enabled?: boolean;
+    pollIntervalMs?: number;
+    maxConcurrent?: number;
+    defaultRole?: string;
+    tags?: string[];
+    maxRetries?: number;
+    retryBaseDelayMs?: number;
+    retryMaxDelayMs?: number;
+    reconcile?: { enabled?: boolean; intervalMs?: number };
+    eligibility?: import("swarm-dispatch").EligibilityConfig;
+  };
 }
 
 // =============================================================================
@@ -176,6 +190,9 @@ export interface MacroAgentSystemV2 {
 
   /** Control socket path (for MCP subprocess connection) */
   controlSocketPath: string;
+
+  /** Task dispatcher (if dispatch mode enabled) */
+  taskDispatcher?: import("swarm-dispatch").TaskDispatcher;
 
   /** REST API server (if enabled) */
   apiServer?: ApiServer;
@@ -295,7 +312,82 @@ export async function bootV2(
   );
   await triggerSystem.start();
 
-  // 7. Control Server (lifecycle RPC for MCP subprocesses)
+  // 7a. Task Dispatch (opt-in autonomous task dispatch mode)
+  let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
+
+  if (config.dispatch?.enabled && tasksAdapter) {
+    const { createTaskDispatcher, createOpenTasksSource } = await import("swarm-dispatch");
+    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
+
+    const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
+
+    // Adapt opentasks client → DispatchTaskSource
+    const opentasksClient = (tasksAdapter as any).client;
+    const source = opentasksClient
+      ? createOpenTasksSource(opentasksClient)
+      : {
+          // Fallback adapter when opentasks client is available via TasksAdapter methods
+          queryReady: async (opts?: { tags?: string[]; limit?: number }) =>
+            tasksAdapter.queryReady(opts),
+          claim: async (taskId: string, claimantIdArg: string) => {
+            try {
+              await tasksAdapter.assignTask(taskId, claimantIdArg);
+              return { success: true as const };
+            } catch {
+              return { success: false as const };
+            }
+          },
+          release: async (taskId: string) => tasksAdapter.unclaimTask(taskId),
+          transition: async (taskId: string, action: "start" | "complete" | "fail") =>
+            tasksAdapter.transitionTask(taskId, action),
+          getTask: async (taskId: string) => tasksAdapter.getTask(taskId),
+          listInProgress: async () => tasksAdapter.listTasks({ status: "in_progress" }),
+        };
+
+    // Adapt AgentManagerV2 → DispatchAgentRuntime
+    const runtime = {
+      spawn: async (opts: { prompt: string; taskId: string; role: string }) => {
+        const spawned = await agentManager.spawn({
+          task: opts.prompt,
+          task_id: opts.taskId,
+          role: opts.role,
+          parent: null,
+        });
+        return { id: spawned.id };
+      },
+      terminate: async (agentId: string) => {
+        await agentManager.terminate(agentId, "cancelled");
+      },
+      onStopped: (callback: (agentId: string, reason: string) => void) =>
+        agentManager.onLifecycleEvent((event) => {
+          if (event.type === "stopped") {
+            callback(event.agent.id, event.reason);
+          }
+        }),
+    };
+
+    taskDispatcher = createTaskDispatcher(source, runtime, {
+      claimantId,
+      pollIntervalMs: config.dispatch.pollIntervalMs ?? 15_000,
+      defaultRole: config.dispatch.defaultRole ?? "worker",
+      concurrency: { global: config.dispatch.maxConcurrent ?? 3 },
+      retry: {
+        maxRetries: config.dispatch.maxRetries ?? 3,
+        baseDelayMs: config.dispatch.retryBaseDelayMs ?? 10_000,
+        maxDelayMs: config.dispatch.retryMaxDelayMs ?? 300_000,
+      },
+      eligibility: config.dispatch.eligibility,
+      tags: config.dispatch.tags,
+      reconcile: {
+        enabled: config.dispatch.reconcile?.enabled ?? true,
+        intervalMs: config.dispatch.reconcile?.intervalMs ?? 60_000,
+      },
+    });
+
+    await taskDispatcher.start();
+  }
+
+  // 7b. Control Server (lifecycle RPC for MCP subprocesses)
   const controlServer = new ControlServer(agentManager, {
     socketPath: controlSocketPath,
   });
@@ -503,6 +595,7 @@ export async function bootV2(
     controlServer,
     roleRegistry,
     controlSocketPath,
+    ...(taskDispatcher ? { taskDispatcher } : {}),
     ...(apiServer ? { apiServer } : {}),
     ...(acpServer ? { acpServer } : {}),
     ...(mapServerInstance ? { mapServerInstance } : {}),
@@ -511,6 +604,7 @@ export async function bootV2(
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (taskDispatcher) await taskDispatcher.stop();
       if (mapSidecar) await mapSidecar.stop();
       if (mapServerInstance) await mapServerInstance.stop();
       if (federationCleanup) federationCleanup();
