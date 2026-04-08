@@ -301,4 +301,76 @@ describeFn("Task Dispatch E2E", () => {
       expect(system.taskDispatcher!.running).toBe(true);
     });
   });
+
+  // ── MAP Event Bridge ───────────────────────────────────────
+
+  describe("MAP Event Bridge", () => {
+    it("dispatcher works without MAP sidecar", async () => {
+      // No MAP config → no sidecar → dispatch should still work
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        dispatch: {
+          enabled: true,
+          pollIntervalMs: 60_000,
+        },
+        // No map config
+      });
+
+      expect(system.taskDispatcher).toBeDefined();
+      expect(system.taskDispatcher!.running).toBe(true);
+
+      // dispatchNow should work without MAP bridge
+      await system.taskDispatcher!.dispatchNow();
+    });
+
+    it("onEvent subscription works independently of MAP", async () => {
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        dispatch: {
+          enabled: true,
+          pollIntervalMs: 60_000,
+        },
+      });
+
+      const events: any[] = [];
+      const unsub = system.taskDispatcher!.onEvent((e) => events.push(e));
+
+      await system.taskDispatcher!.dispatchNow();
+
+      expect(events.some((e) => e.type === "poll")).toBe(true);
+
+      // Unsubscribe stops events
+      const countBefore = events.length;
+      unsub();
+      await system.taskDispatcher!.dispatchNow();
+      expect(events.length).toBe(countBefore);
+    });
+
+    it("MAP sidecar with unreachable server does not break dispatch", async () => {
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        dispatch: {
+          enabled: true,
+          pollIntervalMs: 60_000,
+        },
+        map: {
+          enabled: true,
+          server: "ws://127.0.0.1:1", // Unreachable
+          scope: "swarm:test",
+        },
+      });
+
+      // Dispatch should work even though MAP sidecar failed to connect
+      expect(system.taskDispatcher).toBeDefined();
+      expect(system.taskDispatcher!.running).toBe(true);
+
+      await system.taskDispatcher!.dispatchNow();
+    });
+  });
 });

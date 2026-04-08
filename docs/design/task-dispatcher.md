@@ -1,6 +1,35 @@
 # Task Dispatcher Design
 
-## Overview
+## Implementation Status
+
+**Extracted to standalone package: [`swarm-dispatch`](https://www.npmjs.com/package/swarm-dispatch).**
+
+The dispatch logic originally described in this document was first implemented inside macro-agent's `trigger/dispatch/` directory, then extracted to a runtime-agnostic npm package. macro-agent now consumes `swarm-dispatch` via two thin adapters in `boot-v2.ts`:
+
+- **DispatchTaskSource** — wraps `TasksAdapter` (opentasks IPC)
+- **DispatchAgentRuntime** — wraps `AgentManagerV2` (spawn, terminate, onStopped)
+
+The dispatcher is exposed on `MacroAgentSystemV2.taskDispatcher` (optional). Dispatch events are bridged to MAP via `mapSidecar.emitEvent()` for observability.
+
+**What moved to swarm-dispatch:**
+- Dispatch tracker (concurrency, retry, state reconstruction)
+- Eligibility checker (static filters + heuristic scoring)
+- Prompt builder (default markdown template)
+- Reconciliation (external state change detection)
+- The dispatch loop itself (poll → claim → spawn → monitor)
+- OpenTasks adapter (`createOpenTasksSource`)
+
+**What stays in macro-agent:**
+- Boot wiring (~40 lines in `boot-v2.ts`)
+- AgentManagerV2 adapter (spawn with `parent: null`, lifecycle events)
+- MAP event bridge (dispatch events → MAP sidecar)
+- E2E tests (3 files: mocked, live agent, live agent + opentasks)
+
+The rest of this document is the original design that informed the implementation.
+
+---
+
+## Overview (Original Design)
 
 A dispatch mode for macro-agent's trigger system that polls opentasks for ready work and spawns agents to execute it. Turns the existing event-driven trigger architecture into an autonomous work processor — the swarmkit equivalent of Symphony's daemon loop, built on primitives that already exist.
 

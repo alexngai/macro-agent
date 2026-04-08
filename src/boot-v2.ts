@@ -577,6 +577,16 @@ export async function bootV2(
       await mapSidecar.start();
       // Wire sidecar into agent manager for session-end checkpoints
       agentManager.setSidecar(mapSidecar);
+
+      // Bridge dispatch events to MAP for observability
+      if (taskDispatcher && mapSidecar.emitEvent) {
+        taskDispatcher.onEvent((event) => {
+          mapSidecar!.emitEvent!({
+            type: `dispatch.${event.type}`,
+            ...event,
+          });
+        });
+      }
     } catch (err) {
       // Non-fatal — MAP hub connectivity is optional
       console.warn(

@@ -308,5 +308,14 @@ export function createMAPSidecar(
       if (!trajectoryReporter) return null;
       return trajectoryReporter.reportCheckpoint(checkpoint);
     },
+
+    async emitEvent(event: Record<string, unknown>): Promise<void> {
+      if (!connection || !isConnected) return;
+      try {
+        await connection.send({ scope }, { ...event, _origin: "macro-agent" });
+      } catch {
+        // Best effort — MAP hub may be temporarily unavailable
+      }
+    },
   };
 }
