@@ -35,6 +35,9 @@ export interface MAPSidecarConfig {
   /** Agent name for MAP registration (default: "macro-agent-sidecar") */
   agentName?: string;
 
+  /** Swarm ID for stable identity across reconnections */
+  swarmId?: string;
+
   /** Trajectory sync level */
   trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
 

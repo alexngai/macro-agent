@@ -110,6 +110,7 @@ export interface BootV2Config {
     systemId?: string;
     credential?: string;
     agentName?: string;
+    swarmId?: string;
     trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
     reconnectIntervalMs?: number;
     reconnection?: {

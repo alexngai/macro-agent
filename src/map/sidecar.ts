@@ -67,8 +67,8 @@ export function createMAPSidecar(
     // Include swarm_id for stable identity across reconnections.
     // When set, the hub reuses the pre-registered swarm record instead
     // of auto-generating a new one on each connection.
-    if ((config as any).swarmId) {
-      parsed.searchParams.set("swarm_id", (config as any).swarmId);
+    if (config.swarmId) {
+      parsed.searchParams.set("swarm_id", config.swarmId);
     }
     return parsed.toString();
   }
