@@ -1,6 +1,6 @@
 {
   "name": "macro-agent",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "Interact with multiple agents as if they were a single agent.",
   "type": "module",
   "main": "dist/index.js",
