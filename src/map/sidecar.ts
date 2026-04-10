@@ -107,6 +107,10 @@ export function createMAPSidecar(
         role: "sidecar",
         scopes: [scope],
         capabilities: {
+          messaging: { canSend: true, canReceive: true },
+          mail: { canCreate: true, canJoin: true, canViewHistory: true },
+          protocols: ['acp'],
+          acp: { version: '2024-10-07' },
           trajectory: { canReport: true, canServeContent: false },
           tasks: {
             canCreate: true,

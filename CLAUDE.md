@@ -439,6 +439,19 @@ The `acp/` module bridges the Agent Client Protocol (ACP) to macro-agent's V2 se
 - **SessionMapper** (`session-mapper.ts`): Maps ACP sessions to macro-agent agent states
 - **MAPBridge** (`map-bridge.ts`): Bridges MAP protocol to macro-agent for external observability
 
+### MAP Capabilities
+
+The MAP sidecar (`src/map/sidecar.ts`) declares these capabilities at registration, following the MAP `ParticipantCapabilities` schema:
+
+- `messaging: { canSend: true, canReceive: true }` — can exchange MAP scope messages
+- `mail: { canCreate: true, canJoin: true, canViewHistory: true }` — supports agent-inbox conversations (enables Mail chat mode in OpenHive)
+- `protocols: ['acp']` — advertises ACP protocol support (enables ACP streaming chat in OpenHive)
+- `acp: { version: '2024-10-07' }` — ACP version details
+- `trajectory: { canReport: true, canServeContent: false }` — reports checkpoints (does not serve content on demand)
+- `tasks: { canCreate, canAssign, canUpdate, canList }` — task management
+
+Message delivery is **push-based**: `InboxAdapter.onDelivery()` fires immediately on message receipt, the trigger system maps importance → wake action, and `WakeManager` injects into the active session via inject/interrupt/prompt fallback chain.
+
 ### REST API Server
 
 The `api/` module provides HTTP endpoints for external integration:
