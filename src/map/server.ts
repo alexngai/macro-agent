@@ -290,14 +290,26 @@ export function createMAPServerInstance(
           const message = data?.message;
           if (!message) return;
 
+          // Check if this is an ACP envelope — these should always be handled
+          // by the bridge, even if the target agent can't be resolved to a
+          // specific local agent (the bridge creates a head manager on demand).
+          const payload = message?.payload;
+          const isAcp = payload && typeof payload === 'object' &&
+            'acp' in payload && 'acpContext' in payload;
+
           const toField = message.to;
           const mapTargetId = data?.agentId ??
             (typeof toField === "string" ? toField : toField?.agent ?? toField?.id);
           if (!mapTargetId) return;
 
           const localAgentId = mapIdToLocalId.get(mapTargetId) ?? mapTargetId;
-          const localAgent = deps.agentManager.get(localAgentId);
-          if (!localAgent) return;
+
+          // For ACP envelopes, always forward to bridge (it creates sessions on demand).
+          // For non-ACP messages, require a local agent to exist.
+          if (!isAcp) {
+            const localAgent = deps.agentManager.get(localAgentId);
+            if (!localAgent) return;
+          }
 
           // Defer ACP processing to next tick so map/send response goes out first
           setImmediate(() => {

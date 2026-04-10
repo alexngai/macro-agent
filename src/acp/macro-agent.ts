@@ -414,11 +414,8 @@ export function createMacroAgent(
       params: NewSessionRequest,
     ): Promise<NewSessionResponse> {
       const cwd = params.cwd ?? defaultCwd;
-
       // Get or create a head manager for this workspace
-      const headManager = await agentManager.getOrCreateHeadManager({
-        cwd,
-      });
+      const headManager = await agentManager.getOrCreateHeadManager({ cwd });
 
       // Create session mapping
       const mapping = sessionMapper.createMapping(

@@ -476,6 +476,7 @@ export async function bootV2(
           systemId: config.map.systemId,
           credential: config.map.credential,
           agentName: config.map.agentName,
+          swarmId: config.map.swarmId,
           trajectorySyncLevel: config.map.trajectorySyncLevel,
           reconnectIntervalMs: config.map.reconnectIntervalMs,
           reconnection: config.map.reconnection,
