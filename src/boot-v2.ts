@@ -344,23 +344,25 @@ export async function bootV2(
   }, HEALTH_CHECK_INTERVAL_MS);
   healthCheckTimer.unref(); // Don't prevent process exit
 
+  // Shared mutable system reference — passed to ACP server, MAP server, API server.
+  // Components created before the sidecar (steps 9-11) receive this object.
+  // When the sidecar is created (step 13), it's attached here so all components
+  // see it via the same reference (e.g., ACP handler accessing system.mapSidecar).
+  const systemRef = {
+    agentManager,
+    agentStore,
+    inboxAdapter,
+    tasksAdapter,
+    triggerSystem,
+    controlServer,
+    roleRegistry,
+    controlSocketPath,
+  } as any;
+
   // 9. REST API server (optional)
   let apiServer: ApiServer | null = null;
   if (config.api?.enabled) {
     const { createApiServer } = await import("./api/server.js");
-    // Build a partial system reference for the API server.
-    // The full system object is returned below; we create the API server
-    // first so it can be included in the return value and shut down cleanly.
-    const systemRef = {
-      agentManager,
-      agentStore,
-      inboxAdapter,
-      tasksAdapter,
-      triggerSystem,
-      controlServer,
-      roleRegistry,
-      controlSocketPath,
-    } as any;
     apiServer = createApiServer(systemRef, {
       port: config.api.port,
       host: config.api.host,
@@ -373,17 +375,7 @@ export async function bootV2(
   if (config.acp?.enabled) {
     const { createWebSocketACPServer } = await import("./acp/websocket-server.js");
     acpServer = createWebSocketACPServer(
-      // Pass a partial system ref (the full object is built below)
-      {
-        agentManager,
-        agentStore,
-        inboxAdapter,
-        tasksAdapter,
-        triggerSystem,
-        controlServer,
-        roleRegistry,
-        controlSocketPath,
-      } as any,
+      systemRef,
       {
         port: config.acp.port,
         host: config.acp.host,
@@ -404,17 +396,7 @@ export async function bootV2(
           agentStore,
           inboxAdapter,
           tasksAdapter,
-          // Pass partial system ref for ACP-over-MAP bridge
-          system: {
-            agentManager,
-            agentStore,
-            inboxAdapter,
-            tasksAdapter,
-            triggerSystem,
-            controlServer,
-            roleRegistry,
-            controlSocketPath,
-          } as any,
+          system: systemRef,
         },
         {
           port: config.mapServer.port,
@@ -487,6 +469,8 @@ export async function bootV2(
       await mapSidecar.start();
       // Wire sidecar into agent manager for session-end checkpoints
       agentManager.setSidecar(mapSidecar);
+      // Attach to shared system ref so ACP/MAP handlers can access it
+      systemRef.mapSidecar = mapSidecar;
     } catch (err) {
       // Non-fatal — MAP hub connectivity is optional
       console.warn(

@@ -135,19 +135,13 @@ describe("AgentManagerV2", () => {
       );
     });
 
-    it("should create task in opentasks", async () => {
-      const result = await manager.spawn({
+    it("should not create task in opentasks on spawn", async () => {
+      await manager.spawn({
         task: "Implement feature",
         role: "worker",
       });
 
-      expect(tasksAdapter.createTask).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Implement feature",
-          assignee: result.id,
-          tags: ["worker"],
-        })
-      );
+      expect(tasksAdapter.createTask).not.toHaveBeenCalled();
     });
 
     it("should validate parent exists", async () => {
@@ -269,7 +263,7 @@ describe("AgentManagerV2", () => {
       expect(inboxAdapter.deregisterAgent).toHaveBeenCalledWith(spawned.id);
     });
 
-    it("should transition task in opentasks", async () => {
+    it("should not transition task in opentasks on terminate", async () => {
       const spawned = await manager.spawn({
         task: "Test",
         role: "worker",
@@ -277,7 +271,7 @@ describe("AgentManagerV2", () => {
 
       await manager.terminate(spawned.id, "completed");
 
-      expect(tasksAdapter.transitionTask).toHaveBeenCalled();
+      expect(tasksAdapter.transitionTask).not.toHaveBeenCalled();
     });
 
     it("should notify parent via inbox", async () => {

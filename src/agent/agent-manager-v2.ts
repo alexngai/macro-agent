@@ -600,20 +600,6 @@ export function createAgentManagerV2(
         scope: team_instance ?? "default",
       });
 
-      // Create task in opentasks
-      if (tasksAdapter.connected) {
-        try {
-          const otTaskId = await tasksAdapter.createTask({
-            title: task ?? `Task for ${agentId}`,
-            assignee: agentId,
-            tags: role ? [role] : [],
-          });
-          agentStore.updateAgent(agentId, { task_id: otTaskId });
-        } catch {
-          // Non-fatal — opentasks may not be available
-        }
-      }
-
       // Track active session
       const activeSession: ActiveSession = {
         agentId,
@@ -726,21 +712,6 @@ export function createAgentManagerV2(
     // Revoke auth token
     if (agentTokenManager) {
       agentTokenManager.revokeToken(agentId);
-    }
-
-    // Transition task in opentasks
-    if (record.task_id && tasksAdapter.connected) {
-      try {
-        const action =
-          reason === "completed"
-            ? "complete"
-            : reason === "failed"
-              ? "fail"
-              : "block";
-        await tasksAdapter.transitionTask(record.task_id, action as any);
-      } catch {
-        // Non-fatal task transition failure
-      }
     }
 
     // Notify parent via inbox

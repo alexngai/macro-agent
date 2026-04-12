@@ -126,13 +126,31 @@ describe("MacroAgentBackend", () => {
 
   describe("spawn", () => {
     it("spawns analyst via agentManager", async () => {
-      const session = await backend.spawn({
+      // Use a deferred promise so promptUntilDone hangs, keeping session in "running"
+      let resolvePrompt!: () => void;
+      const hangingPrompt = new Promise<void>((r) => { resolvePrompt = r; });
+
+      const am = createMockAgentManager({
+        promptUntilDone: vi.fn().mockImplementation(async () => {
+          await hangingPrompt;
+          return {
+            doneCalled: true,
+            doneStatus: "completed",
+            exceededMax: false,
+            followUpCount: 0,
+            updates: [],
+          };
+        }),
+      });
+      const b = new MacroAgentBackend(am);
+
+      const session = await b.spawn({
         agentType: "claude-code",
         task: { description: "Analyze trajectory" },
         cwd: "/workspace",
       });
 
-      expect(agentManager.spawn).toHaveBeenCalledWith(
+      expect(am.spawn).toHaveBeenCalledWith(
         expect.objectContaining({
           task: "Analyze trajectory",
           role: "analyst",
@@ -143,6 +161,9 @@ describe("MacroAgentBackend", () => {
       expect(session.state).toBe("running");
       expect(session.agentType).toBe("claude-code");
       expect(session.task.description).toBe("Analyze trajectory");
+
+      // Let the hanging prompt resolve to avoid dangling promises
+      resolvePrompt();
     });
 
     it("returns session with unique ID", async () => {
@@ -382,17 +403,38 @@ describe("MacroAgentBackend", () => {
 
   describe("terminate", () => {
     it("terminates the macro-agent process", async () => {
-      const session = await backend.spawn({
+      // Use a deferred promise so promptUntilDone hangs until after terminate
+      let resolvePrompt!: () => void;
+      const hangingPrompt = new Promise<void>((r) => { resolvePrompt = r; });
+
+      const am = createMockAgentManager({
+        promptUntilDone: vi.fn().mockImplementation(async () => {
+          await hangingPrompt;
+          return {
+            doneCalled: true,
+            doneStatus: "completed",
+            exceededMax: false,
+            followUpCount: 0,
+            updates: [],
+          };
+        }),
+      });
+      const b = new MacroAgentBackend(am);
+
+      const session = await b.spawn({
         agentType: "claude-code",
         task: { description: "test" },
       });
 
-      await backend.terminate(session.id);
+      await b.terminate(session.id);
 
-      expect(agentManager.terminate).toHaveBeenCalledWith(
+      expect(am.terminate).toHaveBeenCalledWith(
         "agent_test123",
         "cancelled",
       );
+
+      // Let the hanging prompt resolve to avoid dangling promises
+      resolvePrompt();
     });
 
     it("sets session to failed", async () => {

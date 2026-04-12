@@ -58,7 +58,6 @@ macro-agent enables coordinated work across multiple AI agents with:
 │  - Spawns agents via acp-factory (AgentFactory)             │
 │  - Manages lifecycle (spawn, prompt, stop, continue, fork)  │
 │  - Registers agents in agent-inbox on spawn                 │
-│  - Creates tasks in opentasks on spawn                      │
 │  - Workspace allocation via WorkspaceManager                │
 │  - Cascade termination with change consolidation            │
 │  - Spawn interceptor hook (set by TeamManager)              │
@@ -303,7 +302,7 @@ src/
 macro-agent delegates two major concerns to external subsystems:
 
 - **agent-inbox**: All messaging (send/receive, threading, conversations, federation). Embedded in-process for zero-latency events, with IPC server for agent MCP subprocesses.
-- **opentasks**: All task management (CRUD, dependencies, claiming, state transitions). Connected via IPC to opentasks daemon (auto-started if needed).
+- **opentasks**: Task management for pull-mode workflows (claiming, dependencies, state transitions). Connected via IPC to opentasks daemon (auto-started if needed). Note: AgentManagerV2 does **not** create opentasks nodes on spawn or transition them on terminate — that was removed to avoid polluting the task graph with per-session noise. Opentasks is used only for explicit task operations (pull-mode claim/unclaim/list, team task coordination).
 
 macro-agent owns: agent lifecycle, workspace isolation, team topology, role system, trigger/wake, control socket.
 
@@ -441,14 +440,23 @@ The `acp/` module bridges the Agent Client Protocol (ACP) to macro-agent's V2 se
 
 ### MAP Capabilities
 
-The MAP sidecar (`src/map/sidecar.ts`) declares these capabilities at registration, following the MAP `ParticipantCapabilities` schema:
+Capabilities are declared at two levels:
+
+**Connection-level** (sidecar, `src/map/sidecar.ts`): Declared when the sidecar connects to the OpenHive MAP hub. These describe the swarm's general capabilities:
 
 - `messaging: { canSend: true, canReceive: true }` — can exchange MAP scope messages
 - `mail: { canCreate: true, canJoin: true, canViewHistory: true }` — supports agent-inbox conversations (enables Mail chat mode in OpenHive)
-- `protocols: ['acp']` — advertises ACP protocol support (enables ACP streaming chat in OpenHive)
-- `acp: { version: '2024-10-07' }` — ACP version details
 - `trajectory: { canReport: true, canServeContent: false }` — reports checkpoints (does not serve content on demand)
 - `tasks: { canCreate, canAssign, canUpdate, canList }` — task management
+
+**Per-agent** (lifecycle bridge, `src/map/lifecycle-bridge.ts`): Declared when agents register on the hub via `map/agents/register`. ACP is per-agent because you connect to a specific agent, not to the swarm:
+
+- **Coordinators** (head managers): `protocols: ['acp']`, `acp: { version: '2024-10-07' }`, `messaging: { canReceive: true }` — enables ACP streaming chat in OpenHive
+- **Workers**: `messaging: { canReceive: true }` — no ACP
+
+The hub aggregates per-agent capabilities into the swarm record (union semantics). OpenHive resolves the ACP target by finding the first registered agent with `protocols: ['acp']` on the live connection.
+
+The lifecycle bridge uses `map/agents/register` (not `map/agents/spawn`) to register agents on the hub, because `spawn` drops the `capabilities` field. The bridge tracks MAP-assigned ULIDs (`mapId`) for correct unregistration.
 
 Message delivery is **push-based**: `InboxAdapter.onDelivery()` fires immediately on message receipt, the trigger system maps importance → wake action, and `WakeManager` injects into the active session via inject/interrupt/prompt fallback chain.
 
@@ -512,7 +520,7 @@ All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforc
 1. Agent calls `done()` MCP tool with status + summary
 2. MCPServerV2 dispatches to `createDoneHandlerV2()` which builds a handler using `HandlerDepsV2` (InboxAdapter, TasksAdapter, AgentManager)
 3. Role-specific handler runs:
-   - **Worker**: Commits changes, emits `work:done` signal to parent via InboxAdapter, transitions task via TasksAdapter
+   - **Worker**: Commits changes, emits `work:done` signal to parent via InboxAdapter
    - **Coordinator**: Emits completion signal, cascade-terminates children if needed
    - **Monitor**: Emits health report
 4. If `shouldTerminate`, AgentManagerV2 handles termination including workspace cleanup and change consolidation
