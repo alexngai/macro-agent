@@ -154,6 +154,20 @@ export function createMacroAgent(
   let firstPrompt: string | null = null;
   const sessionStartedAt = new Date().toISOString();
 
+  // Per-session update history for ACP session/load replay.
+  // Per the ACP spec, loadSession should re-emit all session/update notifications
+  // previously sent so the client can reconstruct state. We buffer them here
+  // keyed by ACP session ID.
+  const sessionUpdateHistory = new Map<string, SessionUpdate[]>();
+  function appendSessionUpdate(acpSessionId: string, update: SessionUpdate): void {
+    const arr = sessionUpdateHistory.get(acpSessionId);
+    if (arr) {
+      arr.push(update);
+    } else {
+      sessionUpdateHistory.set(acpSessionId, [update]);
+    }
+  }
+
   // Git info (cached — read once per session)
   let gitInfo: { branch: string | null; commitHash: string | null; remoteUrl: string | null } | null = null;
   function getGitInfo(cwd: string): { branch: string | null; commitHash: string | null; remoteUrl: string | null } {
@@ -444,9 +458,93 @@ export function createMacroAgent(
     ): Promise<LoadSessionResponse> {
       const sessionId = params.sessionId;
 
+      /**
+       * Resolve the provider_session_id (Claude Code's UUID for the session)
+       * for a given macro-agent acp session. Needed to locate the JSONL
+       * transcript on disk as a fallback when the in-memory buffer is empty.
+       */
+      const resolveProviderSessionId = (agentId: string): string | undefined => {
+        const store = (system as any).agentStore;
+        const rec = store?.getAgent?.(agentId);
+        const meta = rec?.metadata as Record<string, unknown> | undefined;
+        const psid = meta?.provider_session_id;
+        return typeof psid === "string" ? psid : undefined;
+      };
+
+      // Replay helper: re-emit session/update notifications so the client can
+      // rebuild its view of the conversation. Per the ACP spec, loadSession
+      // SHOULD emit all previously-sent session/update events.
+      //
+      // Two sources in priority order:
+      //   1. In-memory buffer (populated by prior prompts in this process).
+      //      Fast and accurate — exactly what was streamed to the client.
+      //   2. Claude Code's JSONL transcript on disk (durable across restarts).
+      //      Used when the buffer is empty — e.g., we got a loadSession for a
+      //      session that was prompted but whose updates were never buffered,
+      //      or after a process restart within the same session's lifetime.
+      //
+      // This is a workaround: the ACP spec expects the underlying agent
+      // (claude-code-acp) to emit session/update during loadSession, but its
+      // current implementation only passes `resume: sessionId` to Claude Code
+      // SDK for internal context restoration without surfacing history to the
+      // client. See claude-code-replay.ts for details.
+      const replayHistory = async (agentIdForLookup?: string, explicitProviderSessionId?: string): Promise<void> => {
+        const buffered = sessionUpdateHistory.get(sessionId);
+        if (buffered && buffered.length > 0) {
+          for (const update of buffered) {
+            try {
+              await connection.sessionUpdate({ sessionId, update });
+            } catch {
+              // Best effort — continue replaying remaining updates
+            }
+          }
+          return;
+        }
+
+        // Buffer empty — fall back to Claude Code JSONL if we can locate it.
+        // Provider session ID resolution priority:
+        //   1. Explicit — passed via ACP LoadSessionRequest._meta.provider_session_id
+        //      (survives macro-agent restart since it comes from the client)
+        //   2. From agent metadata — when sessionMapper still has the mapping
+        const providerSessionId =
+          explicitProviderSessionId ??
+          (agentIdForLookup ? resolveProviderSessionId(agentIdForLookup) : undefined);
+        if (!providerSessionId) return;
+
+        try {
+          const { replayClaudeCodeTranscript } = await import("./claude-code-replay.js");
+          const bufferForFuture: SessionUpdate[] = [];
+          for await (const update of replayClaudeCodeTranscript(providerSessionId)) {
+            try {
+              await connection.sessionUpdate({ sessionId, update });
+              bufferForFuture.push(update);
+            } catch {
+              // Best effort — continue
+            }
+          }
+          // Populate the in-memory buffer so subsequent loadSession calls use
+          // the fast path. Only if we actually read something.
+          if (bufferForFuture.length > 0) {
+            sessionUpdateHistory.set(sessionId, bufferForFuture);
+          }
+        } catch {
+          // Transcript read failed — no history to emit
+        }
+      };
+
+      // Extract optional provider_session_id from ACP LoadSessionRequest._meta.
+      // Clients (like OpenHive) that know the underlying Claude Code session ID
+      // can pass it here to enable history recovery across macro-agent restarts
+      // (when sessionMapper is empty because it's in-memory only).
+      const metaProviderSessionId =
+        typeof (params as any)._meta?.provider_session_id === "string"
+          ? ((params as any)._meta.provider_session_id as string)
+          : undefined;
+
       // Check if we already have a mapping for this session
       let mapping = sessionMapper.getMapping(sessionId);
       if (mapping) {
+        await replayHistory(mapping.agentId, metaProviderSessionId);
         return {};
       }
 
@@ -459,6 +557,17 @@ export function createMacroAgent(
           resumed.session_id,
           resumed.id,
         );
+        await replayHistory(resumed.id, metaProviderSessionId);
+        return {};
+      }
+
+      // No mapping — but if the client supplied provider_session_id via _meta,
+      // we can still replay history from the JSONL on disk. This is the
+      // cross-restart recovery path. We don't create a session mapping because
+      // there's no live agent to bind to — the client should create a fresh
+      // session if it wants to continue the conversation.
+      if (metaProviderSessionId) {
+        await replayHistory(undefined, metaProviderSessionId);
         return {};
       }
 
@@ -487,6 +596,20 @@ export function createMacroAgent(
         }
       }
       const message = textParts.join("\n") || "";
+
+      // Record the user prompt as a user_message_chunk update in the replay
+      // buffer so session/load can reconstruct the full conversation. The
+      // agent itself doesn't emit this — the client sent it — but it IS part
+      // of the session's logical state.
+      for (const block of params.prompt) {
+        if ("text" in block && typeof block.text === "string" && block.text) {
+          const userChunk = {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: block.text },
+          } as unknown as SessionUpdate;
+          appendSessionUpdate(params.sessionId, userChunk);
+        }
+      }
 
       sessionMapper.setProcessing(params.sessionId, true);
 
@@ -703,6 +826,10 @@ export function createMacroAgent(
               sessionId: params.sessionId,
               update,
             };
+            // Buffer for replay on session/load. Per the ACP spec, loadSession
+            // should re-emit all previously sent session/update notifications
+            // so the client can reconstruct state after reconnect.
+            appendSessionUpdate(params.sessionId, update);
             await connection.sessionUpdate(notification);
           }
         }
@@ -742,6 +869,11 @@ export function createMacroAgent(
               phase: "active",
               startedAt: sessionStartedAt,
               label: `Step ${checkpointCounter} (${toolCallCount} tool calls)`,
+              // Underlying Claude Code session ID — lets OpenHive find the
+              // JSONL transcript on disk for history recovery even if the
+              // macro-agent process dies.
+              provider_session_id:
+                (agentRecord as any)?.metadata?.provider_session_id ?? undefined,
               // metrics fields
               ...(isMetrics ? {
                 duration_ms: Date.now() - promptStartTime,

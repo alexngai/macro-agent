@@ -82,6 +82,13 @@ export function createLifecycleBridge(
         // per-agent capabilities; map/agents/spawn drops them).
         // Include the local MAP server's ID in metadata so clients can route
         // ACP messages to the correct agent on the macro-agent's own MAP server.
+        // Also include provider_session_id so OpenHive can find the underlying
+        // Claude Code JSONL transcript on disk for history recovery.
+        const agentMetadata = (agent as any).metadata as Record<string, unknown> | undefined;
+        const providerSessionId =
+          typeof agentMetadata?.provider_session_id === "string"
+            ? agentMetadata.provider_session_id
+            : undefined;
         (async () => {
           const localMapId = await waitForLocalMapId(agent.id);
           try {
@@ -92,6 +99,7 @@ export function createLifecycleBridge(
               metadata: {
                 localAgentId: agent.id,
                 localMapId,
+                provider_session_id: providerSessionId,
                 parent: (agent as any).parent_id ?? undefined,
                 team: (agent as any).team ?? undefined,
                 cwd: (agent as any).cwd ?? undefined,

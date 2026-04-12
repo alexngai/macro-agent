@@ -126,6 +126,10 @@ export function createMAPSidecar(
         metadata: {
           systemId: config.systemId ?? "macro-agent",
           type: "macro-agent-sidecar",
+          // Signals that this swarm can spawn ACP-capable coordinators on demand,
+          // even before any coordinator has registered. The hub's /sessions/create-acp
+          // endpoint handles the spawn via _macro/spawnAgent when no ACP agent exists.
+          canHostAcp: true,
         },
         reconnection: {
           enabled: config.reconnection?.enabled ?? true,
@@ -174,6 +178,19 @@ export function createMAPSidecar(
       }
       isConnected = true;
       } // end if (!isConnected)
+
+      // Publish sidecar metadata to the hub. The MAP SDK's connect()/register()
+      // does not propagate the `metadata` field from connect options — it only
+      // forwards name/role/capabilities/scopes. Call updateMetadata explicitly
+      // so the hub sees canHostAcp (and any other metadata the UI relies on).
+      try {
+        const metadata = (connectOpts.metadata as Record<string, unknown>) ?? {};
+        if (typeof connection.updateMetadata === "function") {
+          await connection.updateMetadata(metadata);
+        }
+      } catch {
+        // Non-fatal — metadata is advisory
+      }
 
       // Monitor connection state
       connection.onStateChange(
