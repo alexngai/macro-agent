@@ -35,7 +35,7 @@ export function createMAPSidecar(
   deps: MAPSidecarDeps,
   config: MAPSidecarConfig,
 ): MAPSidecar {
-  const { agentManager, agentStore, inboxAdapter, tasksAdapter } = deps;
+  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId } = deps;
   const scope = config.scope ?? "swarm:macro-agent";
   const agentName = config.agentName ?? "macro-agent-sidecar";
 
@@ -252,6 +252,7 @@ export function createMAPSidecar(
       agentStore,
       scope,
       taskBridge,
+      getLocalMapId,
     );
     lifecycleCallback = bridge.callback;
     lifecycleCleanup = bridge.cleanup;

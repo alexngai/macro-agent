@@ -36,8 +36,26 @@ export function createLifecycleBridge(
   agentStore: AgentStore,
   scope: string,
   taskBridge?: TaskBridge,
+  getLocalMapId?: (localAgentId: string) => string | undefined,
 ): { callback: AgentLifecycleCallback; cleanup: () => Promise<void> } {
   const registered = new Map<string, RegisteredAgent>();
+
+  /**
+   * Poll for the local MAP server's assigned ID for an agent.
+   * The local MAP server and the lifecycle bridge both listen to the same
+   * lifecycle callback, so they may fire in any order. Poll briefly to handle
+   * the race.
+   */
+  async function waitForLocalMapId(localAgentId: string, timeoutMs = 500): Promise<string | undefined> {
+    if (!getLocalMapId) return undefined;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const id = getLocalMapId(localAgentId);
+      if (id) return id;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return getLocalMapId(localAgentId);
+  }
 
   const callback: AgentLifecycleCallback = (event) => {
     if (!connection.isConnected) return;
@@ -61,29 +79,33 @@ export function createLifecycleBridge(
         }
 
         // Register agent with MAP hub (use map/agents/register to preserve
-        // per-agent capabilities; map/agents/spawn drops them)
-        connection
-          .callExtension("map/agents/register", {
-            name,
-            role,
-            capabilities,
-            metadata: {
-              localAgentId: agent.id,
-              parent: (agent as any).parent_id ?? undefined,
-              team: (agent as any).team ?? undefined,
-              cwd: (agent as any).cwd ?? undefined,
-            },
-          })
-          .then((result: any) => {
+        // per-agent capabilities; map/agents/spawn drops them).
+        // Include the local MAP server's ID in metadata so clients can route
+        // ACP messages to the correct agent on the macro-agent's own MAP server.
+        (async () => {
+          const localMapId = await waitForLocalMapId(agent.id);
+          try {
+            const result: any = await connection.callExtension("map/agents/register", {
+              name,
+              role,
+              capabilities,
+              metadata: {
+                localAgentId: agent.id,
+                localMapId,
+                parent: (agent as any).parent_id ?? undefined,
+                team: (agent as any).team ?? undefined,
+                cwd: (agent as any).cwd ?? undefined,
+              },
+            });
             // Track the MAP-assigned agent ID for unregistration
             const mapId = result?.agent?.id ?? result?.id;
             if (mapId) {
               entry.mapId = mapId;
             }
-          })
-          .catch(() => {
+          } catch {
             // Silent — MAP hub may be temporarily unavailable
-          });
+          }
+        })();
 
         // Bridge task creation if agent has a task
         if (taskBridge && (agent as any).task_id) {

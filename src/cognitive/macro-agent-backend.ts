@@ -240,6 +240,46 @@ export class MacroAgentBackend {
     const timeout = config.timeout;
     let softTimer: ReturnType<typeof setTimeout> | undefined;
     let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    let completionNotified = false;
+
+    // Helper: fire the completion callback + inbox notification exactly once.
+    // Called from both the hard-timer path and the finally block to avoid a
+    // race where waitForSession returns (state != "running") before finally
+    // runs and fires the callback.
+    const notifyCompletion = async (): Promise<void> => {
+      if (completionNotified) return;
+      if (session.state !== "completed" && session.state !== "failed") return;
+      completionNotified = true;
+
+      const completeEvent: SessionCompleteEvent = {
+        sessionId: session.id,
+        agentId: agentId as string,
+        state: session.state,
+        duration_ms: session.endTime
+          ? session.endTime.getTime() - session.startTime.getTime()
+          : 0,
+        message_count: session.messages.length,
+        tool_call_count: session.toolCalls.length,
+      };
+
+      this.onSessionComplete?.(completeEvent);
+
+      if (this.inboxAdapter) {
+        try {
+          await this.inboxAdapter.send(
+            agentId as string,
+            agentId as string,
+            {
+              type: "session.complete",
+              sessionId: session.id,
+              state: session.state,
+              duration_ms: completeEvent.duration_ms,
+              outcome: session.state === "completed" ? "success" : "failure",
+            },
+          );
+        } catch { /* best-effort */ }
+      }
+    };
 
     try {
       if (timeout && timeout > 0) {
@@ -263,6 +303,9 @@ export class MacroAgentBackend {
           session.state = "failed";
           session.error = "Timeout exceeded";
           session.endTime = new Date();
+          // Fire completion callback immediately — the finally block's
+          // deferred callback could race with waitForSession returning.
+          void notifyCompletion();
           this.agentManager.terminate(agentId, "timeout").catch(() => {});
         }, timeout);
       }
@@ -307,35 +350,8 @@ export class MacroAgentBackend {
       }
 
       // Notify completion (no trajectory extraction — OpenHive handles that via sessionlog)
-      if (session.state === "completed" || session.state === "failed") {
-        const completeEvent: SessionCompleteEvent = {
-          sessionId: session.id,
-          agentId: agentId as string,
-          state: session.state,
-          duration_ms: session.endTime
-            ? session.endTime.getTime() - session.startTime.getTime()
-            : 0,
-          message_count: session.messages.length,
-          tool_call_count: session.toolCalls.length,
-        };
-
-        this.onSessionComplete?.(completeEvent);
-
-        if (this.inboxAdapter) {
-          await this.inboxAdapter.send(
-            agentId as string,
-            agentId as string,
-            {
-              type: "session.complete",
-              sessionId: session.id,
-              state: session.state,
-              duration_ms: completeEvent.duration_ms,
-              outcome: session.state === "completed" ? "success" : "failure",
-            },
-            { subject: "session.complete" },
-          ).catch(() => {});
-        }
-      }
+      // This is a no-op if the hard-timer path already fired it.
+      await notifyCompletion();
 
       // Clean up agent process
       if (session.state !== "running") {

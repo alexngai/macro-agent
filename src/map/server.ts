@@ -535,5 +535,9 @@ export function createMAPServerInstance(
     getConnectionCount(): number {
       return connectionCount;
     },
+
+    getLocalMapId(localAgentId: string): string | undefined {
+      return localIdToMapId.get(localAgentId);
+    },
   };
 }

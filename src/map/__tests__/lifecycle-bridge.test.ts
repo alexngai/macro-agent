@@ -48,6 +48,13 @@ function mockTaskBridge(): TaskBridge & {
   };
 }
 
+/** Flush microtasks and any pending setTimeout(0)-ish waits used by the bridge */
+async function flushAsync(iterations = 5): Promise<void> {
+  for (let i = 0; i < iterations; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe("LifecycleBridge", () => {
   let conn: ReturnType<typeof mockConnection>;
   const scope = "swarm:test";
@@ -56,7 +63,7 @@ describe("LifecycleBridge", () => {
     conn = mockConnection();
   });
 
-  it("registers agent with MAP hub on spawn event", () => {
+  it("registers agent with MAP hub on spawn event", async () => {
     const { callback } = createLifecycleBridge(
       conn,
       {} as AgentStore,
@@ -68,6 +75,8 @@ describe("LifecycleBridge", () => {
       agent: mockAgent({ id: "agent-1", name: "worker-1", role: "worker" }),
     });
 
+    await flushAsync();
+
     expect(conn.callExtension).toHaveBeenCalledWith(
       "map/agents/register",
       expect.objectContaining({
@@ -77,7 +86,7 @@ describe("LifecycleBridge", () => {
     );
   });
 
-  it("includes per-agent ACP capabilities for coordinators", () => {
+  it("includes per-agent ACP capabilities for coordinators", async () => {
     const { callback } = createLifecycleBridge(
       conn,
       {} as AgentStore,
@@ -88,6 +97,8 @@ describe("LifecycleBridge", () => {
       type: "spawned",
       agent: mockAgent({ id: "coord-1", name: "coordinator-1", role: "coordinator" }),
     });
+
+    await flushAsync();
 
     expect(conn.callExtension).toHaveBeenCalledWith(
       "map/agents/register",
@@ -103,7 +114,7 @@ describe("LifecycleBridge", () => {
     );
   });
 
-  it("does not include ACP capabilities for workers", () => {
+  it("does not include ACP capabilities for workers", async () => {
     const { callback } = createLifecycleBridge(
       conn,
       {} as AgentStore,
@@ -115,6 +126,8 @@ describe("LifecycleBridge", () => {
       agent: mockAgent({ id: "worker-1", name: "worker-1", role: "worker" }),
     });
 
+    await flushAsync();
+
     const call = conn.callExtension.mock.calls[0];
     const params = call[1] as Record<string, unknown>;
     const caps = params.capabilities as Record<string, unknown>;
@@ -123,7 +136,63 @@ describe("LifecycleBridge", () => {
     expect(caps.messaging).toEqual({ canReceive: true });
   });
 
-  it("unregisters agent from MAP hub on stop event", () => {
+  it("includes localMapId in metadata when getLocalMapId resolves", async () => {
+    const getLocalMapId = vi.fn((id: string) =>
+      id === "coord-1" ? "map-ulid-local" : undefined,
+    );
+    const { callback } = createLifecycleBridge(
+      conn,
+      {} as AgentStore,
+      scope,
+      undefined,
+      getLocalMapId,
+    );
+
+    callback({
+      type: "spawned",
+      agent: mockAgent({ id: "coord-1", name: "coordinator-1", role: "coordinator" }),
+    });
+
+    await flushAsync();
+
+    const call = conn.callExtension.mock.calls.find(
+      (c: any[]) => c[0] === "map/agents/register",
+    );
+    expect(call).toBeDefined();
+    const params = call![1] as Record<string, unknown>;
+    const metadata = params.metadata as Record<string, unknown>;
+    expect(metadata.localMapId).toBe("map-ulid-local");
+    expect(metadata.localAgentId).toBe("coord-1");
+  });
+
+  it("registers without localMapId when lookup returns undefined", async () => {
+    const getLocalMapId = vi.fn(() => undefined);
+    const { callback } = createLifecycleBridge(
+      conn,
+      {} as AgentStore,
+      scope,
+      undefined,
+      getLocalMapId,
+    );
+
+    callback({
+      type: "spawned",
+      agent: mockAgent({ id: "coord-1", role: "coordinator" }),
+    });
+
+    // Use a longer wait since the bridge will poll ~500ms for the local MAP ID
+    await new Promise((r) => setTimeout(r, 600));
+
+    const call = conn.callExtension.mock.calls.find(
+      (c: any[]) => c[0] === "map/agents/register",
+    );
+    expect(call).toBeDefined();
+    const params = call![1] as Record<string, unknown>;
+    const metadata = params.metadata as Record<string, unknown>;
+    expect(metadata.localMapId).toBeUndefined();
+  });
+
+  it("unregisters agent from MAP hub on stop event", async () => {
     const { callback } = createLifecycleBridge(
       conn,
       {} as AgentStore,
@@ -132,6 +201,7 @@ describe("LifecycleBridge", () => {
 
     // First spawn, then stop
     callback({ type: "spawned", agent: mockAgent({ id: "agent-1" }) });
+    await flushAsync();
     callback({
       type: "stopped",
       agent: mockAgent({ id: "agent-1" }),
@@ -157,8 +227,8 @@ describe("LifecycleBridge", () => {
 
     callback({ type: "spawned", agent: mockAgent({ id: "agent-1" }) });
 
-    // Wait for the .then() that stores mapId
-    await new Promise(r => setTimeout(r, 10));
+    // Wait for spawn registration + mapId capture
+    await flushAsync();
 
     callback({
       type: "stopped",
@@ -174,7 +244,7 @@ describe("LifecycleBridge", () => {
     );
   });
 
-  it("does nothing when disconnected", () => {
+  it("does nothing when disconnected", async () => {
     const disconnected = {
       ...conn,
       get isConnected() {
@@ -188,6 +258,8 @@ describe("LifecycleBridge", () => {
     );
 
     callback({ type: "spawned", agent: mockAgent() });
+
+    await flushAsync();
 
     expect(conn.callExtension).not.toHaveBeenCalled();
   });
@@ -246,16 +318,16 @@ describe("LifecycleBridge", () => {
     callback({ type: "spawned", agent: mockAgent({ id: "a1" }) });
     callback({ type: "spawned", agent: mockAgent({ id: "a2" }) });
 
+    await flushAsync();
     await cleanup();
 
-    // 2 register calls + 2 unregister calls
     const unregisterCalls = conn.callExtension.mock.calls.filter(
       (c: any[]) => c[0] === "map/agents/unregister",
     );
     expect(unregisterCalls).toHaveLength(2);
   });
 
-  it("silently handles MAP call failures", () => {
+  it("silently handles MAP call failures", async () => {
     conn.callExtension.mockRejectedValue(new Error("network error"));
 
     const { callback } = createLifecycleBridge(
@@ -268,9 +340,11 @@ describe("LifecycleBridge", () => {
     expect(() => {
       callback({ type: "spawned", agent: mockAgent() });
     }).not.toThrow();
+
+    await flushAsync();
   });
 
-  it("uses agent.id as fallback name when name is undefined", () => {
+  it("uses agent.id as fallback name when name is undefined", async () => {
     const { callback } = createLifecycleBridge(
       conn,
       {} as AgentStore,
@@ -281,6 +355,8 @@ describe("LifecycleBridge", () => {
       type: "spawned",
       agent: mockAgent({ id: "agent-99", name: undefined }),
     });
+
+    await flushAsync();
 
     expect(conn.callExtension).toHaveBeenCalledWith(
       "map/agents/register",

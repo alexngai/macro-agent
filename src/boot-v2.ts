@@ -451,7 +451,15 @@ export async function bootV2(
     try {
       const { createMAPSidecar } = await import("./map/sidecar.js");
       mapSidecar = createMAPSidecar(
-        { agentManager, agentStore, inboxAdapter, tasksAdapter },
+        {
+          agentManager,
+          agentStore,
+          inboxAdapter,
+          tasksAdapter,
+          getLocalMapId: mapServerInstance
+            ? (id: string) => mapServerInstance!.getLocalMapId(id)
+            : undefined,
+        },
         {
           server: config.map.server,
           token: config.map.token,
