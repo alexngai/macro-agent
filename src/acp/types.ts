@@ -54,6 +54,16 @@ export interface MacroAgentInitConfig {
 
   /** Suffix appended to system prompts */
   systemPromptSuffix?: string;
+
+  /**
+   * Local agent ID this ACP stream is bound to. When set, `session/new` binds
+   * the new session to this specific agent (any role) instead of falling back
+   * to cwd-based head-manager lookup. Set by the ACP-over-MAP bridge so that
+   * MAP-level routing (which already targets a specific agent) is preserved
+   * end-to-end through the ACP layer — important when multiple coordinators
+   * share the same cwd.
+   */
+  targetAgentId?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────

@@ -131,6 +131,12 @@ export interface AgentManager {
    */
   listHeadManagers(): Agent[];
 
+  /**
+   * Look up the SpawnedAgent shape for any agent (any role) that's running
+   * AND has a live session in this process. Returns null otherwise.
+   */
+  getActiveAgentSession(agentId: AgentId): SpawnedAgent | null;
+
   // ── Session Interaction ────────────────────────────────────────
 
   /**

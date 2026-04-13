@@ -212,8 +212,16 @@ export function createACPBridge(
     // Create the AgentSideConnection.
     // All outbound messages (responses + notifications) go through the
     // writable side of the stream, which calls sendToClient above.
+    //
+    // Bind the MacroAgent to this stream's target agent so `session/new`
+    // creates a session for the agent the MAP stream was opened against,
+    // not whichever head manager happens to share the same cwd.
     const conn = new AgentSideConnection(
-      (agentConn) => createMacroAgent(agentConn, { system }),
+      (agentConn) =>
+        createMacroAgent(agentConn, {
+          system,
+          initConfig: { targetAgentId: agentId },
+        }),
       stream,
     );
 

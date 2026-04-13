@@ -428,20 +428,46 @@ export function createMacroAgent(
       params: NewSessionRequest,
     ): Promise<NewSessionResponse> {
       const cwd = params.cwd ?? defaultCwd;
-      // Get or create a head manager for this workspace
-      const headManager = await agentManager.getOrCreateHeadManager({ cwd });
+
+      // Two paths into newSession:
+      //
+      //   1. MAP-bound stream — initConfig.targetAgentId is set by the ACP
+      //      bridge to the local agent ID this stream was opened against.
+      //      Bind the session to that specific agent (any role), preserving
+      //      the routing intent that brought the stream here. This matters
+      //      when multiple coordinators share a cwd: cwd-based lookup would
+      //      pick whichever the store returned first, which may not be the
+      //      one the client actually wanted to talk to.
+      //
+      //   2. Fallback — pure ACP client with no agent context. Use
+      //      cwd-based head-manager lookup (spawning one if needed). This
+      //      keeps stock ACP clients working without protocol changes.
+      let target: { id: string; session_id: string };
+      if (initConfig?.targetAgentId) {
+        const bound = agentManager.getActiveAgentSession(
+          initConfig.targetAgentId as any,
+        );
+        if (!bound) {
+          throw new ACPError(
+            `Agent ${initConfig.targetAgentId} is not running or has no active session`,
+            "AGENT_NOT_FOUND",
+            { agentId: initConfig.targetAgentId },
+          );
+        }
+        target = { id: bound.id, session_id: bound.session_id };
+      } else {
+        const headManager = await agentManager.getOrCreateHeadManager({ cwd });
+        target = { id: headManager.id, session_id: headManager.session_id };
+      }
 
       // Create session mapping
-      const mapping = sessionMapper.createMapping(
-        headManager.session_id,
-        headManager.id,
-      );
+      const mapping = sessionMapper.createMapping(target.session_id, target.id);
 
       // Annotate sessionlog with swarm metadata (best effort)
       try {
         const { annotateSession } = await import("../integrations/sessionlog.js");
         annotateSession(cwd, {
-          swarmId: headManager.id,
+          swarmId: target.id,
           scope: "macro-agent",
         });
       } catch {

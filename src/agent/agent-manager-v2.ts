@@ -1134,12 +1134,21 @@ export function createAgentManagerV2(
   async function getOrCreateHeadManager(
     options: HeadManagerOptions
   ): Promise<SpawnedAgent> {
-    // Check for existing head manager
+    // Check for an existing head manager matching this cwd that ALSO has a
+    // live session in this process. The activeSessions check has to be inside
+    // the predicate (not after .find) — the agentStore is persistent across
+    // process restarts, so without this filter we'd match stale "running"
+    // records from previous processes whose sessions are gone, then fall
+    // through to spawn() and create a duplicate coordinator.
     const existing = agentStore
       .listAgents({ parent_id: null, state: "running" })
-      .find((a) => a.cwd === options.cwd);
+      .find(
+        (a) =>
+          a.cwd === options.cwd &&
+          activeSessions.has(a.id as AgentId),
+      );
 
-    if (existing && activeSessions.has(existing.id as AgentId)) {
+    if (existing) {
       const sessionEntry = activeSessions.get(existing.id as AgentId)!;
       const storedSession = agentStore.getSession(existing.id as AgentId);
       return {
@@ -1165,6 +1174,30 @@ export function createAgentManagerV2(
     return agentStore
       .listAgents({ parent_id: null })
       .map(agentRecordToAgent);
+  }
+
+  /**
+   * Look up the spawned-agent shape for any agent that's still alive in this
+   * process (any role, not just coordinators). Returns null if the agent
+   * doesn't exist, isn't running, or has no live session in `activeSessions`.
+   *
+   * Used by the ACP layer to bind a session to a specific agent when the MAP
+   * stream targets one explicitly — preserving the routing intent that
+   * cwd-based head-manager lookup would otherwise lose in multi-coordinator
+   * scenarios.
+   */
+  function getActiveAgentSession(agentId: AgentId): SpawnedAgent | null {
+    if (!activeSessions.has(agentId)) return null;
+    const record = agentStore.getAgent(agentId);
+    if (!record || record.state !== "running") return null;
+    const sessionEntry = activeSessions.get(agentId)!;
+    const storedSession = agentStore.getSession(agentId);
+    return {
+      id: agentId,
+      session_id: storedSession?.session_id ?? sessionEntry.session.id ?? "",
+      agent: agentRecordToAgent(record),
+      session: sessionEntry.session,
+    };
   }
 
   // ── Session Interaction ──────────────────────────────────────
@@ -1422,6 +1455,7 @@ export function createAgentManagerV2(
     getHierarchy,
     getOrCreateHeadManager,
     listHeadManagers,
+    getActiveAgentSession,
     prompt,
     promptUntilDone,
     getSession,

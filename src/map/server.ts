@@ -145,6 +145,27 @@ export function createMAPServerInstance(
       return { agent: { id: spawned.id } };
     };
 
+    /**
+     * Terminate a running agent. Accepts either the agent's local ID or the
+     * MAP-assigned ULID (we resolve back to local via mapIdToLocalId).
+     * Reason defaults to "stopped"; use "cancelled" for user-initiated stops.
+     */
+    handlers["_macro/terminateAgent"] = async (params) => {
+      const agentIdParam = params.agentId as string | undefined;
+      const reason = (params.reason as string) ?? "cancelled";
+      if (!agentIdParam) {
+        return { success: false, error: "agentId is required" };
+      }
+      // Resolve either a MAP ULID or a local agent ID to our internal ID.
+      const localId = mapIdToLocalId.get(agentIdParam) ?? agentIdParam;
+      try {
+        await agentManager.terminate(localId as any, reason as any);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: (err as Error).message };
+      }
+    };
+
     // ── Task extensions ───────────────────────────────────────────
     handlers["_macro/task/list"] = async () => {
       if (!tasksAdapter.connected) return { tasks: [] };
@@ -404,9 +425,14 @@ export function createMAPServerInstance(
         try {
           if (event.type === "spawned" || event.type === "started") {
             const agent = event.agent;
-            // Register agent in MAPServer's registry so it's visible to clients.
-            // We wrap in try/catch because the registry's event bus may throw
-            // if subscription filters encounter unexpected state.
+            // Register agent ONCE. spawn() fires "spawned" immediately followed
+            // by "started", so without this guard the listener re-registers
+            // on the second event — generating a fresh MAP ULID and overwriting
+            // localIdToMapId. Consumers racing against that overwrite (like the
+            // sidecar's lifecycle bridge, which snapshots localMapId into hub
+            // metadata) end up disagreeing with _macro/spawnAgent's return
+            // value on which ULID refers to this agent.
+            if (localIdToMapId.has(agent.id)) return;
             try {
               const registered = mapServer.agents.register({
                 name: agent.name ?? agent.id,
