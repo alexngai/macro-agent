@@ -90,15 +90,20 @@ export function createLifecycleBridge(
             ? agentMetadata.provider_session_id
             : undefined;
         (async () => {
-          const localMapId = await waitForLocalMapId(agent.id);
+          const peerMapId = await waitForLocalMapId(agent.id);
           try {
             const result: any = await connection.callExtension("map/agents/register", {
               name,
               role,
               capabilities,
               metadata: {
-                localAgentId: agent.id,
-                localMapId,
+                // From the hub's perspective these IDs identify this agent on
+                // the macro-agent (peer) side. `peerAgentId` is macro-agent's
+                // internal store id; `peerMapId` is its local MAP server ULID.
+                // Hub callers use these to address the agent in routing
+                // (ACP streams target peerMapId, lifecycle ops use peerAgentId).
+                peerAgentId: agent.id,
+                peerMapId,
                 provider_session_id: providerSessionId,
                 parent: (agent as any).parent_id ?? undefined,
                 team: (agent as any).team ?? undefined,

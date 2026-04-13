@@ -107,7 +107,7 @@ export function createMAPServerInstance(
             role: params.role ?? "worker",
             state: "idle",
             sessionId: ctx?.session?.id,
-            metadata: { localAgentId: spawned.id, task: params.task },
+            metadata: { peerAgentId: spawned.id, task: params.task },
           });
           if (registered?.id) {
             mapIdToLocalId.set(registered.id, spawned.id);
@@ -164,6 +164,17 @@ export function createMAPServerInstance(
       } catch (err) {
         return { success: false, error: (err as Error).message };
       }
+    };
+
+    /**
+     * Inspect ACP stream → peer agent bindings on this MAP server.
+     * Each stream carries the peer agent id (macro-agent's internal store id)
+     * it was opened against, set by the bridge from MAP routing. Useful for
+     * routing tests and debugging multi-coordinator scenarios.
+     */
+    handlers["_macro/getAcpStreamBindings"] = async () => {
+      if (!acpBridge) return { bindings: [] };
+      return { bindings: acpBridge.getStreamBindings() };
     };
 
     // ── Task extensions ───────────────────────────────────────────
@@ -429,7 +440,7 @@ export function createMAPServerInstance(
             // by "started", so without this guard the listener re-registers
             // on the second event — generating a fresh MAP ULID and overwriting
             // localIdToMapId. Consumers racing against that overwrite (like the
-            // sidecar's lifecycle bridge, which snapshots localMapId into hub
+            // sidecar's lifecycle bridge, which snapshots peerMapId into hub
             // metadata) end up disagreeing with _macro/spawnAgent's return
             // value on which ULID refers to this agent.
             if (localIdToMapId.has(agent.id)) return;
@@ -439,7 +450,7 @@ export function createMAPServerInstance(
                 role: agent.role ?? "worker",
                 state: "idle",
                 metadata: {
-                  localAgentId: agent.id, // Store local ID in metadata
+                  peerAgentId: agent.id, // macro-agent's internal store id
                   parent: (agent as any).parent ?? null,
                   task: (agent as any).task ?? null,
                   cwd: (agent as any).cwd ?? null,
@@ -480,7 +491,7 @@ export function createMAPServerInstance(
             role: agent.role ?? "worker",
             state: agent.state === "running" ? "busy" : "idle",
             metadata: {
-              localAgentId: agent.id,
+              peerAgentId: agent.id,
               parent: agent.parent ?? null,
               task: agent.task ?? null,
             },

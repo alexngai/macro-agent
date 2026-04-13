@@ -656,7 +656,7 @@ export function createMacroAgent(
         if (mapServer) {
           const agents = mapServer.agents?.list?.() ?? [];
           const mapAgent = agents.find(
-            (a: any) => a.metadata?.localAgentId === agentId,
+            (a: any) => a.metadata?.peerAgentId === agentId,
           );
           if (mapAgent) {
             mapServer.agents.updateState(mapAgent.id, "busy");
@@ -943,7 +943,7 @@ export function createMacroAgent(
           if (mapServer) {
             const agents = mapServer.agents?.list?.() ?? [];
             const mapAgent = agents.find(
-              (a: any) => a.metadata?.localAgentId === agentId,
+              (a: any) => a.metadata?.peerAgentId === agentId,
             );
             if (mapAgent) {
               mapServer.agents.updateState(mapAgent.id, "idle");

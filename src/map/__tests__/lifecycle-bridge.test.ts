@@ -136,7 +136,7 @@ describe("LifecycleBridge", () => {
     expect(caps.messaging).toEqual({ canReceive: true });
   });
 
-  it("includes localMapId in metadata when getLocalMapId resolves", async () => {
+  it("includes peerMapId in metadata when getLocalMapId resolves", async () => {
     const getLocalMapId = vi.fn((id: string) =>
       id === "coord-1" ? "map-ulid-local" : undefined,
     );
@@ -161,11 +161,11 @@ describe("LifecycleBridge", () => {
     expect(call).toBeDefined();
     const params = call![1] as Record<string, unknown>;
     const metadata = params.metadata as Record<string, unknown>;
-    expect(metadata.localMapId).toBe("map-ulid-local");
-    expect(metadata.localAgentId).toBe("coord-1");
+    expect(metadata.peerMapId).toBe("map-ulid-local");
+    expect(metadata.peerAgentId).toBe("coord-1");
   });
 
-  it("registers without localMapId when lookup returns undefined", async () => {
+  it("registers without peerMapId when lookup returns undefined", async () => {
     const getLocalMapId = vi.fn(() => undefined);
     const { callback } = createLifecycleBridge(
       conn,
@@ -189,7 +189,7 @@ describe("LifecycleBridge", () => {
     expect(call).toBeDefined();
     const params = call![1] as Record<string, unknown>;
     const metadata = params.metadata as Record<string, unknown>;
-    expect(metadata.localMapId).toBeUndefined();
+    expect(metadata.peerMapId).toBeUndefined();
   });
 
   it("unregisters agent from MAP hub on stop event", async () => {
