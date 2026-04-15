@@ -1351,12 +1351,57 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     conflictId: string;
     resolvedBy: import('./types-v3.js').Principal;
     resolutionCommit?: string;
+    /**
+     * How the conflict was resolved. Defaults to 'agent' for the legacy
+     * call shape; recovery strategies should pass an explicit method so
+     * the OpenHive hub records the right resolution.
+     */
+    method?: import('git-cascade').ConflictResolution['method'] | 'auto-resolve' | 'spawn-resolver' | 'abandoned';
+    /** Human-readable resolution summary (e.g., 'merged with -X ours'). */
+    summary?: string;
   }): void {
-    // Resume the stream if it was paused/conflicted; git-cascade's
-    // conflict record stays as an audit trail (we mark resolvedBy via event
-    // metadata rather than mutating the record directly — resolving the
-    // conflict doesn't delete it, it just unblocks the stream).
     const conflict = this.adapter.getConflict(opts.conflictId);
+    const method = opts.method ?? 'agent';
+
+    // Drive git-cascade's resolveConflict so the underlying conflict record
+    // moves to status='resolved' AND the tracker emits stream.conflict_resolved.
+    // Hub observers (cascade-bridge → OpenHive) update cascade_conflicts.status
+    // accordingly. Falls back gracefully if cascade is older than 0.0.6.
+    const trackerHasResolve = typeof (
+      this.adapter as { resolveConflict?: unknown }
+    ).resolveConflict === 'function';
+    if (trackerHasResolve) {
+      try {
+        (
+          this.adapter as unknown as {
+            resolveConflict(args: {
+              conflictId: string;
+              resolution: import('git-cascade').ConflictResolution & { summary?: string };
+              metadata?: Record<string, unknown>;
+            }): void;
+          }
+        ).resolveConflict({
+          conflictId: opts.conflictId,
+          resolution: {
+            method:
+              method === 'auto-resolve' ||
+              method === 'spawn-resolver' ||
+              method === 'abandoned'
+                ? 'agent'
+                : method,
+            resolvedBy: opts.resolvedBy,
+            details: opts.summary,
+          },
+          metadata: {
+            resolution_method_actual: method,
+            resolution_commit: opts.resolutionCommit,
+          },
+        });
+      } catch {
+        // Best-effort; legacy resume path below remains.
+      }
+    }
+
     if (conflict?.streamId) {
       try {
         this.adapter.resumeStream(conflict.streamId);

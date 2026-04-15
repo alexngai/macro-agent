@@ -19,6 +19,20 @@ export class AbandonStrategy implements ConflictRecoveryStrategy {
 
   async recover(ctx: ConflictContext): Promise<ConflictResolution> {
     try {
+      // Mark the conflict resolved (method='abandoned') so the OpenHive hub
+      // moves cascade_conflicts.status from pending → resolved instead of
+      // showing it stuck pending forever.
+      try {
+        ctx.workspaceManager.resolveConflict({
+          conflictId: ctx.conflictId,
+          resolvedBy: 'system:abandon',
+          method: 'abandoned',
+          summary: `stream abandoned: ${ctx.streamId}`,
+        });
+      } catch {
+        // Non-fatal — abandonStream below still runs
+      }
+
       ctx.workspaceManager.abandonStream(ctx.streamId, {
         reason: `abandon strategy: conflict ${ctx.conflictId}`,
       });

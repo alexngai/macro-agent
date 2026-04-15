@@ -94,6 +94,8 @@ export class AutoResolveStrategy implements ConflictRecoveryStrategy {
           conflictId: ctx.conflictId,
           resolvedBy: ctx.landingAgentId ?? 'system:auto-resolve',
           resolutionCommit,
+          method: 'auto-resolve',
+          summary: `merged with -X ${strategy}`,
         });
       } catch {
         // Non-fatal — resolution is recorded via return value regardless

@@ -439,6 +439,17 @@ export interface WorkspaceManager {
     conflictId: string;
     resolvedBy: import('./types-v3.js').Principal;
     resolutionCommit?: string;
+    /** How the conflict was resolved. Default 'agent'. */
+    method?:
+      | 'ours'
+      | 'theirs'
+      | 'manual'
+      | 'agent'
+      | 'auto-resolve'
+      | 'spawn-resolver'
+      | 'abandoned';
+    /** Human-readable resolution summary. */
+    summary?: string;
   }): void;
 
   /**

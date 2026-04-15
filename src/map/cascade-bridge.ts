@@ -164,6 +164,27 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
         },
       };
 
+    case 'conflict:resolved':
+      // The adapter emits this from two sources: workspace-manager's local
+      // resolveConflict path (carries resolvedBy + resolutionCommit) AND the
+      // forwarded git-cascade stream.conflict_resolved (carries the explicit
+      // resolution_method). Bridge only forwards events with conflict_id +
+      // stream_id present (the cascade-driven shape).
+      if (!d.streamId || !d.conflictId) return null;
+      return {
+        method: CASCADE_METHODS.STREAM_CONFLICT_RESOLVED,
+        params: {
+          stream_id: d.streamId,
+          conflict_id: d.conflictId,
+          resolution_method:
+            (d.resolutionMethod as string | undefined) ??
+            (d.resolvedBy ? 'agent' : 'manual'),
+          resolved_by: d.resolvedBy,
+          resolution_summary: d.resolutionSummary,
+          metadata: d.metadata,
+        },
+      };
+
     case 'stream:abandoned':
       return {
         method: CASCADE_METHODS.STREAM_ABANDONED,
@@ -171,6 +192,23 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
           stream_id: d.streamId,
           reason: d.reason,
           cascade: d.cascade,
+          metadata: d.metadata,
+        },
+      };
+
+    case 'stream:pushed':
+      // Trunk-style push to a remote (direct-push / optimistic-push). Hub
+      // sees this as the "merged" equivalent for non-stream targets.
+      if (!d.streamId || !d.pushedCommit || !d.remoteRef) return null;
+      return {
+        method: CASCADE_METHODS.STREAM_PUSHED,
+        params: {
+          stream_id: d.streamId,
+          agent_id: d.agentId,
+          pushed_commit: d.pushedCommit,
+          remote: d.remote ?? 'origin',
+          remote_ref: d.remoteRef,
+          strategy: d.strategy,
           metadata: d.metadata,
         },
       };
@@ -205,9 +243,58 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
         },
       };
 
+    case 'mergeQueue:added':
+      if (!d.entryId || !d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.QUEUE_ADDED,
+        params: {
+          entry_id: d.entryId,
+          stream_id: d.streamId,
+          target_branch: (d.targetBranch as string | undefined) ?? 'main',
+          metadata: d.metadata,
+        },
+      };
+
+    case 'mergeQueue:ready':
+      if (!d.entryId || !d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.QUEUE_READY,
+        params: {
+          entry_id: d.entryId,
+          stream_id: d.streamId,
+          target_branch: (d.targetBranch as string | undefined) ?? 'main',
+        },
+      };
+
+    case 'mergeQueue:cancelled':
+      if (!d.entryId || !d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.QUEUE_CANCELLED,
+        params: {
+          entry_id: d.entryId,
+          stream_id: d.streamId,
+          target_branch: (d.targetBranch as string | undefined) ?? 'main',
+          reason: d.reason,
+        },
+      };
+
+    case 'mergeQueue:removed':
+      if (!d.entryId || !d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.QUEUE_REMOVED,
+        params: {
+          entry_id: d.entryId,
+          stream_id: d.streamId,
+          target_branch: (d.targetBranch as string | undefined) ?? 'main',
+          outcome: d.outcome,
+        },
+      };
+
     // Local-only events with no MAP counterpart (Phase 1 scope).
     // 'stream:updated', 'stream:forked', 'stream:paused', 'stream:resumed',
-    // 'worktree:*', 'task:*', 'change:*', 'conflict:*', 'mergeQueue:*'
+    // 'worktree:*', 'task:*', 'change:*', 'conflict:*' (legacy local-only
+    // variant — cascade-bridge handles the cascade-driven 'conflict:resolved'
+    // separately above)
     default:
       return null;
   }

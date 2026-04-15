@@ -50,6 +50,10 @@ import {
   type StreamAbandonedParams,
   type CascadeRebasedParams,
   type CascadeCompletedParams,
+  type QueueAddedParams,
+  type QueueReadyParams,
+  type QueueCancelledParams,
+  type QueueRemovedParams,
 } from 'git-cascade';
 // git-cascade 0.0.3+ exposes both events (via `emit` callback) and the
 // `cascade` namespace for cascadeRebase. All v3 primitives are now reachable.
@@ -85,6 +89,7 @@ export type GitCascadeEventType =
   | 'task:abandoned'
   | 'change:merged'
   | 'change:dropped'
+  | 'stream:pushed'         // local — emitted by direct-push/optimistic-push landing strategies
   | 'cascade:rebased'       // mapped from git-cascade cascade.rebased
   | 'cascade:completed'     // mapped from git-cascade cascade.completed
   | 'conflict:created'
@@ -300,6 +305,18 @@ export class GitCascadeAdapter {
         });
         break;
       }
+      case 'stream.conflict_resolved': {
+        const p = params as import('git-cascade').StreamConflictResolvedParams;
+        this.emit('conflict:resolved', {
+          streamId: p.stream_id,
+          conflictId: p.conflict_id,
+          resolutionMethod: p.resolution_method,
+          resolvedBy: p.resolved_by,
+          resolutionSummary: p.resolution_summary,
+          metadata: p.metadata,
+        });
+        break;
+      }
       case 'stream.abandoned': {
         const p = params as StreamAbandonedParams;
         this.emit('stream:abandoned', {
@@ -335,6 +352,45 @@ export class GitCascadeAdapter {
           skippedStreams: p.skipped_streams,
           deferredStreams: p.deferred_streams,
           metadata: p.metadata,
+        });
+        break;
+      }
+      case 'queue.added': {
+        const p = params as QueueAddedParams;
+        this.emit('mergeQueue:added', {
+          entryId: p.entry_id,
+          streamId: p.stream_id,
+          targetBranch: p.target_branch,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'queue.ready': {
+        const p = params as QueueReadyParams;
+        this.emit('mergeQueue:ready', {
+          entryId: p.entry_id,
+          streamId: p.stream_id,
+          targetBranch: p.target_branch,
+        });
+        break;
+      }
+      case 'queue.cancelled': {
+        const p = params as QueueCancelledParams;
+        this.emit('mergeQueue:cancelled', {
+          entryId: p.entry_id,
+          streamId: p.stream_id,
+          targetBranch: p.target_branch,
+          reason: p.reason,
+        });
+        break;
+      }
+      case 'queue.removed': {
+        const p = params as QueueRemovedParams;
+        this.emit('mergeQueue:removed', {
+          entryId: p.entry_id,
+          streamId: p.stream_id,
+          targetBranch: p.target_branch,
+          outcome: p.outcome,
         });
         break;
       }
@@ -888,16 +944,11 @@ export class GitCascadeAdapter {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Add a stream to the merge queue.
+   * Add a stream to the merge queue. Local `mergeQueue:added` event fires
+   * via forwardCascadeEvent (git-cascade 0.0.7+ emits queue.added natively).
    */
   addToMergeQueue(options: mergeQueueModule.AddToQueueOptions): string {
-    const entryId = this.tracker.addToMergeQueue(options);
-    this.emit('mergeQueue:added', {
-      entryId,
-      streamId: options.streamId,
-      targetBranch: options.targetBranch ?? 'main',
-    });
-    return entryId;
+    return this.tracker.addToMergeQueue(options);
   }
 
   /**
@@ -920,27 +971,27 @@ export class GitCascadeAdapter {
   }
 
   /**
-   * Mark a queue entry as ready to merge.
+   * Mark a queue entry as ready to merge. Local `mergeQueue:ready` event
+   * fires via forwardCascadeEvent (git-cascade 0.0.7+).
    */
   markMergeQueueReady(entryId: string): void {
     this.tracker.markMergeQueueReady(entryId);
-    this.emit('mergeQueue:ready', { entryId });
   }
 
   /**
-   * Cancel a queue entry.
+   * Cancel a queue entry. Local `mergeQueue:cancelled` event fires via
+   * forwardCascadeEvent (git-cascade 0.0.7+).
    */
   cancelMergeQueueEntry(entryId: string): void {
     this.tracker.cancelMergeQueueEntry(entryId);
-    this.emit('mergeQueue:cancelled', { entryId });
   }
 
   /**
-   * Remove a queue entry.
+   * Remove a queue entry. Local `mergeQueue:removed` event fires via
+   * forwardCascadeEvent (git-cascade 0.0.7+).
    */
   removeFromMergeQueue(entryId: string): void {
     this.tracker.removeFromMergeQueue(entryId);
-    this.emit('mergeQueue:removed', { entryId });
   }
 
   /**
@@ -998,6 +1049,65 @@ export class GitCascadeAdapter {
    */
   getConflictForStream(streamId: string): ConflictRecord | null {
     return this.tracker.getConflictForStream(streamId);
+  }
+
+  /**
+   * Emit a `stream:pushed` event for trunk-style landing strategies that push
+   * to a remote rather than merging into another stream. Strategies call this
+   * after a successful push so observers (the OpenHive cascade-bridge) can
+   * surface the push as `x-cascade/stream.pushed`.
+   */
+  notifyStreamPushed(args: {
+    streamId: string;
+    agentId: string;
+    pushedCommit: string;
+    remote: string;
+    remoteRef: string;
+    strategy?: string;
+    metadata?: Record<string, unknown>;
+  }): void {
+    this.emit('stream:pushed', {
+      streamId: args.streamId,
+      agentId: args.agentId,
+      pushedCommit: args.pushedCommit,
+      remote: args.remote,
+      remoteRef: args.remoteRef,
+      strategy: args.strategy,
+      metadata: args.metadata,
+    });
+  }
+
+  /**
+   * Mark a conflict as resolved. Routes through git-cascade's tracker so
+   * `x-cascade/stream.conflict_resolved` fires for hub observers (closes
+   * cascade_conflicts.status from pending → resolved on the OpenHive side).
+   */
+  resolveConflict(args: {
+    conflictId: string;
+    resolution: import('git-cascade').ConflictResolution & { summary?: string };
+    metadata?: Record<string, unknown>;
+  }): void {
+    this.tracker.resolveConflict(args.conflictId, args.resolution, {
+      metadata: args.metadata,
+    });
+  }
+
+  /**
+   * Abandon a conflict (stream-level give-up). Emits a
+   * `stream.conflict_resolved` event with method='abandoned' so observers
+   * see the conflict is no longer pending.
+   */
+  abandonConflict(args: {
+    conflictId: string;
+    agentId?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): void {
+    this.tracker.abandonConflict(args.conflictId, {
+      agentId: args.agentId,
+      reason: args.reason,
+      metadata: args.metadata,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

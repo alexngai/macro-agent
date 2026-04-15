@@ -116,6 +116,29 @@ export interface AgentManagerV2Config {
   serverToken?: string;
   /** Control socket path for MCP subprocess lifecycle RPC */
   controlSocketPath?: string;
+  /**
+   * Default opentasks resource ID hosted on the OpenHive hub. When set,
+   * spawn paths build `taskRef = { resource_id: <this>, node_id: task_id }`
+   * automatically from `SpawnAgentOptions.task_id` (for any spawn where
+   * `resolveTaskRef` returned undefined AND the caller didn't supply an
+   * explicit `taskRef`).
+   *
+   * Operators set this once at swarm registration for the common
+   * single-graph case. Multi-graph deployments should use `resolveTaskRef`
+   * instead.
+   */
+  taskResourceId?: string;
+
+  /**
+   * Multi-graph resolver. Called at every spawn; return a `TaskRef` to set
+   * the binding or `undefined` to fall through to the `taskResourceId`
+   * default. Explicit `SpawnAgentOptions.taskRef` always wins over both.
+   *
+   * Keep cheap — runs per-spawn.
+   */
+  resolveTaskRef?: (
+    spawnOptions: SpawnAgentOptions
+  ) => import("git-cascade/events").TaskRef | undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -139,6 +162,8 @@ export function createAgentManagerV2(
     serverToken,
     agentTokenManager,
     controlSocketPath,
+    taskResourceId,
+    resolveTaskRef,
   } = config;
 
   // In-memory state
@@ -263,7 +288,8 @@ export function createAgentManagerV2(
   async function executeWorkspaceDecision(
     agentId: AgentId,
     decision: import('../workspace/topology/types.js').WorkspaceDecision,
-    role?: string
+    role?: string,
+    spawnOptions?: SpawnAgentOptions
   ): Promise<Workspace | undefined> {
     if (!workspaceManager) return undefined;
 
@@ -315,7 +341,21 @@ export function createAgentManagerV2(
       }
 
       case 'new-stream': {
-        const streamId = workspaceManager.createStreamV3(decision.streamSpec);
+        // If the spawning agent has a taskRef and the streamSpec doesn't
+        // already carry one, weave it into metadata so the resulting stream
+        // binds to the OpenTasks node. Explicit streamSpec.metadata.task_ref
+        // wins.
+        const taskRef = spawnOptions?.taskRef;
+        const existingMeta = decision.streamSpec.metadata as
+          | Record<string, unknown>
+          | undefined;
+        const streamSpec = taskRef && !existingMeta?.task_ref
+          ? {
+              ...decision.streamSpec,
+              metadata: { ...(existingMeta ?? {}), task_ref: taskRef },
+            }
+          : decision.streamSpec;
+        const streamId = workspaceManager.createStreamV3(streamSpec);
         // Record the mapping in the topology if it supports it (for share-with lookup).
         const policy = topologyPolicy as unknown as {
           recordAgentStream?: (a: string, s: string, role?: string) => void;
@@ -372,7 +412,7 @@ export function createAgentManagerV2(
           return null;
         },
       });
-      return executeWorkspaceDecision(agentId, decision, role);
+      return executeWorkspaceDecision(agentId, decision, role, options);
     }
 
     // Capability-based dispatch for programmatic callers that don't use
@@ -447,9 +487,39 @@ export function createAgentManagerV2(
     }
 
     // Apply spawn interceptor (set by TeamRuntime)
-    const options = spawnInterceptor
+    const interceptedOptions = spawnInterceptor
       ? await spawnInterceptor(rawOptions)
       : rawOptions;
+
+    // Resolve taskRef with three-level precedence:
+    //   1. Explicit `options.taskRef` (caller knows exactly what graph).
+    //   2. `resolveTaskRef(opts)` (multi-graph deployments decide per spawn).
+    //   3. `taskResourceId` + `options.task_id` (single-graph default).
+    // If none resolves, spawn proceeds with no taskRef — cascade events
+    // land without a task binding (hub back-fills from first commit that
+    // carries one, if any).
+    let resolvedTaskRef = interceptedOptions.taskRef;
+    if (!resolvedTaskRef && resolveTaskRef) {
+      try {
+        resolvedTaskRef = resolveTaskRef(interceptedOptions);
+      } catch (err) {
+        // Resolver failures must not block spawn. Log + fall through.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[agent-manager-v2] resolveTaskRef threw; falling back to taskResourceId default:",
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+    if (!resolvedTaskRef && taskResourceId && interceptedOptions.task_id) {
+      resolvedTaskRef = {
+        resource_id: taskResourceId,
+        node_id: String(interceptedOptions.task_id),
+      };
+    }
+    const options = resolvedTaskRef === interceptedOptions.taskRef
+      ? interceptedOptions
+      : { ...interceptedOptions, taskRef: resolvedTaskRef };
 
     const {
       task,
@@ -534,7 +604,9 @@ export function createAgentManagerV2(
       systemPrompt += `\n\n${interactionPatterns.join("\n\n")}`;
     }
 
-    // Persist agent in store
+    // Persist agent in store. Stash taskRef in metadata so done()'s
+    // lifecycle context can read it without separate plumbing — this is the
+    // path that makes per-commit task_ref binding work end-to-end.
     const now = Date.now() as Timestamp;
     const agentRecord: AgentRecord = {
       id: agentId,
@@ -552,7 +624,7 @@ export function createAgentManagerV2(
       created_at: now,
       started_at: now,
       config: agentConfig as Record<string, unknown>,
-      metadata: {},
+      metadata: options.taskRef ? { task_ref: options.taskRef } : {},
     };
     agentStore.putAgent(agentRecord);
 
@@ -718,9 +790,11 @@ export function createAgentManagerV2(
         created_at: now,
       });
 
-      // Update agent with provider session ID
+      // Update agent with provider session ID. Merge with existing metadata
+      // so fields set at spawn time (e.g. task_ref) aren't clobbered.
+      const existingMeta = agentStore.getAgent(agentId)?.metadata ?? {};
       agentStore.updateAgent(agentId, {
-        metadata: { provider_session_id: session.id },
+        metadata: { ...existingMeta, provider_session_id: session.id },
       });
 
       // Register agent in inbox

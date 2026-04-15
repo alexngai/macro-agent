@@ -121,6 +121,52 @@ export interface BootV2Config {
     };
   };
 
+  /**
+   * Cascade event binding config. Controls how cascade events emitted by
+   * git-cascade-backed agents get tagged with external task references for
+   * hub projection (changelog, task↔stream binding). Independent of MAP
+   * transport: cascade events are data/identity, not transport.
+   */
+  cascade?: {
+    /**
+     * Default OpenTasks resource ID for this swarm. When set, the agent
+     * manager auto-builds `taskRef = { resource_id, node_id: task_id }`
+     * for spawned agents so cascade events carry the binding without
+     * callers constructing refs by hand.
+     *
+     * Leave undefined if:
+     *   - The swarm touches multiple opentasks graphs (use `resolveTaskRef`).
+     *   - Every caller sets `SpawnAgentOptions.taskRef` explicitly.
+     *   - You don't care about hub task↔stream binding.
+     */
+    taskResourceId?: string;
+
+    /**
+     * Custom resolver for multi-graph deployments. Called at every spawn;
+     * return a `TaskRef` to set the binding or `undefined` to skip.
+     * Precedence: explicit `SpawnAgentOptions.taskRef` > `resolveTaskRef` >
+     * `taskResourceId` fallback (combined with `spawnOptions.task_id`).
+     *
+     * Keep implementations cheap — this runs on every spawn.
+     *
+     * @example
+     *   resolveTaskRef: (opts) => {
+     *     const graph = graphForCwd(opts.cwd ?? process.cwd());
+     *     return graph ? { resource_id: graph.resourceId, node_id: String(opts.task_id) } : undefined;
+     *   }
+     */
+    resolveTaskRef?: (
+      spawnOptions: import("./agent/types.js").SpawnAgentOptions
+    ) => import("git-cascade/events").TaskRef | undefined;
+
+    /**
+     * Override the default `x-cascade` event prefix. Useful for branded
+     * deployments or isolating cascade namespaces in testing. Affects all
+     * events emitted by the tracker embedded in this swarm.
+     */
+    eventPrefix?: string;
+  };
+
   /** minimem (agent memory) — registers as MCP server for all agents */
   minimem?: {
     enabled?: boolean;
@@ -270,6 +316,8 @@ export async function bootV2(
       serverUrl: config.serverUrl,
       serverToken: config.serverToken,
       controlSocketPath,
+      taskResourceId: config.cascade?.taskResourceId,
+      resolveTaskRef: config.cascade?.resolveTaskRef,
     }
   );
 

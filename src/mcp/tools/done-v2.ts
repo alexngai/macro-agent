@@ -106,6 +106,15 @@ function buildLifecycleContext(
     streamId: record?.workspace_stream_id ?? process.env.MACRO_STREAM_ID,
   };
 
+  // Pull task_ref out of agent metadata if it was stashed there at spawn
+  // time. Validates the shape — bad data is silently dropped rather than
+  // pushed downstream into cascade payloads.
+  const meta = record?.metadata as Record<string, unknown> | undefined;
+  const tr = meta?.task_ref as { resource_id?: unknown; node_id?: unknown } | undefined;
+  if (tr && typeof tr.resource_id === "string" && typeof tr.node_id === "string") {
+    ctx.taskRef = { resource_id: tr.resource_id, node_id: tr.node_id };
+  }
+
   // Resolve capabilities for dispatch
   if (roleRegistry) {
     try {

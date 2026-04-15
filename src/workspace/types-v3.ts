@@ -127,6 +127,13 @@ export interface LandingContext {
   strategyConfig?: Record<string, unknown>;
   /** Reference to the manager; strategies call back for merge/cascade. */
   workspaceManager: unknown; // WorkspaceManager — circular; narrowed at callsite
+  /**
+   * Optional task reference inherited from the spawning agent. Strategies
+   * that produce commits/merges should thread this into their adapter
+   * calls' metadata as `{ task_ref }` so the resulting cascade events carry
+   * the binding.
+   */
+  taskRef?: import('git-cascade/events').TaskRef;
 }
 
 export interface LandingStrategy {

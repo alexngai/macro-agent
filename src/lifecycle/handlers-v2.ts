@@ -22,8 +22,9 @@ import type {
   CleanupStatus,
   DoneHandlerResult,
 } from "./types.js";
-import { commitChanges, attemptMerge, abortMerge } from "./cleanup.js";
+import { commitChanges, attemptMerge, abortMerge, type TrackedCommitHandle } from "./cleanup.js";
 import type { MergeQueueInterface } from "../workspace/merge-queue/types.js";
+import type { WorkspaceManager } from "../workspace/types.js";
 import {
   getAllDescendants,
   needsCascadeTermination,
@@ -40,6 +41,40 @@ export interface HandlerDepsV2 {
   agentManager: AgentManager;
   taskMode?: "push" | "pull";
   mergeQueue?: MergeQueueInterface;
+  /**
+   * Optional workspace manager. When provided AND `context.streamId` is set,
+   * commits route through the cascade tracker (Change-Id + x-cascade events).
+   * Without it, commits use raw git (legacy / null-workspace path).
+   */
+  workspaceManager?: WorkspaceManager;
+}
+
+// =============================================================================
+// Tracked Commit Helper
+// =============================================================================
+
+/**
+ * Build a TrackedCommitHandle when the agent has a streamId + workspaceManager.
+ * Returns undefined if either is missing — caller falls back to raw git.
+ */
+function buildTrackedHandle(
+  context: LifecycleContext,
+  deps: HandlerDepsV2
+): TrackedCommitHandle | undefined {
+  if (!context.streamId || !deps.workspaceManager) return undefined;
+  const ws = deps.workspaceManager;
+  // Build metadata with task_ref if known. Empty object is fine — the hub
+  // ignores unknown fields, and back-fill kicks in if task_ref appears later.
+  const metadata: Record<string, unknown> = {};
+  if (context.taskRef) {
+    metadata.task_ref = context.taskRef;
+  }
+  return {
+    streamId: context.streamId,
+    agentId: context.agentId,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    commitChanges: (opts) => ws.commitChanges(opts),
+  };
 }
 
 // =============================================================================
@@ -110,10 +145,12 @@ async function handleWorkerDone(
         ? `WIP: ${args.summary}`
         : `WIP: Auto-commit from done() with ${uncommittedCount} uncommitted file(s)`;
 
-      const commitHash = commitChanges(context.workspacePath, commitMessage);
+      const tracked = buildTrackedHandle(context, deps);
+      const commitHash = commitChanges(context.workspacePath, commitMessage, tracked);
       if (commitHash) {
+        const via = tracked ? "tracker" : "raw-git";
         cleanupActions.push(
-          `Committed ${uncommittedCount} file(s): ${commitHash.slice(0, 8)}`
+          `Committed ${uncommittedCount} file(s) via ${via}: ${commitHash.slice(0, 8)}`
         );
       } else {
         warnings.push("Failed to auto-commit uncommitted changes");
