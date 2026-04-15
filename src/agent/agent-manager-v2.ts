@@ -400,7 +400,22 @@ export function createAgentManagerV2(
   ): Promise<Workspace | undefined> {
     const capabilities = options.capabilities ?? [];
     const streamId = options.streamId;
-    const streamConfig = options.streamConfig;
+    // Merge taskRef (if set at spawn time) into streamConfig.metadata so that
+    // adapter.createStream → x-cascade/stream.opened carries the binding to
+    // OpenTasks. Explicit streamConfig.metadata.task_ref wins if already set.
+    const streamConfig = options.streamConfig
+      ? options.taskRef &&
+        !(options.streamConfig.metadata &&
+          (options.streamConfig.metadata as Record<string, unknown>).task_ref)
+        ? {
+            ...options.streamConfig,
+            metadata: {
+              ...(options.streamConfig.metadata ?? {}),
+              task_ref: options.taskRef,
+            },
+          }
+        : options.streamConfig
+      : undefined;
     const gitCascadeTaskId = options.gitCascadeTaskId;
 
     if (capabilities.includes("workspace.stream") && streamConfig) {

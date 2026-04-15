@@ -75,6 +75,14 @@ export interface MAPSidecarDeps {
    * the macro-agent's own MAP server.
    */
   getLocalMapId?: (localAgentId: string) => string | undefined;
+  /**
+   * Optional GitCascadeAdapter. When provided, the sidecar wires a cascade
+   * bridge that forwards the adapter's event stream to the hub as
+   * `x-cascade/*` MAP notifications. Leave undefined to disable cascade
+   * event forwarding (macro-agent will still use cascade internally, just
+   * without hub observability).
+   */
+  gitCascadeAdapter?: import("../workspace/git-cascade-adapter.js").GitCascadeAdapter;
 }
 
 // =============================================================================

@@ -35,7 +35,7 @@ export function createMAPSidecar(
   deps: MAPSidecarDeps,
   config: MAPSidecarConfig,
 ): MAPSidecar {
-  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId } = deps;
+  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId, gitCascadeAdapter } = deps;
   const scope = config.scope ?? "swarm:macro-agent";
   const agentName = config.agentName ?? "macro-agent-sidecar";
 
@@ -50,6 +50,7 @@ export function createMAPSidecar(
   let trajectoryReporter: TrajectoryReporter | null = null;
   let taskBridge: TaskBridge | null = null;
   let coordinationCleanup: (() => void) | null = null;
+  let cascadeBridgeCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -81,6 +82,10 @@ export function createMAPSidecar(
     if (coordinationCleanup) {
       coordinationCleanup();
       coordinationCleanup = null;
+    }
+    if (cascadeBridgeCleanup) {
+      try { cascadeBridgeCleanup(); } catch { /* non-critical */ }
+      cascadeBridgeCleanup = null;
     }
     if (trajectoryReporter) {
       trajectoryReporter.stop();
@@ -288,6 +293,13 @@ export function createMAPSidecar(
       tasksAdapter,
       trajectoryReporter,
     });
+
+    // 5. Cascade Bridge (optional — only when a GitCascadeAdapter is available)
+    if (gitCascadeAdapter) {
+      const { createCascadeBridge } = await import("./cascade-bridge.js");
+      const cascadeBridge = createCascadeBridge(connection, gitCascadeAdapter);
+      cascadeBridgeCleanup = cascadeBridge.dispose;
+    }
   }
 
   return {

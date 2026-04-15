@@ -48,6 +48,8 @@ import {
   type StreamMergedParams,
   type StreamConflictedParams,
   type StreamAbandonedParams,
+  type CascadeRebasedParams,
+  type CascadeCompletedParams,
 } from 'git-cascade';
 // git-cascade 0.0.3+ exposes both events (via `emit` callback) and the
 // `cascade` namespace for cascadeRebase. All v3 primitives are now reachable.
@@ -83,7 +85,8 @@ export type GitCascadeEventType =
   | 'task:abandoned'
   | 'change:merged'
   | 'change:dropped'
-  | 'cascade:completed'
+  | 'cascade:rebased'       // mapped from git-cascade cascade.rebased
+  | 'cascade:completed'     // mapped from git-cascade cascade.completed
   | 'conflict:created'
   | 'conflict:resolved'
   | 'mergeQueue:added'
@@ -307,6 +310,34 @@ export class GitCascadeAdapter {
         });
         break;
       }
+      case 'cascade.rebased': {
+        const p = params as CascadeRebasedParams;
+        this.emit('cascade:rebased', {
+          streamId: p.stream_id,
+          agentId: p.agent_id,
+          triggeredByStreamId: p.triggered_by_stream_id,
+          triggeredByAgentId: p.triggered_by_agent_id,
+          newBaseCommit: p.new_base_commit,
+          newHead: p.new_head,
+          newCommits: p.new_commits,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'cascade.completed': {
+        const p = params as CascadeCompletedParams;
+        this.emit('cascade:completed', {
+          rootStreamId: p.root_stream_id,
+          agentId: p.agent_id,
+          strategy: p.strategy,
+          updatedStreams: p.updated_streams,
+          failedStreams: p.failed_streams,
+          skippedStreams: p.skipped_streams,
+          deferredStreams: p.deferred_streams,
+          metadata: p.metadata,
+        });
+        break;
+      }
     }
   }
 
@@ -520,18 +551,12 @@ export class GitCascadeAdapter {
   cascadeRebase(
     options: cascadeModule.CascadeRebaseOptions
   ): ReturnType<typeof cascadeModule.cascadeRebase> {
-    const result = cascadeModule.cascadeRebase(
-      this.tracker.db,
-      this.config.repoPath,
-      options
-    );
-    this.emit('cascade:completed', {
-      rootStream: options.rootStream,
-      updated: result.updated,
-      failed: result.failed,
-      skipped: result.skipped,
-    });
-    return result;
+    // Use tracker.cascadeRebase which threads the tracker's emit + eventPrefix
+    // into the cascade walk so `cascade.rebased` (per dependent) and
+    // `cascade.completed` (at end) both round-trip through our
+    // forwardCascadeEvent. No manual emit needed — events are driven by
+    // git-cascade 0.0.4+ from inside the walk.
+    return this.tracker.cascadeRebase(options);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -751,6 +776,14 @@ export class GitCascadeAdapter {
     agentId: string;
     worktree: string;
     message: string;
+    /**
+     * Optional metadata threaded verbatim to git-cascade's
+     * `x-cascade/stream.committed` event. Use `{ task_ref: { resource_id,
+     * node_id } }` to bind this commit to an external task (see
+     * `SpawnAgentOptions.taskRef`). Each commit can carry a distinct ref —
+     * useful for workers handling multiple sub-tasks within one session.
+     */
+    metadata?: Record<string, unknown>;
   }): { commit: string; changeId: string } {
     return this.tracker.commitChanges(options);
   }

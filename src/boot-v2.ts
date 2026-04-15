@@ -450,6 +450,16 @@ export async function bootV2(
   if (config.map?.enabled && config.map.server) {
     try {
       const { createMAPSidecar } = await import("./map/sidecar.js");
+      // If a workspace manager is present, pull out its GitCascadeAdapter
+      // so the sidecar can forward cascade events to the hub.
+      const wsMgr = config.workspaceManager as
+        | {
+            getGitCascadeAdapter?: () =>
+              | import("./workspace/git-cascade-adapter.js").GitCascadeAdapter
+              | undefined;
+          }
+        | undefined;
+      const gitCascadeAdapter = wsMgr?.getGitCascadeAdapter?.();
       mapSidecar = createMAPSidecar(
         {
           agentManager,
@@ -459,6 +469,7 @@ export async function bootV2(
           getLocalMapId: mapServerInstance
             ? (id: string) => mapServerInstance!.getLocalMapId(id)
             : undefined,
+          gitCascadeAdapter,
         },
         {
           server: config.map.server,

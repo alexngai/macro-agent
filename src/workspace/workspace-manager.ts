@@ -86,6 +86,19 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     };
   }
 
+  /**
+   * Access the underlying GitCascadeAdapter. Exposed for bridges that
+   * subscribe to the cascade event stream (e.g., the MAP cascade-bridge
+   * that forwards events to an OpenHive hub).
+   *
+   * Most callers should use the WorkspaceManager API surface. Use this only
+   * when direct access to the adapter's event stream or primitives is
+   * required.
+   */
+  getGitCascadeAdapter(): GitCascadeAdapter {
+    return this.adapter;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Event System
   // ─────────────────────────────────────────────────────────────────────────────
