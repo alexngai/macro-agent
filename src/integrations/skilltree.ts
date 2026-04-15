@@ -55,6 +55,7 @@ async function loadSkillTree(): Promise<any> {
   _loadAttempted = true;
 
   try {
+    // @ts-ignore - optional peer dependency, may not be installed
     _skillTreeModule = await import("skill-tree");
     return _skillTreeModule;
   } catch {
