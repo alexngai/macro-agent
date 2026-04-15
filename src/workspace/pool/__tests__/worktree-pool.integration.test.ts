@@ -18,7 +18,7 @@ import { execSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { WorktreePool } from '../worktree-pool.js';
 import { createWorkspaceManager, DefaultWorkspaceManager } from '../../workspace-manager.js';
-import { createDataplaneAdapter, DataplaneAdapter } from '../../dataplane-adapter.js';
+import { createGitCascadeAdapter, GitCascadeAdapter } from '../../git-cascade-adapter.js';
 import type { PoolEvent, PoolStats } from '../types.js';
 import type { WorkerWorkspace, IntegratorWorkspace, CoordinatorWorkspace } from '../../types.js';
 
@@ -694,12 +694,12 @@ describe('WorktreePool Integration', () => {
 
   describe('WorkspaceManager integration', () => {
     let db: Database.Database;
-    let adapter: DataplaneAdapter;
+    let adapter: GitCascadeAdapter;
     let manager: DefaultWorkspaceManager;
 
     beforeEach(() => {
       db = new Database(dbPath);
-      adapter = createDataplaneAdapter({
+      adapter = createGitCascadeAdapter({
         enabled: true,
         repoPath,
         db,
@@ -944,12 +944,12 @@ describe('WorktreePool Integration', () => {
 
   describe('full lifecycle with pool', () => {
     let db: Database.Database;
-    let adapter: DataplaneAdapter;
+    let adapter: GitCascadeAdapter;
     let manager: DefaultWorkspaceManager;
 
     beforeEach(() => {
       db = new Database(dbPath);
-      adapter = createDataplaneAdapter({
+      adapter = createGitCascadeAdapter({
         enabled: true,
         repoPath,
         db,

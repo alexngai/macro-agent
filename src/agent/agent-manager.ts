@@ -302,6 +302,14 @@ export interface AgentManager {
    */
   setSidecar(sidecar: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null): void;
 
+  /**
+   * Set a TopologyPolicy for workspace allocation decisions.
+   * When set, AgentManagerV2 delegates `createWorkspaceForRole` to the policy
+   * before falling back to role-name dispatch. Set by boot-v2 when team YAML
+   * contains `macro_agent.workspace`.
+   */
+  setTopologyPolicy(policy: import('../workspace/topology/types.js').TopologyPolicy | null): void;
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   /**

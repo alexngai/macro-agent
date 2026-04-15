@@ -158,6 +158,12 @@ export function createAgentManagerV2(
   // MAP sidecar reference for trajectory reporting (set via setSidecar)
   let sidecarRef: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null = null;
 
+  // TopologyPolicy for workspace allocation (Phase 3+); set via setTopologyPolicy.
+  // When null, createWorkspaceForRole falls back to legacy role-name dispatch.
+  let topologyPolicy:
+    | import('../workspace/topology/types.js').TopologyPolicy
+    | null = null;
+
   // ── Helpers ──────────────────────────────────────────────────
 
   function notifyLifecycle(event: AgentLifecycleEvent): void {
@@ -247,6 +253,94 @@ export function createAgentManagerV2(
 
   // ── Workspace Helper ─────────────────────────────────────────
 
+  /**
+   * Execute a TopologyPolicy decision against the WorkspaceManager.
+   *
+   * Translates declarative `WorkspaceDecision` into concrete workspace
+   * allocations. Returns a `Workspace` compatible with the legacy shape
+   * so the rest of AgentManagerV2 doesn't need to change.
+   */
+  async function executeWorkspaceDecision(
+    agentId: AgentId,
+    decision: import('../workspace/topology/types.js').WorkspaceDecision,
+    role?: string
+  ): Promise<Workspace | undefined> {
+    if (!workspaceManager) return undefined;
+
+    switch (decision.kind) {
+      case 'none':
+      case 'share-parent-cwd':
+        return undefined;
+
+      case 'share-with-agent': {
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          sharedWithAgent: decision.agentId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: worktree.currentStream
+            ? `stream/${worktree.currentStream}`
+            : 'unknown',
+          streamId: worktree.currentStream ?? '',
+          role: 'v3', // V3 path — bypass legacy worker task/merge-queue flows
+          createdAt: worktree.createdAt,
+        };
+      }
+
+      case 'attach-to-stream': {
+        // Record even if no worktree — the topology needs the stream↔role
+        // mapping for event-driven features like on_parent_advanced.
+        const attachPolicy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        attachPolicy.recordAgentStream?.(agentId, decision.streamId, role);
+
+        if (!decision.allocateWorktree) {
+          return undefined;
+        }
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          streamId: decision.streamId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: `stream/${decision.streamId}`,
+          streamId: decision.streamId,
+          role: 'v3', // V3 path — attach-to-team-root
+          createdAt: worktree.createdAt,
+        };
+      }
+
+      case 'new-stream': {
+        const streamId = workspaceManager.createStreamV3(decision.streamSpec);
+        // Record the mapping in the topology if it supports it (for share-with lookup).
+        const policy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        policy.recordAgentStream?.(agentId, streamId, role);
+
+        if (!decision.allocateWorktree) {
+          return undefined;
+        }
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          streamId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: `stream/${streamId}`,
+          streamId,
+          role: 'v3', // V3 path — new-stream
+          createdAt: worktree.createdAt,
+        };
+      }
+    }
+  }
+
   async function createWorkspaceForRole(
     agentId: AgentId,
     role: string,
@@ -254,56 +348,77 @@ export function createAgentManagerV2(
   ): Promise<Workspace | undefined> {
     if (!workspaceManager) return undefined;
 
+    // V3 path — TopologyPolicy-driven. Set by boot-v2 when team YAML has
+    // `macro_agent.workspace`. When set, this takes precedence over the legacy
+    // capability/role-name dispatch below.
+    if (topologyPolicy) {
+      const decision = await topologyPolicy.onAgentSpawn({
+        agentId,
+        role,
+        parentAgentId: options.parent ?? undefined,
+        parentStreamId: options.streamId,
+        teamStreamId: (() => {
+          const stream = (
+            topologyPolicy as { getAgentStream?: (a: AgentId) => string | null }
+          ).getAgentStream?.(agentId);
+          return stream ?? undefined;
+        })(),
+        workspaceManager,
+        getAgentByRole: (r: string) => {
+          for (const [aid, ws] of agentWorkspaces) {
+            const rec = agentStore.getAgent(aid);
+            if (rec?.role === r) return aid;
+          }
+          return null;
+        },
+      });
+      return executeWorkspaceDecision(agentId, decision, role);
+    }
+
+    // Capability-based dispatch for programmatic callers that don't use
+    // team YAML. This is the supported path for libraries that construct
+    // WorkspaceManager + GitCascadeAdapter directly and spawn agents with
+    // explicit `capabilities` + `streamId` arguments. It coexists with the
+    // V3 topology path above.
+    return capabilityBasedDispatch(agentId, options, workspaceManager);
+  }
+
+  /**
+   * Capability-based workspace allocation for programmatic callers.
+   *
+   * Matches on `workspace.stream` / `workspace.integrate` / `workspace.worktree`
+   * capabilities + corresponding streamId/streamConfig args. Delegates to the
+   * role-shaped WorkspaceManager methods (createWorkerWorkspace,
+   * createIntegratorWorkspace, createCoordinatorWorkspace).
+   *
+   * Not used by team-YAML-driven teams — those go through TopologyPolicy above.
+   */
+  async function capabilityBasedDispatch(
+    agentId: AgentId,
+    options: SpawnAgentOptions,
+    ws: WorkspaceManager
+  ): Promise<Workspace | undefined> {
     const capabilities = options.capabilities ?? [];
     const streamId = options.streamId;
     const streamConfig = options.streamConfig;
-    const dataplaneTaskId = options.dataplaneTaskId;
+    const gitCascadeTaskId = options.gitCascadeTaskId;
 
-    // Capability-based dispatch
     if (capabilities.includes("workspace.stream") && streamConfig) {
-      const newStreamId = workspaceManager.createIntegrationStream(
-        agentId,
-        streamConfig
-      );
-      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+      const newStreamId = ws.createIntegrationStream(agentId, streamConfig);
+      return ws.createCoordinatorWorkspace(agentId, newStreamId);
     }
 
     if (capabilities.includes("workspace.integrate") && streamId) {
-      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+      return ws.createIntegratorWorkspace(agentId, streamId);
     }
 
     if (capabilities.includes("workspace.worktree") && streamId) {
-      const taskId = dataplaneTaskId ?? agentId;
-      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+      const taskId = gitCascadeTaskId ?? agentId;
+      return ws.createWorkerWorkspace(agentId, taskId, streamId);
     }
 
-    // Role-name fallback
-    switch (role) {
-      case "coordinator":
-        if (streamConfig) {
-          const sid = workspaceManager.createIntegrationStream(
-            agentId,
-            streamConfig
-          );
-          return workspaceManager.createCoordinatorWorkspace(agentId, sid);
-        }
-        return undefined;
-      case "integrator":
-        if (streamId) {
-          return workspaceManager.createIntegratorWorkspace(agentId, streamId);
-        }
-        return undefined;
-      case "worker":
-      case "worker.resolver": {
-        if (streamId) {
-          const tid = dataplaneTaskId ?? agentId;
-          return workspaceManager.createWorkerWorkspace(agentId, tid, streamId);
-        }
-        return undefined;
-      }
-      default:
-        return undefined;
-    }
+    // No matching capability — agent inherits parent cwd (no workspace)
+    return undefined;
   }
 
   // ── Core Lifecycle ───────────────────────────────────────────
@@ -456,13 +571,13 @@ export function createAgentManagerV2(
       if (workspace) {
         agentWorkspaces.set(agentId, workspace);
 
-        // Create and claim dataplane task for workers
+        // Create and claim git-cascade task for workers
         if (
           workspace.role === "worker" &&
           workspace.streamId &&
           workspaceManager
         ) {
-          const dpTaskId = options.dataplaneTaskId ?? agentId;
+          const dpTaskId = options.gitCascadeTaskId ?? agentId;
           workspaceManager.createTask(workspace.streamId, {
             title: task ?? `Task for ${agentId}`,
           });
@@ -1413,6 +1528,12 @@ export function createAgentManagerV2(
     sidecarRef = sidecar;
   }
 
+  function setTopologyPolicyFn(
+    policy: import('../workspace/topology/types.js').TopologyPolicy | null
+  ): void {
+    topologyPolicy = policy;
+  }
+
   function setMailServices(): void {
     // No-op: agent-inbox handles conversation tracking
   }
@@ -1475,6 +1596,7 @@ export function createAgentManagerV2(
     setIntegrationConfigs,
     setSkillLoadout,
     setSidecar,
+    setTopologyPolicy: setTopologyPolicyFn,
     setMailServices,
     close,
   } as AgentManager;

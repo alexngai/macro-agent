@@ -1,7 +1,7 @@
 /**
  * WorkspaceManager Implementation
  *
- * Bridges macro-agent roles to dataplane streams and worktrees.
+ * Bridges macro-agent roles to git-cascade streams and worktrees.
  * Provides a higher-level API for workspace management.
  *
  * @module workspace/workspace-manager
@@ -9,8 +9,8 @@
  */
 
 import type { Stream, WorkerTask, StartTaskResult, AgentWorktree, CleanupWorkerBranchesOptions, CleanupResult } from 'git-cascade';
-import { DataplaneAdapter } from './dataplane-adapter.js';
-import type { DataplaneConfig, WorktreePoolConfig } from './config.js';
+import { GitCascadeAdapter } from './git-cascade-adapter.js';
+import type { GitCascadeConfig, WorktreePoolConfig } from './config.js';
 import { DEFAULT_POOL_CONFIG } from './config.js';
 import { WorktreePool } from './pool/worktree-pool.js';
 import type { AllocationStrategy, AcquireOptions } from './pool/types.js';
@@ -35,7 +35,7 @@ import { execSync } from 'child_process';
 /**
  * Configuration options for DefaultWorkspaceManager.
  */
-export interface WorkspaceManagerConfig extends DataplaneConfig {
+export interface WorkspaceManagerConfig extends GitCascadeConfig {
   /**
    * Base directory for worktrees.
    * Defaults to `<repoPath>/.worktrees`.
@@ -53,14 +53,14 @@ export interface WorkspaceManagerConfig extends DataplaneConfig {
  * DefaultWorkspaceManager implements the WorkspaceManager interface.
  *
  * Responsibilities:
- * - Wraps DataplaneAdapter for stream/worktree operations
+ * - Wraps GitCascadeAdapter for stream/worktree operations
  * - Maintains agentId → workspace mappings
  * - Emits events on workspace lifecycle changes
  *
  * @see [[s-7ktd]] WorkspaceManager section
  */
 export class DefaultWorkspaceManager implements WorkspaceManager {
-  private readonly adapter: DataplaneAdapter;
+  private readonly adapter: GitCascadeAdapter;
   private readonly config: Required<Pick<WorkspaceManagerConfig, 'worktreeBaseDir'>>;
   private readonly poolConfig: WorktreePoolConfig;
   private readonly workspaces: Map<AgentId, Workspace> = new Map();
@@ -72,10 +72,10 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   /**
    * Create a new DefaultWorkspaceManager.
    *
-   * @param adapter - DataplaneAdapter instance
+   * @param adapter - GitCascadeAdapter instance
    * @param config - Configuration options
    */
-  constructor(adapter: DataplaneAdapter, config?: Partial<WorkspaceManagerConfig>) {
+  constructor(adapter: GitCascadeAdapter, config?: Partial<WorkspaceManagerConfig>) {
     this.adapter = adapter;
     this.config = {
       worktreeBaseDir: config?.worktreeBaseDir ?? `${adapter.repoPath}/.worktrees`,
@@ -370,10 +370,58 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
    * @param agentId - ID of the agent whose workspace to deallocate
    */
   deallocateWorkspace(agentId: AgentId): void {
+    // Case 1: agentId is a sharer on someone else's worktree. Decrement
+    // the ref-count; only tear down if this was the last sharer AND the
+    // owner had previously departed.
+    for (const [path, entry] of this.sharedWorktreeRefs) {
+      if (entry.sharers.has(agentId)) {
+        entry.sharers.delete(agentId);
+        this.emit('worktree:released', {
+          agentId,
+          path,
+          kind: 'sharer',
+        });
+        if (entry.ownerDeparted && entry.sharers.size === 0) {
+          // Last sharer exiting after owner departed — finalize teardown
+          // under the original owner's id.
+          this.adapter.deallocateWorktree(entry.ownerId);
+          this.sharedWorktreeRefs.delete(path);
+          this.emit('workspace:deallocated', {
+            agentId: entry.ownerId,
+            path,
+            deferredUntilLastSharer: true,
+          });
+        }
+        return;
+      }
+    }
+
     const workspace = this.workspaces.get(agentId);
     if (!workspace) {
       return; // Already deallocated
     }
+
+    // Case 2: agentId is an owner of a shared worktree with active sharers.
+    // Defer git-cascade teardown until the last sharer leaves.
+    const sharedEntry = this.sharedWorktreeRefs.get(workspace.path);
+    if (
+      sharedEntry &&
+      sharedEntry.ownerId === agentId &&
+      sharedEntry.sharers.size > 0
+    ) {
+      sharedEntry.ownerDeparted = true;
+      this.workspaces.delete(agentId);
+      this.agentToStream.delete(agentId);
+      this.emit('worktree:released', {
+        agentId,
+        path: workspace.path,
+        kind: 'owner-departed',
+        remainingSharers: sharedEntry.sharers.size,
+      });
+      return;
+    }
+
+    // Case 3: normal teardown — owner with no sharers (or no sharing involved).
 
     // Remove from coordinator's child workspace map if this is a child
     if (workspace.role === 'worker' || workspace.role === 'integrator') {
@@ -387,14 +435,18 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
       }
     }
 
-    // Deallocate via dataplane
+    // Deallocate via git-cascade adapter
     this.adapter.deallocateWorktree(agentId);
 
     // Clean up mappings
     this.workspaces.delete(agentId);
     this.agentToStream.delete(agentId);
 
-    // Emit event
+    // Also clean up any stale entry (owner with zero sharers at deallocation time)
+    if (sharedEntry && sharedEntry.ownerId === agentId) {
+      this.sharedWorktreeRefs.delete(workspace.path);
+    }
+
     this.emit('workspace:deallocated', {
       agentId,
       role: workspace.role,
@@ -511,11 +563,11 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   }
 
   /**
-   * Get the underlying DataplaneAdapter.
+   * Get the underlying GitCascadeAdapter.
    *
    * Use with caution - prefer manager methods for operations.
    */
-  get rawAdapter(): DataplaneAdapter {
+  get rawAdapter(): GitCascadeAdapter {
     return this.adapter;
   }
 
@@ -527,7 +579,7 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
    * Get the merge queue for coordinating worker merges.
    *
    * The merge queue is lazily initialized on first access and uses
-   * the same database as the dataplane adapter.
+   * the same database as the git-cascade adapter.
    *
    * @returns MergeQueue instance
    */
@@ -535,7 +587,7 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     if (!this.mergeQueue) {
       this.mergeQueue = new MergeQueue({
         db: this.adapter.db,
-        tablePrefix: 'macro_',  // Use different prefix from dataplane tables
+        tablePrefix: 'macro_',  // Use different prefix from git-cascade tables
         initSchema: true,
       });
     }
@@ -895,7 +947,7 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
       }
     }
 
-    // Release to pool if enabled, otherwise deallocate via dataplane
+    // Release to pool if enabled, otherwise deallocate via git-cascade
     const pool = this.getPool();
     if (pool) {
       await pool.release(agentId, { clean });
@@ -961,6 +1013,351 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     }
 
     return result;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // V3 — Stream-first surface
+  //
+  // Additive with the role-shaped methods above. Callers migrate piecewise
+  // during Phases 3-4; Phase 9 removes the legacy methods. See
+  // docs/workspace-interfaces.md §5 and docs/workspace-redesign-plan.md.
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  private readonly landingStrategies: Map<string, import('./types-v3.js').LandingStrategy> = new Map();
+
+  /**
+   * Ref-counted sharing state keyed by worktree path.
+   *
+   * - `ownerId`: the principal that originally allocated the worktree (the
+   *   id that git-cascade's tracker associates with the worktree).
+   * - `sharers`: other agents that allocated via `sharedWithAgent`.
+   * - `ownerDeparted`: set when the owner deallocates but sharers remain —
+   *   the actual git-cascade teardown is deferred until `sharers` is empty.
+   */
+  private readonly sharedWorktreeRefs: Map<
+    string,
+    { ownerId: import('./types-v3.js').Principal; sharers: Set<AgentId>; ownerDeparted: boolean }
+  > = new Map();
+
+  createStreamV3(spec: import('./types-v3.js').StreamSpec): StreamId {
+    let streamId: StreamId;
+    if (spec.parent) {
+      streamId = this.adapter.forkStream({
+        parentStreamId: spec.parent,
+        name: spec.name,
+        agentId: spec.ownerId,
+      });
+      // git-cascade's ForkStreamOptions doesn't accept metadata; apply via update.
+      if (spec.metadata) {
+        this.adapter.updateStream(streamId, { metadata: spec.metadata });
+      }
+    } else {
+      streamId = this.adapter.createStream({
+        name: spec.name,
+        agentId: spec.ownerId,
+        base: spec.forkFrom ?? 'main',
+        metadata: spec.metadata,
+      });
+    }
+    this.emit(spec.parent ? 'stream:forked' : 'stream:created', {
+      streamId,
+      ownerId: spec.ownerId,
+      parentStreamId: spec.parent,
+    });
+    return streamId;
+  }
+
+  forkStream(opts: {
+    parentStreamId: StreamId;
+    name: string;
+    ownerId: import('./types-v3.js').Principal;
+    metadata?: Record<string, unknown>;
+  }): StreamId {
+    const streamId = this.adapter.forkStream({
+      parentStreamId: opts.parentStreamId,
+      name: opts.name,
+      agentId: opts.ownerId,
+    });
+    if (opts.metadata) {
+      this.adapter.updateStream(streamId, { metadata: opts.metadata });
+    }
+    this.emit('stream:forked', {
+      streamId,
+      parentStreamId: opts.parentStreamId,
+      ownerId: opts.ownerId,
+    });
+    return streamId;
+  }
+
+  mergeStream(opts: {
+    sourceStreamId: StreamId;
+    targetStreamId: StreamId;
+    agentId: import('./types-v3.js').Principal;
+    worktree: string;
+  }): import('./types-v3.js').MergeResult {
+    // git-cascade's MergeStreamOptions uses `sourceStream`/`targetStream`.
+    // We adapt to v3's `sourceStreamId`/`targetStreamId` at the boundary.
+    const result = this.adapter.mergeStream({
+      sourceStream: opts.sourceStreamId,
+      targetStream: opts.targetStreamId,
+      agentId: opts.agentId,
+      worktree: opts.worktree,
+    });
+    if (result.success) {
+      this.emit('stream:merged', {
+        sourceStreamId: opts.sourceStreamId,
+        targetStreamId: opts.targetStreamId,
+        mergeCommit: result.newHead,
+      });
+    } else {
+      this.emit('stream:conflicted', {
+        streamId: opts.sourceStreamId,
+        conflicts: result.conflicts,
+        error: result.error,
+      });
+    }
+    return result;
+  }
+
+  syncWithParent(opts: {
+    streamId: StreamId;
+    agentId: import('./types-v3.js').Principal;
+    worktree: string;
+    onConflict?: import('./types-v3.js').ConflictStrategy;
+  }): import('./types-v3.js').RebaseResult {
+    return this.adapter.syncWithParent(
+      opts.streamId,
+      opts.agentId,
+      opts.worktree,
+      opts.onConflict
+    );
+  }
+
+  // abandonStream, pauseStream, resumeStream are inherited-by-name from the
+  // adapter calls; expose thin wrappers that emit workspace-level events.
+
+  abandonStream(streamId: StreamId, opts?: { cascade?: boolean; reason?: string }): void {
+    this.adapter.abandonStream(streamId, opts);
+    this.emit('stream:abandoned', { streamId, ...opts });
+  }
+
+  pauseStream(streamId: StreamId, reason?: string): void {
+    this.adapter.pauseStream(streamId, reason);
+    this.emit('stream:paused', { streamId, reason });
+  }
+
+  resumeStream(streamId: StreamId): void {
+    this.adapter.resumeStream(streamId);
+    this.emit('stream:resumed', { streamId });
+  }
+
+  listStreams(filter?: {
+    ownerId?: import('./types-v3.js').Principal;
+    status?: import('./types-v3.js').Stream['status'];
+  }): import('./types-v3.js').Stream[] {
+    return this.adapter.listStreams({
+      agentId: filter?.ownerId,
+      status: filter?.status,
+    });
+  }
+
+  commitChanges(opts: {
+    agentId: import('./types-v3.js').Principal;
+    streamId: StreamId;
+    worktree: string;
+    message: string;
+  }): { commit: string; changeId: import('./types-v3.js').ChangeId } {
+    const result = this.adapter.commitChanges(opts);
+    this.emit('stream:committed', {
+      streamId: opts.streamId,
+      commit: result.commit,
+      changeId: result.changeId,
+      agentId: opts.agentId,
+    });
+    return result;
+  }
+
+  markChangesMerged(changeIds: import('./types-v3.js').ChangeId[]): void {
+    this.adapter.markChangesMerged(changeIds);
+    for (const id of changeIds) {
+      this.emit('change:merged', { changeId: id });
+    }
+  }
+
+  getChange(changeId: import('./types-v3.js').ChangeId): import('./types-v3.js').Change | null {
+    return this.adapter.getChange(changeId);
+  }
+
+  getChangeByCommit(commit: string): import('./types-v3.js').Change | null {
+    return this.adapter.getChangeByCommit(commit);
+  }
+
+  allocateWorktree(
+    opts: import('./types-v3.js').AllocateWorktreeOpts
+  ): import('./types-v3.js').Worktree {
+    // Ref-counted sharing: if sharedWithAgent is set, reuse that agent's worktree
+    if (opts.sharedWithAgent) {
+      const owner = this.adapter.getWorktree(opts.sharedWithAgent);
+      if (!owner) {
+        throw new Error(
+          `Cannot share worktree: agent ${opts.sharedWithAgent} has no allocated worktree`
+        );
+      }
+      let entry = this.sharedWorktreeRefs.get(owner.path);
+      if (!entry) {
+        entry = {
+          ownerId: opts.sharedWithAgent,
+          sharers: new Set<AgentId>(),
+          ownerDeparted: false,
+        };
+        this.sharedWorktreeRefs.set(owner.path, entry);
+      }
+      if (entry.ownerDeparted && entry.sharers.size === 0) {
+        // Edge case: owner already left and all sharers left, but someone
+        // is still trying to share. Reject — the teardown has been staged
+        // but this would resurrect a dead reference.
+        throw new Error(
+          `Cannot share worktree at ${owner.path}: owner has departed and no active sharers`
+        );
+      }
+      entry.sharers.add(opts.agentId);
+      this.emit('worktree:shared', {
+        path: owner.path,
+        ownerAgentId: opts.sharedWithAgent,
+        sharingAgentId: opts.agentId,
+      });
+      return owner;
+    }
+
+    // Fresh worktree
+    const baseDir = opts.baseDir ?? this.config.worktreeBaseDir;
+    const sanitizedId = opts.agentId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const path = `${baseDir}/${sanitizedId}`;
+
+    const worktreeArgs: import('git-cascade').CreateWorktreeOptions = {
+      agentId: opts.agentId,
+      path,
+    };
+    if (opts.streamId) {
+      worktreeArgs.branch = opts.branch ?? this.adapter.getStreamBranchName(opts.streamId);
+    } else if (opts.branch) {
+      worktreeArgs.branch = opts.branch;
+    }
+
+    const worktree = this.adapter.createWorktree(worktreeArgs);
+
+    if (opts.streamId) {
+      this.agentToStream.set(opts.agentId, opts.streamId);
+    }
+
+    // Track in workspaces map so legacy deallocateWorkspace can find this
+    // V3-allocated worktree. Use role='v3' to bypass the legacy
+    // worker/integrator coordinator-map cleanup path.
+    this.workspaces.set(opts.agentId as AgentId, {
+      agentId: opts.agentId as AgentId,
+      path: worktree.path,
+      branch: worktree.currentStream
+        ? `stream/${worktree.currentStream}`
+        : (opts.branch ?? 'unknown'),
+      streamId: opts.streamId ?? '',
+      role: 'v3',
+      createdAt: worktree.createdAt,
+    });
+
+    this.emit('worktree:allocated', {
+      agentId: opts.agentId,
+      path: worktree.path,
+      streamId: opts.streamId,
+    });
+    return worktree;
+  }
+
+  getWorktreeForAgent(
+    agentId: import('./types-v3.js').Principal
+  ): import('./types-v3.js').Worktree | null {
+    return this.adapter.getWorktree(agentId);
+  }
+
+  registerLandingStrategy(strategy: import('./types-v3.js').LandingStrategy): void {
+    this.landingStrategies.set(strategy.name, strategy);
+  }
+
+  reconcileV3(): import('./types-v3.js').MacroReconcileResult {
+    const result: import('./types-v3.js').MacroReconcileResult = {
+      streamsChecked: 0,
+      streamsFixed: 0,
+      worktreesOrphaned: 0,
+      worktreesCleaned: 0,
+      poolEntriesPurged: 0,
+      errors: [],
+    };
+
+    // Delegate stream↔git sync to git-cascade
+    try {
+      const gcResult = this.adapter.reconcile();
+      result.streamsChecked = (gcResult.updated?.length ?? 0) +
+        (gcResult.branchesCreated?.length ?? 0) +
+        (gcResult.failed?.length ?? 0);
+      result.streamsFixed = (gcResult.updated?.length ?? 0) +
+        (gcResult.branchesCreated?.length ?? 0);
+      for (const f of gcResult.failed ?? []) {
+        result.errors.push({
+          context: `stream ${f.streamId}`,
+          message: f.error,
+        });
+      }
+    } catch (err) {
+      result.errors.push({
+        context: 'git-cascade reconcile',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Worktree pool and orphan cleanup deferred to Phase 3 (when TopologyPolicy
+    // owns worktree lifecycle). For now, just count what git-cascade knows about.
+    try {
+      const worktrees = this.adapter.listWorktrees();
+      // An "orphan" is a worktree without a corresponding record in our tracking
+      // map. Count only; don't delete here — that's reserved for Phase 3.
+      for (const wt of worktrees) {
+        if (!this.workspaces.has(wt.agentId) && !this.agentToStream.has(wt.agentId)) {
+          result.worktreesOrphaned++;
+        }
+      }
+    } catch (err) {
+      result.errors.push({
+        context: 'worktree orphan scan',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return result;
+  }
+
+  resolveConflict(opts: {
+    conflictId: string;
+    resolvedBy: import('./types-v3.js').Principal;
+    resolutionCommit?: string;
+  }): void {
+    // Resume the stream if it was paused/conflicted; git-cascade's
+    // conflict record stays as an audit trail (we mark resolvedBy via event
+    // metadata rather than mutating the record directly — resolving the
+    // conflict doesn't delete it, it just unblocks the stream).
+    const conflict = this.adapter.getConflict(opts.conflictId);
+    if (conflict?.streamId) {
+      try {
+        this.adapter.resumeStream(conflict.streamId);
+      } catch {
+        // Stream may not be paused; safe to ignore.
+      }
+    }
+
+    this.emit('conflict:resolved', {
+      conflictId: opts.conflictId,
+      resolvedBy: opts.resolvedBy,
+      resolutionCommit: opts.resolutionCommit,
+      streamId: conflict?.streamId,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1044,19 +1441,19 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
 export function createWorkspaceManager(
   config: WorkspaceManagerConfig
 ): DefaultWorkspaceManager {
-  const adapter = new DataplaneAdapter(config);
+  const adapter = new GitCascadeAdapter(config);
   return new DefaultWorkspaceManager(adapter, config);
 }
 
 /**
- * Create a WorkspaceManager with an existing DataplaneAdapter.
+ * Create a WorkspaceManager with an existing GitCascadeAdapter.
  *
- * @param adapter - DataplaneAdapter instance
+ * @param adapter - GitCascadeAdapter instance
  * @param config - Configuration options
  * @returns WorkspaceManager instance
  */
 export function createWorkspaceManagerWithAdapter(
-  adapter: DataplaneAdapter,
+  adapter: GitCascadeAdapter,
   config?: Partial<WorkspaceManagerConfig>
 ): DefaultWorkspaceManager {
   return new DefaultWorkspaceManager(adapter, config);
