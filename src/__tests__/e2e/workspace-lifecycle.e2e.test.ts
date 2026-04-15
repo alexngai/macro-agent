@@ -1,17 +1,25 @@
 /**
- * Workspace Lifecycle E2E Tests
+ * Workspace Lifecycle E2E Tests — LEGACY capability-dispatch path.
  *
- * Tests workspace isolation infrastructure through the V2 stack:
+ * These tests exercise the programmatic/capability-based spawn flow:
+ * callers pass `capabilities: ["workspace.worktree"|"workspace.stream"|
+ * "workspace.integrate"]` + `streamId`/`streamConfig` to `agentManager.spawn`,
+ * and AgentManagerV2's `legacyCapabilityDispatch` allocates workspaces via
+ * `WorkspaceManager.createWorkerWorkspace` / `createIntegratorWorkspace` /
+ * `createCoordinatorWorkspace`.
+ *
+ * This path remains supported for programmatic callers that don't use team
+ * YAML (e.g., tools, libraries). The V3 YAML-driven path is covered by
+ * `workspace-v3.e2e.test.ts`.
+ *
+ * Scenarios verified:
  * - Boot with WorkspaceManager wired correctly
- * - Worker spawn creates worktree
- * - Worker terminate submits merge request
- * - Cascade terminate cleans up worktrees
- * - Coordinator creates integration stream
+ * - Worker spawn creates worktree (capability-based)
+ * - Worker terminate submits merge request to (legacy) MergeQueue
+ * - Cascade terminate cleans up child worktrees
+ * - Coordinator creates integration stream via `workspace.stream` capability
  *
  * REQUIRES: RUN_E2E_TESTS=true (no real Claude Code agents)
- *
- * Run with:
- *   RUN_E2E_TESTS=true npx vitest run --config vitest.e2e.config.ts src/__tests__/e2e/workspace-lifecycle.e2e.test.ts
  */
 
 import {

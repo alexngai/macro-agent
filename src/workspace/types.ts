@@ -168,11 +168,15 @@ export interface CleanupStatus {
  */
 export interface WorkspaceManager {
   // ─────────────────────────────────────────────────────────────────────────────
-  // Stream Management
+  // Stream Management (role-shaped; coexists with V3 stream-first surface below)
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Create an integration stream for a coordinator.
+   *
+   * Role-shaped convenience method. For stream-first semantics (fork from
+   * another stream, pseudo-principal ownership, richer metadata), prefer
+   * `createStreamV3({ name, ownerId, forkFrom, parent?, metadata? })`.
    *
    * @param coordinatorId - ID of the coordinator agent
    * @param config - Stream configuration
@@ -189,16 +193,14 @@ export interface WorkspaceManager {
   getStream(streamId: StreamId): Stream | null;
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Worktree Management
+  // Worktree Management (role-shaped; V3 `allocateWorktree` is role-neutral)
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Create a workspace for a worker agent.
    *
-   * @param workerId - ID of the worker agent
-   * @param taskId - ID of the task to work on
-   * @param streamId - ID of the integration stream
-   * @returns Worker workspace
+   * Role-shaped convenience. For role-neutral allocation, prefer
+   * `allocateWorktree({ agentId, streamId })`.
    */
   createWorkerWorkspace(
     workerId: AgentId,
@@ -209,9 +211,8 @@ export interface WorkspaceManager {
   /**
    * Create a workspace for an integrator agent.
    *
-   * @param integratorId - ID of the integrator agent
-   * @param streamId - ID of the integration stream
-   * @returns Integrator workspace
+   * Role-shaped convenience. For role-neutral allocation, prefer
+   * `allocateWorktree({ agentId, streamId })`.
    */
   createIntegratorWorkspace(
     integratorId: AgentId,
@@ -221,9 +222,8 @@ export interface WorkspaceManager {
   /**
    * Create a workspace for a coordinator agent.
    *
-   * @param coordinatorId - ID of the coordinator agent
-   * @param streamId - ID of the integration stream
-   * @returns Coordinator workspace
+   * Role-shaped convenience. For role-neutral allocation, prefer
+   * `allocateWorktree({ agentId, streamId })`.
    */
   createCoordinatorWorkspace(
     coordinatorId: AgentId,
@@ -238,12 +238,15 @@ export interface WorkspaceManager {
   deallocateWorkspace(agentId: AgentId): void;
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Task Management
+  // Task Management (LEGACY — git-cascade task semantics; not used by V3)
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Create a task under a stream.
    *
+   * @deprecated V3 does not use git-cascade's `workerTasks` layer for
+   *   task tracking; use opentasks via `TasksAdapter` instead. This method
+   *   exists only for the legacy capability-based dispatch path.
    * @param streamId - ID of the integration stream
    * @param options - Task creation options
    * @returns Task ID
@@ -253,6 +256,10 @@ export interface WorkspaceManager {
   /**
    * Claim a task for a worker.
    *
+   * @deprecated See `createTask` — V3 uses opentasks. This method cuts the
+   *   git-cascade worker branch via `startTask`; V3 equivalent is
+   *   `allocateWorktree({ agentId, streamId })` + `commitChanges` on the
+   *   stream branch directly.
    * @param taskId - ID of the task to claim
    * @param workerId - ID of the worker agent
    * @param worktree - Path to the worker's worktree
@@ -263,6 +270,8 @@ export interface WorkspaceManager {
   /**
    * Get the next available task for a stream.
    *
+   * @deprecated Use opentasks for task queueing; git-cascade's worker task
+   *   layer is redundant in V3.
    * @param streamId - ID of the integration stream
    * @returns Next task or null if none available
    */
@@ -308,10 +317,13 @@ export interface WorkspaceManager {
   /**
    * Get the merge queue for coordinating worker merges.
    *
-   * The merge queue is shared across all streams and uses the same
-   * database as the git-cascade adapter.
+   * @deprecated Use git-cascade's built-in queue via the V3 surface —
+   *   `workspaceManager.addToMergeQueue` (when exposed) or the
+   *   `queue-to-branch` `LandingStrategy`. This method returns the legacy
+   *   macro-agent MergeQueue that duplicates git-cascade's schema; kept for
+   *   legacy callers until teams migrate to `macro_agent.workspace` YAML.
    *
-   * @returns MergeQueue instance
+   * @returns Legacy MergeQueue instance (duplicate of git-cascade's queue)
    */
   getMergeQueue(): MergeQueueInterface;
 
@@ -417,6 +429,22 @@ export interface WorkspaceManager {
    * Intended to be called once on boot.
    */
   reconcileV3(): import('./types-v3.js').MacroReconcileResult;
+
+  /**
+   * Resolve a conflict record (typically called by a resolver agent via the
+   * `resolve_conflict` MCP tool after it fixes conflict markers and commits).
+   * Emits `conflict:resolved` event.
+   */
+  resolveConflict(opts: {
+    conflictId: string;
+    resolvedBy: import('./types-v3.js').Principal;
+    resolutionCommit?: string;
+  }): void;
+
+  /**
+   * Subscribe to workspace events. Returns an unsubscribe function.
+   */
+  onEvent(callback: WorkspaceEventCallback): () => void;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle

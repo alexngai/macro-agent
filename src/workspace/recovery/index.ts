@@ -26,6 +26,11 @@ export { DeferStrategy } from './defer.js';
 export { AbandonStrategy } from './abandon.js';
 export { EscalateStrategy } from './escalate.js';
 export { AutoResolveStrategy } from './auto-resolve.js';
+export {
+  SpawnResolverStrategy,
+  createSpawnResolverStrategy,
+  type SpawnResolverStrategyOptions,
+} from './spawn-resolver.js';
 
 import { DeferStrategy } from './defer.js';
 import { AbandonStrategy } from './abandon.js';

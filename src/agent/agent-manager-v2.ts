@@ -365,57 +365,50 @@ export function createAgentManagerV2(
       return executeWorkspaceDecision(agentId, decision);
     }
 
-    // Legacy path — role-name dispatch. Removed in Phase 8.
+    // Capability-based dispatch for programmatic callers that don't use
+    // team YAML. This is the supported path for libraries that construct
+    // WorkspaceManager + GitCascadeAdapter directly and spawn agents with
+    // explicit `capabilities` + `streamId` arguments. It coexists with the
+    // V3 topology path above.
+    return capabilityBasedDispatch(agentId, options, workspaceManager);
+  }
+
+  /**
+   * Capability-based workspace allocation for programmatic callers.
+   *
+   * Matches on `workspace.stream` / `workspace.integrate` / `workspace.worktree`
+   * capabilities + corresponding streamId/streamConfig args. Delegates to the
+   * role-shaped WorkspaceManager methods (createWorkerWorkspace,
+   * createIntegratorWorkspace, createCoordinatorWorkspace).
+   *
+   * Not used by team-YAML-driven teams — those go through TopologyPolicy above.
+   */
+  async function capabilityBasedDispatch(
+    agentId: AgentId,
+    options: SpawnAgentOptions,
+    ws: WorkspaceManager
+  ): Promise<Workspace | undefined> {
     const capabilities = options.capabilities ?? [];
     const streamId = options.streamId;
     const streamConfig = options.streamConfig;
     const gitCascadeTaskId = options.gitCascadeTaskId;
 
-    // Capability-based dispatch
     if (capabilities.includes("workspace.stream") && streamConfig) {
-      const newStreamId = workspaceManager.createIntegrationStream(
-        agentId,
-        streamConfig
-      );
-      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+      const newStreamId = ws.createIntegrationStream(agentId, streamConfig);
+      return ws.createCoordinatorWorkspace(agentId, newStreamId);
     }
 
     if (capabilities.includes("workspace.integrate") && streamId) {
-      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+      return ws.createIntegratorWorkspace(agentId, streamId);
     }
 
     if (capabilities.includes("workspace.worktree") && streamId) {
       const taskId = gitCascadeTaskId ?? agentId;
-      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+      return ws.createWorkerWorkspace(agentId, taskId, streamId);
     }
 
-    // Role-name fallback
-    switch (role) {
-      case "coordinator":
-        if (streamConfig) {
-          const sid = workspaceManager.createIntegrationStream(
-            agentId,
-            streamConfig
-          );
-          return workspaceManager.createCoordinatorWorkspace(agentId, sid);
-        }
-        return undefined;
-      case "integrator":
-        if (streamId) {
-          return workspaceManager.createIntegratorWorkspace(agentId, streamId);
-        }
-        return undefined;
-      case "worker":
-      case "worker.resolver": {
-        if (streamId) {
-          const tid = gitCascadeTaskId ?? agentId;
-          return workspaceManager.createWorkerWorkspace(agentId, tid, streamId);
-        }
-        return undefined;
-      }
-      default:
-        return undefined;
-    }
+    // No matching capability — agent inherits parent cwd (no workspace)
+    return undefined;
   }
 
   // ── Core Lifecycle ───────────────────────────────────────────

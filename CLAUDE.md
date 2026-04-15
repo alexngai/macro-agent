@@ -7,9 +7,10 @@ A multi-agent orchestration system for spawning and managing hierarchical AI cod
 macro-agent enables coordinated work across multiple AI agents with:
 - **Role-based agents** (Worker, Integrator, Coordinator, Monitor, Analyst + custom team roles)
 - **Team templates** for declarative multi-agent topologies (YAML config)
-- **Pluggable integration strategies** (queue, trunk, optimistic)
-- **Workspace isolation** via git worktrees (powered by git-cascade)
-- **Merge queue** for serialized integration
+- **Stream-first workspace layer (V3)** — YAML-driven `TopologyPolicy` compiles role config into per-spawn workspace decisions; falls back to capability-based dispatch for programmatic callers
+- **Pluggable `LandingStrategy`** — `merge-to-parent`, `queue-to-branch`, `direct-push`, `optimistic-push` built-ins; registered on WorkspaceManager, selected per-role via YAML
+- **Pluggable `ConflictRecoveryStrategy`** — `defer`, `abandon`, `escalate`, `auto-resolve` (real git `-X` merge), `spawn-resolver` (LLM resolver agent)
+- **Workspace isolation** via git worktrees + Change-Id tracking (powered by git-cascade 0.0.3+)
 - **Messaging** via agent-inbox (structured inbox/outbox, threading, federation)
 - **Task management** via opentasks (graph-based dependencies, providers, claiming)
 - **Control socket** for MCP subprocess lifecycle RPC (NDJSON over UNIX socket)
@@ -271,26 +272,46 @@ src/
 │   │   └── index.ts
 │   └── index.ts                # Public exports
 │
-└── workspace/               # Workspace isolation
-    ├── workspace-manager.ts    # WorkspaceManager implementation
-    ├── dataplane-adapter.ts    # Bridges to git-cascade dataplane
-    ├── config.ts               # Workspace configuration
-    ├── types.ts                # Workspace, WorkspaceManager interface
+└── workspace/               # Workspace isolation — V3 stream-first + legacy role-shaped
+    ├── workspace-manager.ts    # WorkspaceManager implementation (legacy + V3 surfaces)
+    ├── git-cascade-adapter.ts  # Wraps git-cascade tracker (40+ primitives surfaced)
+    ├── config.ts               # GitCascadeConfig + pool config
+    ├── types.ts                # WorkspaceManager interface (legacy + V3), events
+    ├── types-v3.ts             # V3 types: Principal, StreamSpec, LandingStrategy, etc.
+    ├── yaml-schema.ts          # Zod schema for `macro_agent.workspace`
+    ├── topology/               # TopologyPolicy — compiles YAML → spawn decisions
+    │   ├── types.ts            # TopologyPolicy, WorkspaceDecision, contexts
+    │   ├── yaml-driven.ts      # YamlDrivenTopology (primary)
+    │   ├── no-workspace.ts     # NoWorkspaceTopology (null policy)
+    │   └── index.ts
+    ├── landing/                # LandingStrategy — pluggable merge/push algorithms
+    │   ├── merge-to-parent.ts  # mergeStream into parent + optional cascadeRebase
+    │   ├── queue-to-branch.ts  # git-cascade built-in merge queue
+    │   ├── direct-push.ts      # rebase + push
+    │   ├── optimistic-push.ts  # direct-push + validation event
+    │   └── index.ts            # registerBuiltinLandingStrategies()
+    ├── recovery/               # ConflictRecoveryStrategy
+    │   ├── types.ts            # ConflictContext, ConflictResolution
+    │   ├── defer.ts            # Leave conflict record; no-op
+    │   ├── abandon.ts          # Abandon the conflicted stream
+    │   ├── escalate.ts         # Pause + notify human
+    │   ├── auto-resolve.ts     # Replay merge with -X ours|theirs|union
+    │   ├── spawn-resolver.ts   # Spawn a resolver agent (requires AgentManager)
+    │   └── index.ts            # buildBuiltinRecoveryRegistry()
     ├── pool/                   # Worktree pool management
     │   ├── worktree-pool.ts
     │   ├── types.ts
     │   └── index.ts
-    ├── merge-queue/            # SQLite-backed merge queue
-    │   ├── merge-queue.ts
-    │   ├── schema.ts
-    │   ├── types.ts
+    ├── merge-queue/            # @deprecated — legacy SQLite-backed queue,
+    │   ├── merge-queue.ts      #   duplicates git-cascade's built-in. Use
+    │   ├── schema.ts           #   GitCascadeAdapter.addToMergeQueue for
+    │   ├── types.ts            #   new code (via QueueToBranchStrategy).
     │   └── index.ts
-    ├── strategies/             # Integration strategies
-    │   ├── types.ts            # IntegrationStrategy interface
-    │   ├── registry.ts         # Strategy factory registry
-    │   ├── queue.ts            # Queue strategy (wraps merge queue)
-    │   ├── trunk.ts            # Trunk strategy (direct push + rebase)
-    │   ├── optimistic.ts       # Optimistic strategy (push + validation event)
+    ├── strategies/             # @deprecated — old IntegrationStrategy.
+    │   ├── types.ts            #   Superseded by workspace/landing/.
+    │   ├── queue.ts            #   Scheduled for removal once all teams
+    │   ├── trunk.ts            #   migrate to macro_agent.workspace YAML.
+    │   ├── optimistic.ts
     │   └── index.ts
     └── index.ts                # Public exports
 ```
@@ -371,16 +392,98 @@ Agents are assigned roles that determine their capabilities:
 
 Teams can define custom roles (e.g., planner, grinder, judge) that extend built-in roles via `extends` in `roles/<name>.yaml`. Tool filtering is role-based — `isToolAllowedForRole()` checks the role's capabilities before registering each MCP tool.
 
-### Integration Strategies
+### Workspace Layer (V3 Stream-First)
 
-Pluggable strategies for landing worker changes:
-- **Queue** (`queue.ts`): Wraps merge queue with serialized integration
-- **Trunk** (`trunk.ts`): Direct push with rebase-retry loop
-- **Optimistic** (`optimistic.ts`): Same as trunk + emits validation event
+The workspace layer went through a v3 redesign. Two paths coexist:
 
-### Workspace Isolation
+**V3 path (YAML-driven, recommended for teams):**
+- `macro_agent.workspace` block in `team.yaml` declares per-role workspace decisions
+- `TopologyPolicy` (`workspace/topology/`) compiles YAML → `WorkspaceDecision` per spawn
+- `LandingStrategy` (`workspace/landing/`) finalizes work at `done()` time
+- `ConflictRecoveryStrategy` (`workspace/recovery/`) dispatches on conflicts
+- Auto-wired by `TeamManagerV2.startTeam()` when workspace config is present
 
-Each worker gets an isolated git worktree via the WorkspaceManager (backed by git-cascade). Changes are merged at the terminate level — `AgentManagerV2.terminate()` calls `terminateWithChangeConsolidation()` which handles merge requests. Agents never construct merge requests directly.
+**Legacy path (programmatic / capability-based):**
+- Direct `agentManager.spawn({ capabilities: ['workspace.worktree'|'workspace.stream'|'workspace.integrate'], streamId, streamConfig })`
+- `capabilityBasedDispatch` in `AgentManagerV2` routes to role-shaped `WorkspaceManager` methods (`createWorkerWorkspace`, etc.)
+- Retained for programmatic callers (tools, libraries, tests that don't load team YAML)
+
+**Dispatch priority in `AgentManagerV2.createWorkspaceForRole()`:**
+1. If `topologyPolicy` is set → V3 path via `executeWorkspaceDecision`
+2. Else → `capabilityBasedDispatch` using role-shaped methods
+
+### TopologyPolicy (V3)
+
+`TopologyPolicy` (`workspace/topology/types.ts`) is the contract for compiling
+team YAML into per-spawn workspace decisions. Three built-ins:
+
+| Policy | Module | Purpose |
+|---|---|---|
+| **YamlDrivenTopology** | `topology/yaml-driven.ts` | Primary; reads `macro_agent.workspace` |
+| **NoWorkspaceTopology** | `topology/no-workspace.ts` | Null policy; returns `share-parent-cwd` for all |
+
+Hook methods:
+- `onTeamStart(ctx)` → creates team-root stream if any role needs it
+- `onAgentSpawn(ctx)` → returns `WorkspaceDecision` (`none` / `share-parent-cwd` / `share-with-agent` / `attach-to-stream` / `new-stream`)
+- `onAgentComplete(ctx)` → deallocates the agent's worktree
+- `onTeamStop(ctx)` → applies `on_team_complete` action (`keep` / `merge_to_main` / `abandon`)
+
+The YAML schema (`workspace/yaml-schema.ts`) supports:
+- `workspace`: `none` / `attach_to_team_root` / `share_with_agent` / `share_parent_cwd` / `new_stream`
+- `stream_lineage`: `from_team_root` / `fork_from_team_root` / `fork_from_parent` / `independent` / `track_existing_branch`
+- `allocation`, `landing`, `landing_config`, `on_conflict`, `on_conflict_recovery`, `conflict_recovery_config`, `cascade_on_parent_update`, `on_parent_advanced`, `share_with`, `track_branch`, `capabilities`
+
+### LandingStrategies (V3)
+
+`LandingStrategy` (`workspace/types-v3.ts`) is how a streamed agent finalizes
+its work. Registered on `WorkspaceManager` via `registerLandingStrategy(s)`
+and selected per-role via YAML `landing:`. Four built-ins registered by
+`registerBuiltinLandingStrategies()`:
+
+| Strategy | Module | Semantics |
+|---|---|---|
+| **merge-to-parent** | `landing/merge-to-parent.ts` | `mergeStream(source → parent)`, optional `cascadeRebase` via `strategyConfig.cascade: true` |
+| **queue-to-branch** | `landing/queue-to-branch.ts` | `GitCascadeAdapter.addToMergeQueue(streamId, targetBranch)` — drained by integrator-capable agents |
+| **direct-push** | `landing/direct-push.ts` | Rebase + `git push` with retries (trunk flow) |
+| **optimistic-push** | `landing/optimistic-push.ts` | `direct-push` + emits validation event |
+
+`LandingContext` carries: `agentId`, `streamId`, `sourceWorktree`,
+`targetStreamId`, `strategyConfig` (from YAML `landing_config`), and a back-
+reference to `WorkspaceManager`.
+
+### Conflict Recovery (V3)
+
+When a landing returns a conflict, the agent's `done()` flow dispatches to a
+`ConflictRecoveryStrategy` (`workspace/recovery/types.ts`) selected via YAML
+`on_conflict_recovery:` or team default. Five built-ins:
+
+| Strategy | Mode | Behavior |
+|---|---|---|
+| **defer** | sync | No-op — leaves conflict record for later manual recovery |
+| **abandon** | sync | `abandonStream(streamId)` — throwaway work |
+| **escalate** | async | `pauseStream` + emit escalation — awaits external `resolve_conflict` MCP call |
+| **auto-resolve** | sync | Replays merge with `-X ours|theirs|union` in the agent's worktree, commits, notifies `workspaceManager.resolveConflict` |
+| **spawn-resolver** | async | Spawns a resolver agent on the conflicted stream; awaits `conflict:resolved` event or timeout |
+
+`spawn-resolver` requires `AgentManager` injection (not in default registry;
+register via `createSpawnResolverStrategy({ agentManager })`). Max concurrent
+resolvers per stream is configurable; timeout falls back to `escalated`.
+
+`ConflictContext` carries: `conflictId`, `streamId`, `paths`, `operation`
+(`merge` | `sync` | `rebase` | `cascade`), `worktree?` (required for
+`auto-resolve`), `landingAgentId?`, `recoveryDepth`, `strategyConfig`.
+
+### Workspace Isolation (shared across paths)
+
+Each streamed agent gets an isolated git worktree via `WorkspaceManager`,
+backed by git-cascade's `MultiAgentRepoTracker`. V3 agents use
+`allocateWorktree({ agentId, streamId })`; legacy agents use role-specific
+`createWorkerWorkspace` / `createIntegratorWorkspace` / `createCoordinatorWorkspace`.
+Both produce the same underlying git worktree structure.
+
+Change-Id tracking via `commitChanges({ agentId, streamId, worktree, message })`
+(v3) — each commit gets a stable `Change-Id: c-xxxxxxxx` trailer that survives
+rebases. Legacy callers that use raw `git commit` bypass this tracking.
 
 ### MCP Tool Surface
 
@@ -515,15 +618,16 @@ Teams configure communication via:
 
 All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforces policy via composite filters on the InboxAdapter.
 
-### Done Handler Flow (V2)
+### Done Handler Flow
 
 1. Agent calls `done()` MCP tool with status + summary
 2. MCPServerV2 dispatches to `createDoneHandlerV2()` which builds a handler using `HandlerDepsV2` (InboxAdapter, TasksAdapter, AgentManager)
 3. Role-specific handler runs:
-   - **Worker**: Commits changes, emits `work:done` signal to parent via InboxAdapter
+   - **Worker / V3 streamed agent**: Commits changes via `commitChanges` (Change-Id tracked), invokes `LandingStrategy.land()` per YAML config, emits `work:done` signal
    - **Coordinator**: Emits completion signal, cascade-terminates children if needed
    - **Monitor**: Emits health report
-4. If `shouldTerminate`, AgentManagerV2 handles termination including workspace cleanup and change consolidation
+4. If landing returns a conflict, the recovery dispatcher selects a `ConflictRecoveryStrategy` per role's `on_conflict_recovery` YAML (or team default); strategy runs sync or async
+5. If `shouldTerminate`, AgentManagerV2 handles termination: `TopologyPolicy.onAgentComplete` deallocates the worktree; cascade termination consolidates changes for child agents
 
 ## Conventions
 
@@ -542,8 +646,8 @@ All filtering is adapter-side — agent-inbox is a dumb pipe, macro-agent enforc
 
 ### Testing
 
-- **Unit tests**: `*.test.ts` — Fast, mocked dependencies (~40 test files)
-- **E2E tests**: `*.e2e.test.ts` — Full system tests (11 test files)
+- **Unit tests**: `*.test.ts` — Fast tests, mixed real-git and mocked dependencies (~58 test files, ~990 tests)
+- **E2E tests**: `*.e2e.test.ts` — Full system tests gated by `RUN_E2E_TESTS=true`
 
 Run tests:
 ```bash
@@ -553,11 +657,12 @@ npm run test:e2e                      # E2E tests (mocked agent sessions)
 npm run test:e2e-full-agents          # E2E tests with real agent spawning (RUN_FULL_AGENT_TESTS=true)
 ```
 
-E2E test files:
+E2E test files (selected):
 - `agent-lifecycle.e2e.test.ts` — Spawn, prompt, terminate flows
+- `workspace-lifecycle.e2e.test.ts` — Legacy capability-based workspace path (programmatic API)
+- `workspace-v3.e2e.test.ts` — V3 YAML-driven path: peer swarm, merge-to-parent landing, conflict recovery, legacy regression guard
 - `cognitive-workspace.e2e.test.ts` — Cognitive-core backend workspace operations
 - `done-scenarios.e2e.test.ts` — Done handler scenarios per role
-- `workspace-lifecycle.e2e.test.ts` — Worktree allocation and cleanup
 - `trigger-wake.e2e.test.ts` — Trigger delivery and wake flows
 - `resume-continue.e2e.test.ts` — Session continuation
 - `pull-mode.e2e.test.ts` — Task claiming workflows
@@ -601,6 +706,27 @@ E2E test files:
 2. Define `name`, `route()`, and optionally `canHandle()`, `initialize()`, `cleanup()`
 3. Register with `triggerSystem.router.registerStrategy(strategy)`
 4. Optionally set as default: `triggerSystem.router.setDefaultStrategy(name)`
+
+### Adding a Landing Strategy (V3)
+
+1. Implement the `LandingStrategy` interface from `src/workspace/types-v3.ts`
+2. Define `name`, `land(ctx)`, optionally `canLand(ctx)`, `initialize()`, `close()`
+3. Register via `workspaceManager.registerLandingStrategy(new YourStrategy())` (typically at boot after built-ins)
+4. Reference from team YAML: `roles.<role>.landing: your_strategy_name`; pass config via `landing_config`
+
+### Adding a Conflict Recovery Strategy (V3)
+
+1. Implement the `ConflictRecoveryStrategy` interface from `src/workspace/recovery/types.ts`
+2. Define `name`, `mode` (`sync` | `async`), `recover(ctx)`, optionally `canHandle(ctx)`
+3. If the strategy needs `AgentManager` (like `spawn-resolver`), expose a factory that accepts it
+4. Register into the team's recovery registry; selected per-role via `on_conflict_recovery:` or team default
+
+### Adding a Topology Policy (V3)
+
+1. Implement the `TopologyPolicy` interface from `src/workspace/topology/types.ts`
+2. Define `onTeamStart`, `onAgentSpawn`, `onAgentComplete`, `onTeamStop`
+3. Return `WorkspaceDecision` values from `onAgentSpawn` (`none` / `share-parent-cwd` / `share-with-agent` / `attach-to-stream` / `new-stream`)
+4. Inject via `agentManager.setTopologyPolicy(policy)` — or have `TeamManagerV2.startTeam` auto-wire from YAML via `YamlDrivenTopology`
 
 ### Adding a Control Command
 
@@ -665,7 +791,7 @@ E2E test files:
 | `opentasks` | Task graph, dependencies, providers (IPC to daemon) |
 | `acp-factory` | Agent process management (Claude Code sessions) |
 | `openteams` | Team template loading and resolution |
-| `git-cascade` | Git worktree and merge queue operations |
+| `git-cascade` | Git worktree, stream/fork/merge/rebase, Change-Id tracking, cascade namespace, event emitter (0.0.3+) |
 | `better-sqlite3` | AgentStore + InboxAdapter persistence |
 | `@modelcontextprotocol/sdk` | MCP server implementation |
 | `@multi-agent-protocol/sdk` | MAP protocol types |
@@ -689,5 +815,12 @@ E2E test files:
 
 ## References
 
+### Team configuration
 - [docs/teams.md](docs/teams.md) - Team template schema reference
 - [docs/team-templates.md](docs/team-templates.md) - Team template format and examples
+
+### Workspace redesign (V3)
+- [docs/workspace-redesign-plan.md](docs/workspace-redesign-plan.md) - Implementation plan + status
+- [docs/workspace-interfaces.md](docs/workspace-interfaces.md) - V3 interface contracts (TypeScript)
+- [docs/git-cascade-integration-gaps.md](docs/git-cascade-integration-gaps.md) - Design narrative, workflow traces, migration plan
+- [docs/conflict-recovery.md](docs/conflict-recovery.md) - Conflict recovery strategy design

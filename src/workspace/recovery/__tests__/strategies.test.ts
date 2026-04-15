@@ -90,10 +90,15 @@ describe('conflict recovery strategies', () => {
   });
 
   describe('AutoResolveStrategy', () => {
-    it('canHandle only applies to merge conflicts', () => {
+    it('canHandle requires merge operation + worktree', () => {
       const strat = new AutoResolveStrategy();
-      expect(strat.canHandle!(mockContext({ operation: 'merge' }))).toBe(true);
-      expect(strat.canHandle!(mockContext({ operation: 'rebase' }))).toBe(false);
+      expect(
+        strat.canHandle!(mockContext({ operation: 'merge', worktree: '/tmp/wt' }))
+      ).toBe(true);
+      expect(strat.canHandle!(mockContext({ operation: 'merge' }))).toBe(false);
+      expect(
+        strat.canHandle!(mockContext({ operation: 'rebase', worktree: '/tmp/wt' }))
+      ).toBe(false);
     });
 
     it('returns failed for non-merge operations', async () => {
@@ -102,12 +107,27 @@ describe('conflict recovery strategies', () => {
       expect(res.kind).toBe('failed');
     });
 
-    it('returns failed (scaffold) for merge operations pending worktree hook', async () => {
+    it('returns failed without worktree', async () => {
       const strat = new AutoResolveStrategy();
       const res = await strat.recover(mockContext({ operation: 'merge' }));
       expect(res.kind).toBe('failed');
       if (res.kind === 'failed') {
         expect(res.error).toMatch(/worktree/);
+      }
+    });
+
+    it('rejects unsupported strategies', async () => {
+      const strat = new AutoResolveStrategy();
+      const res = await strat.recover(
+        mockContext({
+          operation: 'merge',
+          worktree: '/tmp/wt',
+          strategyConfig: { strategy: 'bogus' },
+        })
+      );
+      expect(res.kind).toBe('failed');
+      if (res.kind === 'failed') {
+        expect(res.error).toMatch(/unsupported strategy/);
       }
     });
   });

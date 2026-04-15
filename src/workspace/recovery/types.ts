@@ -21,6 +21,13 @@ export interface ConflictContext {
   paths: string[];
   operation: 'merge' | 'sync' | 'rebase' | 'cascade';
   landingAgentId?: AgentId;
+  /**
+   * Worktree path where the conflict occurred. Required for
+   * `auto-resolve` and any other strategy that needs to replay git
+   * operations. Optional because some strategies (`defer`, `abandon`,
+   * `escalate`) don't need filesystem access.
+   */
+  worktree?: string;
   recoveryDepth: number;
   strategyConfig?: Record<string, unknown>;
   workspaceManager: WorkspaceManager;

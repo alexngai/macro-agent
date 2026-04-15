@@ -9,8 +9,10 @@ macro-agent handles **orchestration** (agent lifecycle, team topology, workspace
 - **Hierarchical Agent Management** — Head manager spawns and coordinates child agents via acp-factory
 - **Role-Based Agents** — Worker, Integrator, Coordinator, Monitor, Analyst roles with distinct capabilities
 - **Team Templates** — Declarative YAML configs for multi-agent topologies with composite signal filtering
-- **Workspace Isolation** — Each worker gets an isolated git worktree via git-cascade
-- **Merge Queue** — Serialized integration of worker changes with conflict resolution
+- **Stream-First Workspace Layer (V3)** — YAML-driven `TopologyPolicy` compiles role config into per-spawn workspace decisions; works across 6+ team shapes (peer swarm, triad, pipeline, solo stack, research, long-lived feature)
+- **Pluggable Landing Strategies** — `merge-to-parent`, `queue-to-branch`, `direct-push`, `optimistic-push` built-ins
+- **Conflict Recovery** — `defer`, `abandon`, `escalate`, real-git `auto-resolve`, and LLM-driven `spawn-resolver`
+- **Workspace Isolation** — Per-agent git worktrees + Change-Id tracking via git-cascade 0.0.3+
 - **Control Socket** — NDJSON-over-UNIX-socket RPC for MCP subprocess lifecycle operations
 - **Trigger System** — Pluggable routing strategies (direct, role, head, AI router) for wake, cron, and webhook-based agent activation
 - **MCP Tools** — 5 core orchestration tools + 3 pull-mode claim tools per agent
@@ -56,6 +58,9 @@ await system.shutdown();
 ### CLI
 
 ```bash
+# Run a team template (auto-wires topology from macro_agent.workspace YAML)
+npx multiagent-cli run self-driving --task "fix the authentication bug"
+
 # Start the system and enter interactive chat
 npx multiagent-cli chat
 
@@ -101,13 +106,13 @@ npx multiagent --acp
        │       │ ai-router│
  ┌─────┼───────┘──────────┐
  │     │                  │
-┌▼────┐┌▼──────────┐ ┌───▼────────┐
-│Roles││ Workspace  │ │  Adapters  │
-│    ││ Worktrees  │ │            │
-│    ││ Strategies │ │ InboxAdapter ──► agent-inbox (embedded)
-│    ││ MergeQueue │ │ TasksAdapter ──► opentasks  (IPC daemon)
-└────┘└────────────┘ │ Federation ──► remote instances
-                     └────────────┘
+┌▼────┐┌▼──────────────┐ ┌───▼────────┐
+│Roles││ Workspace (V3) │ │  Adapters  │
+│    ││ TopologyPolicy │ │            │
+│    ││ LandingStrategy│ │ InboxAdapter  ──► agent-inbox (embedded)
+│    ││ ConflictRecov. │ │ TasksAdapter  ──► opentasks  (IPC daemon)
+│    ││ GitCascadeAdpt │ │ Federation    ──► remote instances
+└────┘└────────────────┘ └────────────┘
 ```
 
 **Three subsystems:**
@@ -141,10 +146,36 @@ Key team features:
 - **Topology**: Root + companion agents spawned at bootstrap, with spawn rules for dynamic workers
 - **Communication**: Topic-based channels with per-role signal filtering and peer-to-peer routing
 - **Multi-team**: Multiple teams run concurrently with composite signal filters and emission validators
-- **Integration strategies**: `queue` (merge queue), `trunk` (direct push), `optimistic` (push + validation)
+- **Workspace (V3)**: `macro_agent.workspace` block declares per-role stream lineage, landing strategy, conflict recovery
 - **Task modes**: `push` (coordinator assigns) or `pull` (agents claim from pool)
 
-See [docs/teams.md](docs/teams.md) for the full schema reference.
+Example `macro_agent.workspace` block (peer-swarm shape):
+
+```yaml
+macro_agent:
+  workspace:
+    default_stream:
+      fork_from: main
+      change_id_tracking: true
+    on_team_complete: keep
+    roles:
+      orchestrator:
+        workspace: none
+      peer:
+        workspace: new_stream
+        stream_lineage: fork_from_team_root
+        landing: merge_to_parent_stream
+        on_conflict_recovery: spawn-resolver
+        capabilities: [workspace.commit, workspace.land]
+```
+
+See the workspace design docs:
+- [docs/workspace-redesign-plan.md](docs/workspace-redesign-plan.md) — implementation plan + status
+- [docs/workspace-interfaces.md](docs/workspace-interfaces.md) — V3 interface contracts
+- [docs/git-cascade-integration-gaps.md](docs/git-cascade-integration-gaps.md) — design narrative + workflow traces
+- [docs/conflict-recovery.md](docs/conflict-recovery.md) — recovery strategy design
+
+See [docs/teams.md](docs/teams.md) for the full team schema reference.
 
 ## MCP Tools
 
@@ -231,7 +262,7 @@ Spawns analyst agents, manages sessions with timeouts, and reports completion. T
 | [opentasks](https://github.com/alexngai/opentasks) | Task graph, dependencies, claiming |
 | [acp-factory](https://github.com/alexngai/acp-factory) | Agent process management |
 | [openteams](https://github.com/alexngai/openteams) | Team template resolution |
-| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktree and merge operations |
+| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktree, stream/fork/merge, Change-Id tracking, cascade rebase (0.0.3+) |
 | [express](https://expressjs.com/) | REST API server |
 | [ws](https://github.com/websockets/ws) | ACP WebSocket transport |
 

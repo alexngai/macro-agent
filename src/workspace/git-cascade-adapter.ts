@@ -41,11 +41,16 @@ import {
   diffStacks,
   mergeQueue as mergeQueueModule,
   reconcile as reconcileModule,
+  cascade as cascadeModule,
+  matchCascadeSuffix,
+  type StreamOpenedParams,
+  type StreamCommittedParams,
+  type StreamMergedParams,
+  type StreamConflictedParams,
+  type StreamAbandonedParams,
 } from 'git-cascade';
-// NOTE: event subscription (x-cascade/* emit callback) and `cascade.cascadeRebase`
-// are not exported from git-cascade 0.0.1. Tracked as upstream follow-ups; will
-// be wired in when git-cascade publishes them. Until then, this adapter relies
-// on local `emit` calls from wrapper methods only.
+// git-cascade 0.0.3+ exposes both events (via `emit` callback) and the
+// `cascade` namespace for cascadeRebase. All v3 primitives are now reachable.
 import type { GitCascadeConfig } from './config.js';
 import { DEFAULT_GIT_CASCADE_CONFIG } from './config.js';
 
@@ -78,6 +83,7 @@ export type GitCascadeEventType =
   | 'task:abandoned'
   | 'change:merged'
   | 'change:dropped'
+  | 'cascade:completed'
   | 'conflict:created'
   | 'conflict:resolved'
   | 'mergeQueue:added'
@@ -143,6 +149,9 @@ export class GitCascadeAdapter {
       tablePrefix: this.config.tablePrefix,
       verbose: this.config.verbose,
       skipRecovery: this.config.skipRecovery,
+      // Wire git-cascade's native event emitter (0.0.2+) so stream lifecycle
+      // events are re-published through our own onEvent channel.
+      emit: (method: string, params: unknown) => this.forwardCascadeEvent(method, params),
     };
 
     if (config.db) {
@@ -219,6 +228,88 @@ export class GitCascadeAdapter {
     }
   }
 
+  /**
+   * Forward events emitted by git-cascade (`x-cascade/stream.*`) into our
+   * structured `GitCascadeEvent` stream. Called via the `emit` callback wired
+   * into the tracker constructor.
+   *
+   * Note: `stream.opened` is mapped to `stream:created`. The local
+   * wrapper methods still emit their own events so consumers don't miss out
+   * on operations that don't round-trip through git-cascade's emit (e.g.,
+   * updateStream, pauseStream, mergeQueue events).
+   */
+  private forwardCascadeEvent(method: string, params: unknown): void {
+    const suffix = matchCascadeSuffix(method);
+    if (!suffix) return;
+
+    switch (suffix) {
+      case 'stream.opened': {
+        const p = params as StreamOpenedParams;
+        this.emit('stream:created', {
+          streamId: p.stream_id,
+          name: p.name,
+          agentId: p.agent_id,
+          baseCommit: p.base_commit,
+          parentStream: p.parent_stream,
+          branchName: p.branch_name,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'stream.committed': {
+        const p = params as StreamCommittedParams;
+        this.emit('stream:committed', {
+          streamId: p.stream_id,
+          commit: p.commit_hash,
+          changeId: p.change_id,
+          agentId: p.agent_id,
+          messageSummary: p.message_summary,
+          filesTouched: p.files_touched,
+          parentCommit: p.parent_commit,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'stream.merged': {
+        const p = params as StreamMergedParams;
+        this.emit('stream:merged', {
+          sourceStreamId: p.source_stream_id,
+          targetStreamId: p.target_stream_id,
+          mergeCommit: p.merge_commit,
+          agentId: p.agent_id,
+          strategy: p.strategy,
+          sourceCommit: p.source_commit,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'stream.conflicted': {
+        const p = params as StreamConflictedParams;
+        this.emit('stream:conflicted', {
+          streamId: p.stream_id,
+          conflictId: p.conflict_id,
+          conflictedFiles: p.conflicted_files,
+          agentId: p.agent_id,
+          conflictingCommit: p.conflicting_commit,
+          targetCommit: p.target_commit,
+          source: p.source,
+          metadata: p.metadata,
+        });
+        break;
+      }
+      case 'stream.abandoned': {
+        const p = params as StreamAbandonedParams;
+        this.emit('stream:abandoned', {
+          streamId: p.stream_id,
+          reason: p.reason,
+          cascade: p.cascade,
+          metadata: p.metadata,
+        });
+        break;
+      }
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Stream Operations
   // ─────────────────────────────────────────────────────────────────────────────
@@ -226,13 +317,14 @@ export class GitCascadeAdapter {
   /**
    * Create a new stream (integration branch).
    *
+   * Note: `stream:created` is emitted by the cascade event forwarder via
+   * git-cascade's `x-cascade/stream.opened`. We don't double-emit here.
+   *
    * @param options - Stream creation options
    * @returns Stream ID
    */
   createStream(options: CreateStreamOptions): string {
-    const streamId = this.tracker.createStream(options);
-    this.emit('stream:created', { streamId, ...options });
-    return streamId;
+    return this.tracker.createStream(options);
   }
 
   /**
@@ -262,13 +354,14 @@ export class GitCascadeAdapter {
 
   /**
    * Abandon a stream.
+   *
+   * Note: `stream:abandoned` is emitted by the cascade event forwarder.
    */
   abandonStream(
     streamId: string,
     options?: { reason?: string; cascade?: boolean }
   ): void {
     this.tracker.abandonStream(streamId, options);
-    this.emit('stream:abandoned', { streamId, ...options });
   }
 
   /**
@@ -409,6 +502,36 @@ export class GitCascadeAdapter {
    */
   getDependents(streamId: string): string[] {
     return this.tracker.getDependents(streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Cascade Rebase (git-cascade 0.0.3+)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Cascade-rebase all dependents of a root stream.
+   *
+   * Propagates rebases through the dependency graph. Uses a callback-based
+   * worktree provider so not every dependent needs a pre-allocated worktree.
+   *
+   * @param options - Cascade options including root stream, agent id, and worktree provider
+   * @returns CascadeResult with updated/failed/skipped stream lists
+   */
+  cascadeRebase(
+    options: cascadeModule.CascadeRebaseOptions
+  ): ReturnType<typeof cascadeModule.cascadeRebase> {
+    const result = cascadeModule.cascadeRebase(
+      this.tracker.db,
+      this.config.repoPath,
+      options
+    );
+    this.emit('cascade:completed', {
+      rootStream: options.rootStream,
+      updated: result.updated,
+      failed: result.failed,
+      skipped: result.skipped,
+    });
+    return result;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

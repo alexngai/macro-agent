@@ -1240,6 +1240,32 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     return result;
   }
 
+  resolveConflict(opts: {
+    conflictId: string;
+    resolvedBy: import('./types-v3.js').Principal;
+    resolutionCommit?: string;
+  }): void {
+    // Resume the stream if it was paused/conflicted; git-cascade's
+    // conflict record stays as an audit trail (we mark resolvedBy via event
+    // metadata rather than mutating the record directly — resolving the
+    // conflict doesn't delete it, it just unblocks the stream).
+    const conflict = this.adapter.getConflict(opts.conflictId);
+    if (conflict?.streamId) {
+      try {
+        this.adapter.resumeStream(conflict.streamId);
+      } catch {
+        // Stream may not be paused; safe to ignore.
+      }
+    }
+
+    this.emit('conflict:resolved', {
+      conflictId: opts.conflictId,
+      resolvedBy: opts.resolvedBy,
+      resolutionCommit: opts.resolutionCommit,
+      streamId: conflict?.streamId,
+    });
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle
   // ─────────────────────────────────────────────────────────────────────────────

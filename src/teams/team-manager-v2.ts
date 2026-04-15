@@ -142,6 +142,43 @@ export class TeamManagerV2 {
       basePath ?? process.cwd()
     );
 
+    // V3: auto-wire TopologyPolicy when the team declares
+    // `macro_agent.workspace`. Requires a WorkspaceManager to be present.
+    if (workspaceManager) {
+      try {
+        const { extractWorkspaceConfig } = await import(
+          "../workspace/yaml-schema.js"
+        );
+        const workspaceConfig = extractWorkspaceConfig(
+          manifest as unknown as { macro_agent?: Record<string, unknown> }
+        );
+        if (workspaceConfig) {
+          const { YamlDrivenTopology } = await import(
+            "../workspace/topology/yaml-driven.js"
+          );
+          const policy = new YamlDrivenTopology(workspaceConfig);
+          agentManager.setTopologyPolicy(policy);
+
+          // Kick the topology's onTeamStart so team-root streams get
+          // created before any agents spawn.
+          await policy.onTeamStart({
+            teamName: name,
+            teamInstanceId: `${name}-${this.instanceCounter + 1}`,
+            workspaceConfig,
+            workspaceManager,
+          });
+        }
+      } catch (err) {
+        // Non-fatal: topology wiring is a progressive enhancement. Log and
+        // fall through to legacy capability-based dispatch.
+        console.warn(
+          `[TeamManagerV2] topology auto-wire skipped for team "${name}": ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+
     // Create runtime
     const runtimeServices: TeamServicesV2 = {
       agentManager,
