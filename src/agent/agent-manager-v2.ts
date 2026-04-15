@@ -262,7 +262,8 @@ export function createAgentManagerV2(
    */
   async function executeWorkspaceDecision(
     agentId: AgentId,
-    decision: import('../workspace/topology/types.js').WorkspaceDecision
+    decision: import('../workspace/topology/types.js').WorkspaceDecision,
+    role?: string
   ): Promise<Workspace | undefined> {
     if (!workspaceManager) return undefined;
 
@@ -289,6 +290,13 @@ export function createAgentManagerV2(
       }
 
       case 'attach-to-stream': {
+        // Record even if no worktree — the topology needs the stream↔role
+        // mapping for event-driven features like on_parent_advanced.
+        const attachPolicy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        attachPolicy.recordAgentStream?.(agentId, decision.streamId, role);
+
         if (!decision.allocateWorktree) {
           return undefined;
         }
@@ -309,8 +317,10 @@ export function createAgentManagerV2(
       case 'new-stream': {
         const streamId = workspaceManager.createStreamV3(decision.streamSpec);
         // Record the mapping in the topology if it supports it (for share-with lookup).
-        const policy = topologyPolicy as unknown as { recordAgentStream?: (a: string, s: string) => void };
-        policy.recordAgentStream?.(agentId, streamId);
+        const policy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        policy.recordAgentStream?.(agentId, streamId, role);
 
         if (!decision.allocateWorktree) {
           return undefined;
@@ -362,7 +372,7 @@ export function createAgentManagerV2(
           return null;
         },
       });
-      return executeWorkspaceDecision(agentId, decision);
+      return executeWorkspaceDecision(agentId, decision, role);
     }
 
     // Capability-based dispatch for programmatic callers that don't use

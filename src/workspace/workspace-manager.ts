@@ -370,10 +370,58 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
    * @param agentId - ID of the agent whose workspace to deallocate
    */
   deallocateWorkspace(agentId: AgentId): void {
+    // Case 1: agentId is a sharer on someone else's worktree. Decrement
+    // the ref-count; only tear down if this was the last sharer AND the
+    // owner had previously departed.
+    for (const [path, entry] of this.sharedWorktreeRefs) {
+      if (entry.sharers.has(agentId)) {
+        entry.sharers.delete(agentId);
+        this.emit('worktree:released', {
+          agentId,
+          path,
+          kind: 'sharer',
+        });
+        if (entry.ownerDeparted && entry.sharers.size === 0) {
+          // Last sharer exiting after owner departed — finalize teardown
+          // under the original owner's id.
+          this.adapter.deallocateWorktree(entry.ownerId);
+          this.sharedWorktreeRefs.delete(path);
+          this.emit('workspace:deallocated', {
+            agentId: entry.ownerId,
+            path,
+            deferredUntilLastSharer: true,
+          });
+        }
+        return;
+      }
+    }
+
     const workspace = this.workspaces.get(agentId);
     if (!workspace) {
       return; // Already deallocated
     }
+
+    // Case 2: agentId is an owner of a shared worktree with active sharers.
+    // Defer git-cascade teardown until the last sharer leaves.
+    const sharedEntry = this.sharedWorktreeRefs.get(workspace.path);
+    if (
+      sharedEntry &&
+      sharedEntry.ownerId === agentId &&
+      sharedEntry.sharers.size > 0
+    ) {
+      sharedEntry.ownerDeparted = true;
+      this.workspaces.delete(agentId);
+      this.agentToStream.delete(agentId);
+      this.emit('worktree:released', {
+        agentId,
+        path: workspace.path,
+        kind: 'owner-departed',
+        remainingSharers: sharedEntry.sharers.size,
+      });
+      return;
+    }
+
+    // Case 3: normal teardown — owner with no sharers (or no sharing involved).
 
     // Remove from coordinator's child workspace map if this is a child
     if (workspace.role === 'worker' || workspace.role === 'integrator') {
@@ -394,7 +442,11 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     this.workspaces.delete(agentId);
     this.agentToStream.delete(agentId);
 
-    // Emit event
+    // Also clean up any stale entry (owner with zero sharers at deallocation time)
+    if (sharedEntry && sharedEntry.ownerId === agentId) {
+      this.sharedWorktreeRefs.delete(workspace.path);
+    }
+
     this.emit('workspace:deallocated', {
       agentId,
       role: workspace.role,
@@ -972,7 +1024,20 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   // ═════════════════════════════════════════════════════════════════════════════
 
   private readonly landingStrategies: Map<string, import('./types-v3.js').LandingStrategy> = new Map();
-  private readonly sharedWorktreeRefs: Map<string, Set<AgentId>> = new Map();
+
+  /**
+   * Ref-counted sharing state keyed by worktree path.
+   *
+   * - `ownerId`: the principal that originally allocated the worktree (the
+   *   id that git-cascade's tracker associates with the worktree).
+   * - `sharers`: other agents that allocated via `sharedWithAgent`.
+   * - `ownerDeparted`: set when the owner deallocates but sharers remain —
+   *   the actual git-cascade teardown is deferred until `sharers` is empty.
+   */
+  private readonly sharedWorktreeRefs: Map<
+    string,
+    { ownerId: import('./types-v3.js').Principal; sharers: Set<AgentId>; ownerDeparted: boolean }
+  > = new Map();
 
   createStreamV3(spec: import('./types-v3.js').StreamSpec): StreamId {
     let streamId: StreamId;
@@ -1138,9 +1203,24 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
           `Cannot share worktree: agent ${opts.sharedWithAgent} has no allocated worktree`
         );
       }
-      const refs = this.sharedWorktreeRefs.get(owner.path) ?? new Set<AgentId>();
-      refs.add(opts.agentId);
-      this.sharedWorktreeRefs.set(owner.path, refs);
+      let entry = this.sharedWorktreeRefs.get(owner.path);
+      if (!entry) {
+        entry = {
+          ownerId: opts.sharedWithAgent,
+          sharers: new Set<AgentId>(),
+          ownerDeparted: false,
+        };
+        this.sharedWorktreeRefs.set(owner.path, entry);
+      }
+      if (entry.ownerDeparted && entry.sharers.size === 0) {
+        // Edge case: owner already left and all sharers left, but someone
+        // is still trying to share. Reject — the teardown has been staged
+        // but this would resurrect a dead reference.
+        throw new Error(
+          `Cannot share worktree at ${owner.path}: owner has departed and no active sharers`
+        );
+      }
+      entry.sharers.add(opts.agentId);
       this.emit('worktree:shared', {
         path: owner.path,
         ownerAgentId: opts.sharedWithAgent,
@@ -1169,6 +1249,20 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     if (opts.streamId) {
       this.agentToStream.set(opts.agentId, opts.streamId);
     }
+
+    // Track in workspaces map so legacy deallocateWorkspace can find this
+    // V3-allocated worktree. Use role='v3' to bypass the legacy
+    // worker/integrator coordinator-map cleanup path.
+    this.workspaces.set(opts.agentId as AgentId, {
+      agentId: opts.agentId as AgentId,
+      path: worktree.path,
+      branch: worktree.currentStream
+        ? `stream/${worktree.currentStream}`
+        : (opts.branch ?? 'unknown'),
+      streamId: opts.streamId ?? '',
+      role: 'v3',
+      createdAt: worktree.createdAt,
+    });
 
     this.emit('worktree:allocated', {
       agentId: opts.agentId,

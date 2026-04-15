@@ -33,6 +33,14 @@ export class YamlDrivenTopology implements TopologyPolicy {
 
   private teamStreamId?: StreamId;
   private readonly agentStreams: Map<AgentId, StreamId> = new Map();
+  /** Tracks which role each live agent is, so sync-with-parent can dispatch. */
+  private readonly agentRoles: Map<AgentId, string> = new Map();
+  /** Unsubscribe from the workspace event stream; set on onTeamStart, cleared on onTeamStop. */
+  private eventUnsubscribe?: () => void;
+  /** Debounce map: stream id → last-sync timestamp (ms) for coalescing. */
+  private readonly lastSyncAt: Map<StreamId, number> = new Map();
+  /** Minimum interval between auto-syncs per parent stream (ms). */
+  private static readonly SYNC_COALESCE_MS = 2_000;
 
   constructor(private readonly config: TeamWorkspaceConfig) {}
 
@@ -45,22 +53,35 @@ export class YamlDrivenTopology implements TopologyPolicy {
 
   async onTeamStart(ctx: TeamStartContext): Promise<TeamStartPlan> {
     const needsTeamRoot = this.teamNeedsRootStream();
-    if (!needsTeamRoot) {
-      return {};
+
+    if (needsTeamRoot) {
+      const forkFrom = this.config.default_stream?.fork_from ?? 'main';
+      const nameTemplate = this.config.default_stream?.name_template ?? '{team}';
+      const streamName = nameTemplate.replace('{team}', ctx.teamName);
+
+      this.teamStreamId = ctx.workspaceManager.createStreamV3({
+        name: streamName,
+        ownerId: `team:${ctx.teamName}` as const,
+        forkFrom,
+        metadata: { kind: 'team_root', teamInstanceId: ctx.teamInstanceId },
+      });
     }
 
-    const forkFrom = this.config.default_stream?.fork_from ?? 'main';
-    const nameTemplate = this.config.default_stream?.name_template ?? '{team}';
-    const streamName = nameTemplate.replace('{team}', ctx.teamName);
+    // Wire auto-sync if any role declared on_parent_advanced: sync_with_parent.
+    if (this.hasAutoSyncRoles()) {
+      this.eventUnsubscribe = ctx.workspaceManager.onEvent((event) => {
+        if (event.type !== 'stream:committed') return;
+        const streamId = event.data.streamId as StreamId | undefined;
+        if (!streamId) return;
+        // Fire-and-forget: schedule sync for affected agents on children of
+        // this stream, coalesced.
+        void this.dispatchSync(ctx, streamId);
+      });
+    }
 
-    this.teamStreamId = ctx.workspaceManager.createStreamV3({
-      name: streamName,
-      ownerId: `team:${ctx.teamName}` as const,
-      forkFrom,
-      metadata: { kind: 'team_root', teamInstanceId: ctx.teamInstanceId },
-    });
-
-    return { teamStreamId: this.teamStreamId };
+    return this.teamStreamId
+      ? { teamStreamId: this.teamStreamId }
+      : {};
   }
 
   async onAgentSpawn(ctx: SpawnContext): Promise<WorkspaceDecision> {
@@ -137,9 +158,16 @@ export class YamlDrivenTopology implements TopologyPolicy {
       // Non-fatal — agent may not have had a worktree
     }
     this.agentStreams.delete(ctx.agentId);
+    this.agentRoles.delete(ctx.agentId);
   }
 
   async onTeamStop(ctx: TeamStopContext): Promise<void> {
+    // Stop auto-sync event subscription
+    if (this.eventUnsubscribe) {
+      this.eventUnsubscribe();
+      this.eventUnsubscribe = undefined;
+    }
+
     if (!this.teamStreamId) return;
 
     const action = this.config.on_team_complete;
@@ -166,8 +194,9 @@ export class YamlDrivenTopology implements TopologyPolicy {
    * Track agent→stream mapping after a successful spawn. Called externally
    * after the WorkspaceDecision is executed; lets the policy record state.
    */
-  recordAgentStream(agentId: AgentId, streamId: StreamId): void {
+  recordAgentStream(agentId: AgentId, streamId: StreamId, role?: string): void {
     this.agentStreams.set(agentId, streamId);
+    if (role) this.agentRoles.set(agentId, role);
   }
 
   /**
@@ -220,5 +249,68 @@ export class YamlDrivenTopology implements TopologyPolicy {
   private buildStreamName(role: string, agentId: AgentId): string {
     const shortId = agentId.slice(-8);
     return `${role}-${shortId}`;
+  }
+
+  /**
+   * True if any role declared `on_parent_advanced: sync_with_parent`.
+   * Used to decide whether to subscribe to stream:committed events at all.
+   */
+  private hasAutoSyncRoles(): boolean {
+    for (const roleConfig of Object.values(this.config.roles)) {
+      if (roleConfig.on_parent_advanced === 'sync_with_parent') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Dispatch syncWithParent for live agents whose role has
+   * `on_parent_advanced: sync_with_parent` and whose active stream's parent
+   * is `parentStreamId`.
+   *
+   * Coalesces: skips if a sync fired for this parent within SYNC_COALESCE_MS.
+   */
+  private async dispatchSync(
+    ctx: TeamStartContext,
+    parentStreamId: StreamId
+  ): Promise<void> {
+    const now = Date.now();
+    const last = this.lastSyncAt.get(parentStreamId) ?? 0;
+    if (now - last < YamlDrivenTopology.SYNC_COALESCE_MS) {
+      return;
+    }
+    this.lastSyncAt.set(parentStreamId, now);
+
+    // Find live agents whose stream's parent matches and whose role has
+    // on_parent_advanced: sync_with_parent.
+    for (const [agentId, streamId] of this.agentStreams) {
+      const role = this.agentRoles.get(agentId);
+      if (!role) continue;
+      const roleConfig = this.getRoleConfig(role);
+      if (roleConfig?.on_parent_advanced !== 'sync_with_parent') continue;
+
+      const stream = ctx.workspaceManager.getStream(streamId);
+      if (stream?.parentStream !== parentStreamId) continue;
+
+      // Find agent's worktree
+      const worktree = ctx.workspaceManager.getWorktreeForAgent(agentId);
+      if (!worktree) continue; // no worktree → can't sync; skip silently
+
+      // Map YAML's on_conflict → git-cascade ConflictStrategy. 'defer' has
+      // no git-native equivalent; we use 'manual' (git-cascade records the
+      // conflict and leaves the worktree in a conflict state).
+      const yamlStrategy = roleConfig.on_conflict ?? 'defer';
+      const onConflict =
+        yamlStrategy === 'defer' ? 'manual' : yamlStrategy;
+      try {
+        ctx.workspaceManager.syncWithParent({
+          streamId,
+          agentId,
+          worktree: worktree.path,
+          onConflict,
+        });
+      } catch {
+        // Best-effort — don't throw out of an event handler
+      }
+    }
   }
 }
