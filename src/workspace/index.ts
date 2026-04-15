@@ -1,7 +1,7 @@
 /**
  * Workspace Module
  *
- * Provides workspace isolation for agents using dataplane for git management.
+ * Provides workspace isolation for agents using git-cascade for stream and worktree management.
  * Implements [[s-7ktd]] Structured Workspace Isolation.
  *
  * @module workspace
@@ -9,23 +9,23 @@
 
 // Configuration types
 export {
-  type DataplaneConfig,
+  type GitCascadeConfig,
   type WorkspaceDirectoryConfig,
   type WorktreePoolConfig,
   type AllocationStrategy,
-  DEFAULT_DATAPLANE_CONFIG,
+  DEFAULT_GIT_CASCADE_CONFIG,
   DEFAULT_WORKSPACE_DIR_CONFIG,
   DEFAULT_POOL_CONFIG,
 } from './config.js';
 
-// Dataplane adapter
+// git-cascade adapter
 export {
-  DataplaneAdapter,
-  createDataplaneAdapter,
-  type DataplaneEvent,
-  type DataplaneEventType,
-  type DataplaneEventCallback,
-} from './dataplane-adapter.js';
+  GitCascadeAdapter,
+  createGitCascadeAdapter,
+  type GitCascadeEvent,
+  type GitCascadeEventType,
+  type GitCascadeEventCallback,
+} from './git-cascade-adapter.js';
 
 // Workspace types
 export type {
@@ -91,7 +91,7 @@ export {
   type WorktreeState,
 } from './pool/index.js';
 
-// Re-export key types from dataplane for convenience
+// Re-export key types from git-cascade adapter for convenience
 export type {
   Stream,
   StreamStatus,

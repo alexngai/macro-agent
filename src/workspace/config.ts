@@ -1,7 +1,7 @@
 /**
  * Workspace Configuration Types
  *
- * Configuration for dataplane integration and workspace management.
+ * Configuration for git-cascade integration and workspace management.
  *
  * @module workspace/config
  */
@@ -9,11 +9,11 @@
 import type Database from 'better-sqlite3';
 
 /**
- * Configuration for dataplane integration
+ * Configuration for git-cascade integration
  */
-export interface DataplaneConfig {
+export interface GitCascadeConfig {
   /**
-   * Whether dataplane is enabled.
+   * Whether the git-cascade adapter is enabled.
    * When disabled, workspace operations are no-ops.
    */
   enabled: boolean;
@@ -25,21 +25,21 @@ export interface DataplaneConfig {
   repoPath?: string;
 
   /**
-   * Table prefix for dataplane tables in shared SQLite database.
-   * Defaults to 'dataplane_'.
+   * Table prefix for git-cascade tables in shared SQLite database.
+   * Defaults to 'git_cascade_'.
    */
   tablePrefix?: string;
 
   /**
    * Path to SQLite database file.
    * If not provided and db is not provided, creates database at
-   * `<repoPath>/.dataplane/tracker.db`.
+   * `<repoPath>/.git-cascade/tracker.db`.
    */
   dbPath?: string;
 
   /**
    * Existing database connection to share.
-   * If provided, dataplane will use this connection instead of creating its own.
+   * If provided, the adapter will use this connection instead of creating its own.
    * The caller is responsible for closing this connection.
    */
   db?: Database.Database;
@@ -57,11 +57,11 @@ export interface DataplaneConfig {
 }
 
 /**
- * Default dataplane configuration
+ * Default git-cascade configuration
  */
-export const DEFAULT_DATAPLANE_CONFIG: Partial<DataplaneConfig> = {
+export const DEFAULT_GIT_CASCADE_CONFIG: Partial<GitCascadeConfig> = {
   enabled: true,
-  tablePrefix: 'dataplane_',
+  tablePrefix: 'git_cascade_',
   verbose: false,
   skipRecovery: false,
 };

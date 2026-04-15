@@ -506,12 +506,12 @@ export class TeamRuntimeV2 {
       const capabilities = resolved.capabilities;
       let streamId = options.streamId;
       let streamConfig = options.streamConfig;
-      let dataplaneTaskId = options.dataplaneTaskId;
+      let gitCascadeTaskId = options.gitCascadeTaskId;
 
       if (this.teamStreamId && capabilities) {
         if (capabilities.includes(WORKSPACE_CAPABILITIES.WORKTREE)) {
           streamId = streamId ?? this.teamStreamId;
-          dataplaneTaskId = dataplaneTaskId ?? `worker-${Date.now()}`;
+          gitCascadeTaskId = gitCascadeTaskId ?? `worker-${Date.now()}`;
         } else if (capabilities.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
           streamId = streamId ?? this.teamStreamId;
         }
@@ -521,7 +521,7 @@ export class TeamRuntimeV2 {
         ...options,
         streamId,
         streamConfig,
-        dataplaneTaskId,
+        gitCascadeTaskId,
         capabilities: capabilities ?? options.capabilities,
         // Set team scope on all team agents
         team_instance: options.team_instance ?? this.manifest.name,

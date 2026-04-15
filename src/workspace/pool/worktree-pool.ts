@@ -484,6 +484,7 @@ export class WorktreePool implements WorktreePoolInterface {
         worker: 0,
         integrator: 0,
         coordinator: 0,
+        v3: 0,
       },
     };
 

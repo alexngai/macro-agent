@@ -36,7 +36,7 @@ export interface MergeRequest {
   /** Stream (integration branch) this MR targets */
   streamId: string;
 
-  /** Dataplane task ID this MR completes */
+  /** git-cascade task ID this MR completes */
   taskId: string;
 
   /** Git branch containing the worker's changes */
@@ -83,7 +83,7 @@ export interface SubmitMergeRequestOptions {
   /** Stream (integration branch) to merge into */
   streamId: string;
 
-  /** Dataplane task ID this completes */
+  /** git-cascade task ID this completes */
   taskId: string;
 
   /** Git branch containing the worker's changes */

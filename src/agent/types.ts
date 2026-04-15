@@ -90,10 +90,10 @@ export interface SpawnAgentOptions {
   streamConfig?: StreamConfig;
 
   /**
-   * Dataplane task ID to claim (for workers).
+   * git-cascade task ID to claim (for workers).
    * If provided, the worker will claim this task and work on it.
    */
-  dataplaneTaskId?: string;
+  gitCascadeTaskId?: string;
 
   /**
    * Resolved capabilities for this agent's role.

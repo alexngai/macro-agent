@@ -27,7 +27,7 @@ import * as os from "os";
 import * as fs from "fs";
 import { execSync } from "child_process";
 import { bootV2, type MacroAgentSystemV2 } from "../../boot-v2.js";
-import { DataplaneAdapter } from "../../workspace/dataplane-adapter.js";
+import { GitCascadeAdapter } from "../../workspace/git-cascade-adapter.js";
 import {
   DefaultWorkspaceManager,
   createWorkspaceManagerWithAdapter,
@@ -121,17 +121,17 @@ describeFn("Workspace Lifecycle E2E", () => {
   let system: MacroAgentSystemV2;
   let testDir: string;
   let repoPath: string;
-  let adapter: DataplaneAdapter;
+  let adapter: GitCascadeAdapter;
   let workspaceManager: DefaultWorkspaceManager;
 
   beforeEach(async () => {
     testDir = createTestDir();
     repoPath = createGitRepo(testDir);
 
-    const dbPath = path.join(testDir, "dataplane.db");
+    const dbPath = path.join(testDir, "git-cascade.db");
 
-    // Create DataplaneAdapter and WorkspaceManager
-    adapter = new DataplaneAdapter({
+    // Create GitCascadeAdapter and WorkspaceManager
+    adapter = new GitCascadeAdapter({
       enabled: true,
       repoPath,
       dbPath,
@@ -191,17 +191,17 @@ describeFn("Workspace Lifecycle E2E", () => {
       });
       expect(streamId).toBeDefined();
 
-      // Pre-create a dataplane task so the claimTask call can find it
+      // Pre-create a git-cascade task so the claimTask call can find it
       const dpTaskId = workspaceManager.createTask(streamId, {
         title: "Implement feature",
       });
 
-      // Spawn a worker with the streamId and dataplaneTaskId
+      // Spawn a worker with the streamId and gitCascadeTaskId
       const worker = await system.agentManager.spawn({
         task: "Implement feature",
         role: "worker",
         streamId,
-        dataplaneTaskId: dpTaskId,
+        gitCascadeTaskId: dpTaskId,
         capabilities: ["workspace.worktree"],
       });
 
@@ -234,7 +234,7 @@ describeFn("Workspace Lifecycle E2E", () => {
         name: "merge-feature",
       });
 
-      // Pre-create dataplane task
+      // Pre-create git-cascade task
       const dpTaskId = workspaceManager.createTask(streamId, {
         title: "Do work for merge",
       });
@@ -244,7 +244,7 @@ describeFn("Workspace Lifecycle E2E", () => {
         task: "Do work for merge",
         role: "worker",
         streamId,
-        dataplaneTaskId: dpTaskId,
+        gitCascadeTaskId: dpTaskId,
         capabilities: ["workspace.worktree"],
       });
 
@@ -294,7 +294,7 @@ describeFn("Workspace Lifecycle E2E", () => {
         { name: "cascade-feature" }
       );
 
-      // Pre-create dataplane tasks
+      // Pre-create git-cascade tasks
       const dpTaskId1 = workspaceManager.createTask(streamId, {
         title: "Child 1",
       });
@@ -308,7 +308,7 @@ describeFn("Workspace Lifecycle E2E", () => {
         role: "worker",
         parent: coordinator.id,
         streamId,
-        dataplaneTaskId: dpTaskId1,
+        gitCascadeTaskId: dpTaskId1,
         capabilities: ["workspace.worktree"],
       });
       const child2 = await system.agentManager.spawn({
@@ -316,7 +316,7 @@ describeFn("Workspace Lifecycle E2E", () => {
         role: "worker",
         parent: coordinator.id,
         streamId,
-        dataplaneTaskId: dpTaskId2,
+        gitCascadeTaskId: dpTaskId2,
         capabilities: ["workspace.worktree"],
       });
 

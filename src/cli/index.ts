@@ -499,6 +499,67 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────
+// Run Team Command (Phase 10)
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command("run <teamName>")
+  .description("Boot the system, start a team by name, and optionally prompt the root agent")
+  .option("--task <task>", "Task to prompt the root agent with")
+  .option("--cwd <path>", "Working directory for agents")
+  .option("--base-path <path>", "Base path for team YAML lookup (default: cwd)")
+  .action(async (teamName: string, options: { task?: string; cwd?: string; basePath?: string }) => {
+    const cwd = options.cwd ?? process.cwd();
+    console.log(chalk.blue(`Booting macro-agent and starting team: ${teamName}`));
+
+    let system: Awaited<ReturnType<typeof bootV2>> | null = null;
+    try {
+      system = await bootV2({ cwd });
+      console.log(chalk.green("System booted."));
+
+      // Construct & install a TeamManagerV2; start the requested team.
+      const { TeamManagerV2 } = await import("../teams/team-manager-v2.js");
+      const teamManager = new TeamManagerV2({
+        agentManager: system.agentManager,
+        inboxAdapter: system.inboxAdapter,
+        tasksAdapter: system.tasksAdapter,
+      });
+      teamManager.install();
+
+      const instanceId = await teamManager.startTeam(teamName, options.basePath ?? cwd);
+      console.log(chalk.green(`Team started: ${teamName} (instance ${instanceId})`));
+
+      // Find the root agent (first spawned agent in the instance)
+      const agents = system.agentStore.listAgents({ state: "running" });
+      const root = agents[0];
+
+      if (options.task && root) {
+        console.log(chalk.gray(`Prompting root agent (${root.id}) with task...`));
+        const iter = system.agentManager.prompt(root.id, options.task);
+        for await (const chunk of iter) {
+          process.stdout.write(typeof chunk === "string" ? chunk : JSON.stringify(chunk));
+        }
+        console.log();
+      } else if (!root) {
+        console.log(chalk.yellow("No root agent found to prompt."));
+      }
+
+      console.log(chalk.gray("Press Ctrl+C to shut down."));
+
+      // Graceful shutdown on SIGINT
+      process.on("SIGINT", async () => {
+        console.log(chalk.yellow("\nShutting down..."));
+        if (system) await system.shutdown();
+        process.exit(0);
+      });
+    } catch (error) {
+      console.error(chalk.red(`Failed to run team: ${error}`));
+      if (system) await system.shutdown();
+      process.exit(1);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
 // Parse and Run
 // ─────────────────────────────────────────────────────────────────
 

@@ -147,6 +147,7 @@ export interface PoolStats {
     worker: number;
     integrator: number;
     coordinator: number;
+    v3: number;
   };
 }
 

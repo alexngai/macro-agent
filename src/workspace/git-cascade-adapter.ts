@@ -1,11 +1,10 @@
 /**
- * Dataplane Adapter
+ * git-cascade Adapter
  *
- * Wraps MultiAgentRepoTracker to integrate with macro-agent's event system
- * and provide a simplified interface for workspace management.
+ * Wraps git-cascade's MultiAgentRepoTracker to integrate with macro-agent's
+ * event system and provide a simplified interface for workspace management.
  *
- * @module workspace/dataplane-adapter
- * @implements [[s-7ktd]] Dataplane Integration section
+ * @module workspace/git-cascade-adapter
  */
 
 import Database from 'better-sqlite3';
@@ -14,7 +13,16 @@ import {
   type TrackerOptions,
   type Stream,
   type StreamStatus,
+  type StreamNode,
   type CreateStreamOptions,
+  type ForkStreamOptions,
+  type MergeStreamOptions,
+  type MergeResult,
+  type RebaseOntoStreamOptions,
+  type RebaseResult,
+  type ConflictStrategy,
+  type ConflictRecord,
+  type CreateConflictOptions,
   type AgentWorktree,
   type CreateWorktreeOptions,
   type WorkerTask,
@@ -27,64 +35,94 @@ import {
   type CleanupWorkerBranchesOptions,
   type CleanupResult,
   type Checkpoint,
+  type Change,
+  type ChangeStatus,
   workerTasks,
   diffStacks,
+  mergeQueue as mergeQueueModule,
+  reconcile as reconcileModule,
 } from 'git-cascade';
-import type { DataplaneConfig } from './config.js';
-import { DEFAULT_DATAPLANE_CONFIG } from './config.js';
+// NOTE: event subscription (x-cascade/* emit callback) and `cascade.cascadeRebase`
+// are not exported from git-cascade 0.0.1. Tracked as upstream follow-ups; will
+// be wired in when git-cascade publishes them. Until then, this adapter relies
+// on local `emit` calls from wrapper methods only.
+import type { GitCascadeConfig } from './config.js';
+import { DEFAULT_GIT_CASCADE_CONFIG } from './config.js';
 
 /**
- * Event types emitted by DataplaneAdapter
+ * Event types emitted by GitCascadeAdapter.
+ *
+ * Grouped by source:
+ * - `stream:*` — from git-cascade `x-cascade/stream.*` events + local emits
+ * - `worktree:*`, `task:*` — local emits (macro-agent-only concepts)
+ * - `change:*` — change-id lifecycle from git-cascade
+ * - `cascade:*` — cascadeRebase completion
+ * - `conflict:*` — conflict lifecycle
+ * - `mergeQueue:*` — built-in merge queue lifecycle
  */
-export type DataplaneEventType =
-  | 'stream:created'
-  | 'stream:updated'
-  | 'stream:abandoned'
+export type GitCascadeEventType =
+  | 'stream:created'        // mapped from git-cascade stream.opened
+  | 'stream:updated'        // local (updateStream)
+  | 'stream:forked'         // local (forkStream)
+  | 'stream:committed'      // mapped from git-cascade stream.committed
+  | 'stream:merged'         // mapped from git-cascade stream.merged
+  | 'stream:conflicted'     // mapped from git-cascade stream.conflicted
+  | 'stream:abandoned'      // mapped from git-cascade stream.abandoned
+  | 'stream:paused'         // local (pauseStream)
+  | 'stream:resumed'        // local (resumeStream)
   | 'worktree:created'
   | 'worktree:deallocated'
   | 'task:created'
   | 'task:started'
   | 'task:completed'
-  | 'task:abandoned';
+  | 'task:abandoned'
+  | 'change:merged'
+  | 'change:dropped'
+  | 'conflict:created'
+  | 'conflict:resolved'
+  | 'mergeQueue:added'
+  | 'mergeQueue:ready'
+  | 'mergeQueue:cancelled'
+  | 'mergeQueue:removed';
 
 /**
- * Event payload for dataplane events
+ * Event payload for git-cascade events
  */
-export interface DataplaneEvent {
-  type: DataplaneEventType;
+export interface GitCascadeEvent {
+  type: GitCascadeEventType;
   timestamp: number;
   data: Record<string, unknown>;
 }
 
 /**
- * Callback for dataplane events
+ * Callback for git-cascade events
  */
-export type DataplaneEventCallback = (event: DataplaneEvent) => void;
+export type GitCascadeEventCallback = (event: GitCascadeEvent) => void;
 
 /**
- * DataplaneAdapter wraps MultiAgentRepoTracker for macro-agent integration.
+ * GitCascadeAdapter wraps MultiAgentRepoTracker for macro-agent integration.
  *
  * Key responsibilities:
- * - Initialize dataplane with shared or dedicated database
- * - Emit events on dataplane operations
+ * - Initialize tracker with shared or dedicated database
+ * - Emit events on tracker operations
  * - Provide simplified API for workspace management
  */
-export class DataplaneAdapter {
+export class GitCascadeAdapter {
   private readonly tracker: MultiAgentRepoTracker;
   private readonly config: Required<
-    Pick<DataplaneConfig, 'enabled' | 'tablePrefix' | 'verbose' | 'skipRecovery'>
+    Pick<GitCascadeConfig, 'enabled' | 'tablePrefix' | 'verbose' | 'skipRecovery'>
   > & { repoPath: string };
-  private readonly eventListeners: Set<DataplaneEventCallback> = new Set();
+  private readonly eventListeners: Set<GitCascadeEventCallback> = new Set();
   private readonly ownsDb: boolean;
 
   /**
-   * Create a new DataplaneAdapter.
+   * Create a new GitCascadeAdapter.
    *
-   * @param config - Dataplane configuration
+   * @param config - git-cascade configuration
    */
-  constructor(config: DataplaneConfig) {
+  constructor(config: GitCascadeConfig) {
     const mergedConfig = {
-      ...DEFAULT_DATAPLANE_CONFIG,
+      ...DEFAULT_GIT_CASCADE_CONFIG,
       ...config,
       repoPath: config.repoPath ?? process.cwd(),
     };
@@ -92,7 +130,7 @@ export class DataplaneAdapter {
     this.config = {
       enabled: mergedConfig.enabled ?? true,
       repoPath: mergedConfig.repoPath,
-      tablePrefix: mergedConfig.tablePrefix ?? 'dataplane_',
+      tablePrefix: mergedConfig.tablePrefix ?? 'git_cascade_',
       verbose: mergedConfig.verbose ?? false,
       skipRecovery: mergedConfig.skipRecovery ?? false,
     };
@@ -117,8 +155,9 @@ export class DataplaneAdapter {
     this.tracker = new MultiAgentRepoTracker(trackerOptions);
   }
 
+
   /**
-   * Get whether dataplane is enabled.
+   * Get whether the adapter is enabled.
    */
   get enabled(): boolean {
     return this.config.enabled;
@@ -152,12 +191,12 @@ export class DataplaneAdapter {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Subscribe to dataplane events.
+   * Subscribe to git-cascade events.
    *
    * @param callback - Function called when events occur
    * @returns Unsubscribe function
    */
-  onEvent(callback: DataplaneEventCallback): () => void {
+  onEvent(callback: GitCascadeEventCallback): () => void {
     this.eventListeners.add(callback);
     return () => this.eventListeners.delete(callback);
   }
@@ -165,8 +204,8 @@ export class DataplaneAdapter {
   /**
    * Emit an event to all listeners.
    */
-  private emit(type: DataplaneEventType, data: Record<string, unknown>): void {
-    const event: DataplaneEvent = {
+  private emit(type: GitCascadeEventType, data: Record<string, unknown>): void {
+    const event: GitCascadeEvent = {
       type,
       timestamp: Date.now(),
       data,
@@ -175,7 +214,7 @@ export class DataplaneAdapter {
       try {
         listener(event);
       } catch (error) {
-        console.error('[DataplaneAdapter] Event listener error:', error);
+        console.error('[GitCascadeAdapter] Event listener error:', error);
       }
     }
   }
@@ -244,6 +283,132 @@ export class DataplaneAdapter {
    */
   getStreamHead(streamId: string): string {
     return this.tracker.getStreamHead(streamId);
+  }
+
+  /**
+   * Fork a child stream off a parent.
+   */
+  forkStream(options: ForkStreamOptions): string {
+    const streamId = this.tracker.forkStream(options);
+    this.emit('stream:forked', {
+      streamId,
+      parentStreamId: options.parentStreamId,
+      name: options.name,
+      agentId: options.agentId,
+    });
+    return streamId;
+  }
+
+  /**
+   * Merge source stream into target stream.
+   *
+   * Note: `stream:merged` is emitted by the cascade event forwarder on success.
+   * On conflict, `stream:conflicted` is also forwarded.
+   */
+  mergeStream(options: MergeStreamOptions): MergeResult {
+    return this.tracker.mergeStream(options);
+  }
+
+  /**
+   * Rebase a stream onto its parent to pick up new commits.
+   */
+  syncWithParent(
+    streamId: string,
+    agentId: string,
+    worktree: string,
+    onConflict?: ConflictStrategy
+  ): RebaseResult {
+    return this.tracker.syncWithParent(streamId, agentId, worktree, onConflict);
+  }
+
+  /**
+   * Rebase a stream onto a specific target stream.
+   */
+  rebaseOntoStream(options: RebaseOntoStreamOptions): RebaseResult {
+    return this.tracker.rebaseOntoStream(options);
+  }
+
+  /**
+   * Async version of rebaseOntoStream — supports async conflict handlers.
+   */
+  rebaseOntoStreamAsync(options: RebaseOntoStreamOptions): Promise<RebaseResult> {
+    return this.tracker.rebaseOntoStreamAsync(options);
+  }
+
+  /**
+   * Pause a stream (halt work without abandoning).
+   */
+  pauseStream(streamId: string, reason?: string): void {
+    this.tracker.pauseStream(streamId, reason);
+    this.emit('stream:paused', { streamId, reason });
+  }
+
+  /**
+   * Resume a paused stream.
+   */
+  resumeStream(streamId: string): void {
+    this.tracker.resumeStream(streamId);
+    this.emit('stream:resumed', { streamId });
+  }
+
+  /**
+   * Track an existing branch as a stream (local mode — no new `stream/<id>` branch).
+   */
+  trackExistingBranch(options: Parameters<MultiAgentRepoTracker['trackExistingBranch']>[0]): string {
+    return this.tracker.trackExistingBranch(options);
+  }
+
+  /**
+   * Get stream hierarchy as a tree.
+   */
+  getStreamHierarchy(rootStreamId?: string): StreamNode | StreamNode[] {
+    return this.tracker.getStreamHierarchy(rootStreamId);
+  }
+
+  /**
+   * Get child streams (direct children only).
+   */
+  getChildStreams(streamId: string): Stream[] {
+    return this.tracker.getChildStreams(streamId);
+  }
+
+  /**
+   * Find the common ancestor of two streams.
+   */
+  findCommonAncestor(streamIdA: string, streamIdB: string): string {
+    return this.tracker.findCommonAncestor(streamIdA, streamIdB);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stream Dependencies
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Declare that one stream depends on another.
+   */
+  addDependency(streamId: string, dependsOnId: string): void {
+    this.tracker.addDependency(streamId, dependsOnId);
+  }
+
+  /**
+   * Remove a dependency declaration.
+   */
+  removeDependency(streamId: string, dependsOnId: string): void {
+    this.tracker.removeDependency(streamId, dependsOnId);
+  }
+
+  /**
+   * Get direct dependencies of a stream.
+   */
+  getDependencies(streamId: string): string[] {
+    return this.tracker.getDependencies(streamId);
+  }
+
+  /**
+   * Get direct dependents of a stream.
+   */
+  getDependents(streamId: string): string[] {
+    return this.tracker.getDependents(streamId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -412,17 +577,17 @@ export class DataplaneAdapter {
   createCheckpointsForTask(taskId: string, agentId: string): Checkpoint[] {
     const task = this.getTask(taskId);
     if (!task) {
-      console.warn(`[DataplaneAdapter] Task not found: ${taskId}`);
+      console.warn(`[GitCascadeAdapter] Task not found: ${taskId}`);
       return [];
     }
 
     if (!task.streamId) {
-      console.warn(`[DataplaneAdapter] Task ${taskId} has no streamId`);
+      console.warn(`[GitCascadeAdapter] Task ${taskId} has no streamId`);
       return [];
     }
 
     if (!task.startCommit) {
-      console.warn(`[DataplaneAdapter] Task ${taskId} has no startCommit`);
+      console.warn(`[GitCascadeAdapter] Task ${taskId} has no startCommit`);
       return [];
     }
 
@@ -441,7 +606,7 @@ export class DataplaneAdapter {
       return checkpoints;
     } catch (error) {
       console.error(
-        `[DataplaneAdapter] Failed to create checkpoints for task ${taskId}:`,
+        `[GitCascadeAdapter] Failed to create checkpoints for task ${taskId}:`,
         error
       );
       return [];
@@ -510,6 +675,215 @@ export class DataplaneAdapter {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // Change Operations (Change-Id tracking)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get a change by ID.
+   */
+  getChange(changeId: string): Change | null {
+    return this.tracker.getChange(changeId);
+  }
+
+  /**
+   * Get a change by its current commit hash.
+   */
+  getChangeByCommit(commit: string): Change | null {
+    return this.tracker.getChangeByCommit(commit);
+  }
+
+  /**
+   * Get a change by any of its historical commit hashes (survives rebases).
+   */
+  getChangeByHistoricalCommit(commit: string): Change | null {
+    return this.tracker.getChangeByHistoricalCommit(commit);
+  }
+
+  /**
+   * List changes for a stream, optionally filtered by status.
+   */
+  getChangesForStream(
+    streamId: string,
+    options?: { status?: ChangeStatus }
+  ): Change[] {
+    return this.tracker.getChangesForStream(streamId, options);
+  }
+
+  /**
+   * Mark changes as merged.
+   */
+  markChangesMerged(changeIds: string[]): void {
+    this.tracker.markChangesMerged(changeIds);
+    for (const id of changeIds) {
+      this.emit('change:merged', { changeId: id });
+    }
+  }
+
+  /**
+   * Mark a single change as dropped.
+   */
+  markChangeDropped(changeId: string): void {
+    this.tracker.markChangeDropped(changeId);
+    this.emit('change:dropped', { changeId });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Merge Queue (git-cascade built-in)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Add a stream to the merge queue.
+   */
+  addToMergeQueue(options: mergeQueueModule.AddToQueueOptions): string {
+    const entryId = this.tracker.addToMergeQueue(options);
+    this.emit('mergeQueue:added', {
+      entryId,
+      streamId: options.streamId,
+      targetBranch: options.targetBranch ?? 'main',
+    });
+    return entryId;
+  }
+
+  /**
+   * Get a merge queue entry by id.
+   */
+  getMergeQueueEntry(entryId: string): mergeQueueModule.MergeQueueEntry | null {
+    return this.tracker.getMergeQueueEntry(entryId);
+  }
+
+  /**
+   * List merge queue entries with optional filters.
+   */
+  listMergeQueue(
+    options?: {
+      targetBranch?: string;
+      status?: mergeQueueModule.MergeQueueStatus | mergeQueueModule.MergeQueueStatus[];
+    }
+  ): mergeQueueModule.MergeQueueEntry[] {
+    return this.tracker.getMergeQueue(options);
+  }
+
+  /**
+   * Mark a queue entry as ready to merge.
+   */
+  markMergeQueueReady(entryId: string): void {
+    this.tracker.markMergeQueueReady(entryId);
+    this.emit('mergeQueue:ready', { entryId });
+  }
+
+  /**
+   * Cancel a queue entry.
+   */
+  cancelMergeQueueEntry(entryId: string): void {
+    this.tracker.cancelMergeQueueEntry(entryId);
+    this.emit('mergeQueue:cancelled', { entryId });
+  }
+
+  /**
+   * Remove a queue entry.
+   */
+  removeFromMergeQueue(entryId: string): void {
+    this.tracker.removeFromMergeQueue(entryId);
+    this.emit('mergeQueue:removed', { entryId });
+  }
+
+  /**
+   * Get the next entry to process for a target branch.
+   */
+  getNextToMerge(targetBranch?: string): mergeQueueModule.MergeQueueEntry | null {
+    return this.tracker.getNextToMerge(targetBranch);
+  }
+
+  /**
+   * Process the merge queue — drains ready entries per provided handler.
+   */
+  processMergeQueue(
+    options: mergeQueueModule.ProcessQueueOptions
+  ): mergeQueueModule.ProcessQueueResult {
+    return this.tracker.processMergeQueue(options);
+  }
+
+  /**
+   * Get a stream's position in the queue (lower = sooner).
+   */
+  getMergeQueuePosition(streamId: string, targetBranch?: string): number | null {
+    return this.tracker.getMergeQueuePosition(streamId, targetBranch);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Conflict Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a conflict record.
+   *
+   * Usually conflicts are created implicitly by merge/rebase operations.
+   * This is for explicit creation (e.g., an external process detected a
+   * conflict that git-cascade didn't).
+   */
+  createConflict(options: CreateConflictOptions): string {
+    const id = this.tracker.createConflict(options);
+    this.emit('conflict:created', {
+      conflictId: id,
+      streamId: options.streamId,
+    });
+    return id;
+  }
+
+  /**
+   * Get a conflict record by id.
+   */
+  getConflict(conflictId: string): ConflictRecord | null {
+    return this.tracker.getConflict(conflictId);
+  }
+
+  /**
+   * Get the active conflict record for a stream, if any.
+   */
+  getConflictForStream(streamId: string): ConflictRecord | null {
+    return this.tracker.getConflictForStream(streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Reconciliation
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Check if a stream's database state is in sync with its git branch.
+   */
+  checkStreamSync(streamId: string): reconcileModule.StreamSyncStatus {
+    return this.tracker.checkStreamSync(streamId);
+  }
+
+  /**
+   * Check all active streams for sync status.
+   */
+  checkAllStreamsSync(
+    options?: { streamIds?: string[] }
+  ): reconcileModule.ReconcileCheckResult {
+    return this.tracker.checkAllStreamsSync(options);
+  }
+
+  /**
+   * Reconcile database state with git state. Fixes missing branches, resets
+   * diverged HEAD (per options), etc. Does NOT handle orphan worktrees — the
+   * macro-agent-level reconcile wrapper covers that.
+   */
+  reconcile(
+    options?: reconcileModule.ReconcileOptions
+  ): reconcileModule.ReconcileResult {
+    return this.tracker.reconcile(options);
+  }
+
+  /**
+   * Ensure a stream is in sync before performing an operation.
+   * @throws DesyncError if out of sync unless `force: true`.
+   */
+  ensureStreamInSync(streamId: string, options?: { force?: boolean }): void {
+    this.tracker.ensureStreamInSync(streamId, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // Health & Recovery
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -536,11 +910,11 @@ export class DataplaneAdapter {
 }
 
 /**
- * Create a DataplaneAdapter instance.
+ * Create a GitCascadeAdapter instance.
  *
  * @param config - Configuration options
- * @returns DataplaneAdapter instance
+ * @returns GitCascadeAdapter instance
  */
-export function createDataplaneAdapter(config: DataplaneConfig): DataplaneAdapter {
-  return new DataplaneAdapter(config);
+export function createGitCascadeAdapter(config: GitCascadeConfig): GitCascadeAdapter {
+  return new GitCascadeAdapter(config);
 }

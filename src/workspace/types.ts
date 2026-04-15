@@ -29,7 +29,7 @@ export type TaskId = string;
 /**
  * Agent role types that require workspaces
  */
-export type WorkspaceRole = 'worker' | 'integrator' | 'coordinator';
+export type WorkspaceRole = 'worker' | 'integrator' | 'coordinator' | 'v3';
 
 /**
  * Workspace represents an isolated git worktree assigned to an agent.
@@ -162,7 +162,7 @@ export interface CleanupStatus {
 /**
  * WorkspaceManager interface for managing agent workspaces.
  *
- * Bridges macro-agent roles to dataplane streams and worktrees.
+ * Bridges macro-agent roles to git-cascade streams and worktrees.
  *
  * @see [[s-7ktd]] WorkspaceManager API section
  */
@@ -309,11 +309,114 @@ export interface WorkspaceManager {
    * Get the merge queue for coordinating worker merges.
    *
    * The merge queue is shared across all streams and uses the same
-   * database as the dataplane adapter.
+   * database as the git-cascade adapter.
    *
    * @returns MergeQueue instance
    */
   getMergeQueue(): MergeQueueInterface;
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // V3 — Stream-first surface (additive; coexists with role-shaped methods above)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new stream. Stream-first equivalent of `createIntegrationStream`;
+   * does not require a coordinator owner — any `Principal` (including pseudo
+   * principals like `team:<name>`) can own.
+   *
+   * @see docs/workspace-interfaces.md §5
+   */
+  createStreamV3(spec: import('./types-v3.js').StreamSpec): StreamId;
+
+  /**
+   * Fork a child stream from a parent. Enables stacking workflows (solo stack,
+   * long-lived feature + subtasks).
+   */
+  forkStream(opts: {
+    parentStreamId: StreamId;
+    name: string;
+    ownerId: import('./types-v3.js').Principal;
+    metadata?: Record<string, unknown>;
+  }): StreamId;
+
+  /**
+   * Merge a source stream into a target stream.
+   */
+  mergeStream(opts: {
+    sourceStreamId: StreamId;
+    targetStreamId: StreamId;
+    agentId: import('./types-v3.js').Principal;
+    worktree: string;
+  }): import('./types-v3.js').MergeResult;
+
+  /**
+   * Rebase a stream onto its parent.
+   */
+  syncWithParent(opts: {
+    streamId: StreamId;
+    agentId: import('./types-v3.js').Principal;
+    worktree: string;
+    onConflict?: import('./types-v3.js').ConflictStrategy;
+  }): import('./types-v3.js').RebaseResult;
+
+  /**
+   * Lifecycle transitions for streams.
+   */
+  abandonStream(streamId: StreamId, opts?: { cascade?: boolean; reason?: string }): void;
+  pauseStream(streamId: StreamId, reason?: string): void;
+  resumeStream(streamId: StreamId): void;
+
+  /**
+   * Stream queries.
+   */
+  listStreams(filter?: {
+    ownerId?: import('./types-v3.js').Principal;
+    status?: import('./types-v3.js').Stream['status'];
+  }): import('./types-v3.js').Stream[];
+
+  /**
+   * Commit with Change-Id tracking. Use this instead of raw `git commit` when
+   * committing on behalf of a streamed agent.
+   */
+  commitChanges(opts: {
+    agentId: import('./types-v3.js').Principal;
+    streamId: StreamId;
+    worktree: string;
+    message: string;
+  }): { commit: string; changeId: import('./types-v3.js').ChangeId };
+
+  /**
+   * Mark a set of changes as merged (e.g., after a landing strategy completes).
+   */
+  markChangesMerged(changeIds: import('./types-v3.js').ChangeId[]): void;
+
+  getChange(changeId: import('./types-v3.js').ChangeId): import('./types-v3.js').Change | null;
+  getChangeByCommit(commit: string): import('./types-v3.js').Change | null;
+
+  /**
+   * Allocate a worktree for an agent, optionally attached to a stream.
+   * Stream-first equivalent of `createWorker/Integrator/CoordinatorWorkspace`.
+   */
+  allocateWorktree(opts: import('./types-v3.js').AllocateWorktreeOpts): import('./types-v3.js').Worktree;
+
+  /**
+   * Get the worktree owned by a principal (if any).
+   */
+  getWorktreeForAgent(agentId: import('./types-v3.js').Principal): import('./types-v3.js').Worktree | null;
+
+  /**
+   * Register a landing strategy. Registered strategies can be referenced by
+   * name from role YAML (see Phase 5 — `LandingStrategy` integration).
+   */
+  registerLandingStrategy(strategy: import('./types-v3.js').LandingStrategy): void;
+
+  /**
+   * Run macro-level reconciliation:
+   * - Delegates to git-cascade's `reconcile()` for stream↔git sync.
+   * - Cleans up orphan worktrees and stale pool entries.
+   * Intended to be called once on boot.
+   */
+  reconcileV3(): import('./types-v3.js').MacroReconcileResult;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Lifecycle
@@ -326,14 +429,43 @@ export interface WorkspaceManager {
 }
 
 /**
- * Events emitted by WorkspaceManager
+ * Events emitted by WorkspaceManager.
+ *
+ * Legacy events (`workspace:*`, `child:*`, `branches:*`, `branch:*`) drive the
+ * existing role-shaped lifecycle. V3 events (`stream:*`, `worktree:*`,
+ * `change:*`, `conflict:*`, `landing:*`, `cascade:*`, `mergeQueue:*`) drive the
+ * stream-first redesign and are re-emitted from the underlying git-cascade
+ * adapter. Consumers narrow on the type string.
  */
 export type WorkspaceEventType =
   | 'workspace:created'
   | 'workspace:deallocated'
   | 'child:registered'
   | 'branches:cleaned'
-  | 'branch:deleted';
+  | 'branch:deleted'
+  // V3 additions — stream-first lifecycle
+  | 'stream:created'
+  | 'stream:forked'
+  | 'stream:committed'
+  | 'stream:merged'
+  | 'stream:conflicted'
+  | 'stream:abandoned'
+  | 'stream:paused'
+  | 'stream:resumed'
+  | 'worktree:allocated'
+  | 'worktree:shared'
+  | 'worktree:released'
+  | 'change:merged'
+  | 'change:dropped'
+  | 'conflict:created'
+  | 'conflict:resolved'
+  | 'landing:started'
+  | 'landing:completed'
+  | 'cascade:completed'
+  | 'mergeQueue:added'
+  | 'mergeQueue:ready'
+  | 'mergeQueue:cancelled'
+  | 'mergeQueue:removed';
 
 /**
  * Event payload for workspace events
