@@ -846,6 +846,26 @@ Focus on correctness — your changes go live immediately.`);
     const { workspaceManager } = this.services;
     if (!workspaceManager || !this.integrationStrategy) return;
 
+    // V3 coexistence: if TeamManagerV2 has already wired a YamlDrivenTopology
+    // from `macro_agent.workspace`, that policy owns the team root stream.
+    // Don't create a second one via the legacy createIntegrationStream.
+    const hasV3Topology =
+      typeof (
+        this.services.agentManager as {
+          getTopologyPolicy?: () => unknown;
+        }
+      ).getTopologyPolicy === 'function';
+    // AgentManager doesn't expose a getter today, so detect indirectly: a
+    // V3-wired team has already created a stream owned by `team:<name>`.
+    const existingTeamRoot = workspaceManager
+      .listStreams({ ownerId: `team:${this.manifest.name}` } as never)
+      .find((s: { name: string }) => s.name === this.manifest.name);
+
+    if (existingTeamRoot) {
+      this.teamStreamId = existingTeamRoot.id;
+      return;
+    }
+
     try {
       this.teamStreamId = workspaceManager.createIntegrationStream(
         rootAgentId,
