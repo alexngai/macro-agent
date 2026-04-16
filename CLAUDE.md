@@ -16,7 +16,7 @@ macro-agent enables coordinated work across multiple AI agents with:
 - **Control socket** for MCP subprocess lifecycle RPC (NDJSON over UNIX socket)
 - **Composite signal filtering and emission enforcement** for multi-team communication topology
 - **Trigger system** with pluggable routing strategies (including AI router), wake management, cron, and webhooks
-- **Task dispatch** (opt-in, via `swarm-dispatch`) — autonomous mode that polls opentasks for ready work, spawns agents, tracks lifecycle, retries failures, and reconciles external state changes
+- **Task dispatch** (opt-in, via `swarm-dispatch` v0.3+) — autonomous orchestrator that polls opentasks for ready work, routes to idle agents via agent-inbox or spawns new ones, tracks lifecycle with continuation/retry split, detects stalls, and reconciles external state changes
 - **Agent detection** for discovering installed CLI coding agents (Claude Code, Codex, etc.)
 - **Health check heartbeats** from MCP subprocesses to the control server
 - **ACP protocol server** with WebSocket transport for external client integration
@@ -528,51 +528,78 @@ Strategy resolution order: explicit `strategyName` > first `canHandle()` match >
 
 ### Task Dispatch (Autonomous Mode)
 
-Opt-in autonomous dispatch mode powered by the [`swarm-dispatch`](https://www.npmjs.com/package/swarm-dispatch) package. Polls opentasks for ready work, spawns agents, tracks lifecycle, retries failures, and reconciles external state changes.
+Opt-in autonomous dispatch mode powered by [`swarm-dispatch`](https://www.npmjs.com/package/swarm-dispatch) (v0.3+). The orchestrator polls opentasks for ready work, routes to idle agents or spawns new ones, tracks lifecycle, retries failures with exponential backoff, detects stalls, and reconciles external state changes.
 
-Enabled via `config.dispatch.enabled` in boot. The dispatch loop, tracker, eligibility, retry, reconciliation, and prompt building are all provided by `swarm-dispatch` — macro-agent provides two thin adapters:
+Enabled via `config.dispatch.enabled` in boot. The orchestrator, state machine, eligibility, concurrency, retry, continuation, and reconciliation are all provided by `swarm-dispatch` — macro-agent provides adapters for the five ports:
 
-1. **DispatchTaskSource adapter** — wraps `TasksAdapter` (opentasks IPC) for task queries, claiming, and state transitions
-2. **DispatchAgentRuntime adapter** — wraps `AgentManagerV2` for agent spawning, termination, and lifecycle event subscription
+1. **TaskSource adapter** — wraps `TasksAdapter` (opentasks IPC) for task queries, claiming, and state transitions
+2. **AgentRuntime adapter** — wraps `AgentManagerV2` for agent spawning, termination, and lifecycle event subscription
+3. **MessagePort adapter** — wraps the embedded `agent-inbox` for mail-based work routing and result envelopes (via `createAgentInboxPort`)
+4. **AgentRoster adapter** — queries inbox agent storage for idle agents to route work to before spawning
+5. **Dispatch mode** — auto-selects `prefer-route` when MessagePort + Roster are present (mail-first, spawn-fallback); falls back to `spawn-only` when either is absent
 
 **Boot wiring** (`boot-v2.ts`):
 ```typescript
-import { createTaskDispatcher, createOpenTasksSource } from "swarm-dispatch";
+import { createOrchestrator, createAgentInboxPort } from "swarm-dispatch";
 
-const dispatcher = createTaskDispatcher(
-  sourceAdapter,   // TasksAdapter → DispatchTaskSource
-  runtimeAdapter,  // AgentManagerV2 → DispatchAgentRuntime
-  config           // DispatchConfig
-);
-await dispatcher.start();
+const orchestrator = createOrchestrator(source, runtime, {
+  claimantId,
+  pollIntervalMs: 15_000,
+  concurrency: { global: 3 },
+  retry: { maxRetries: 3, baseDelayMs: 10_000, maxDelayMs: 300_000 },
+  continuation: { delayMs: 1_000, maxTurns: 20 },
+  reconcile: { enabled: true, intervalMs: 60_000, stallTimeoutMs: 300_000 },
+  messagePort,    // agent-inbox adapter (opt-in)
+  roster,         // inbox agent listing (opt-in)
+  dispatchMode,   // prefer-route | spawn-only | route-only | prefer-spawn
+});
+await orchestrator.start();
 ```
 
-The `TaskDispatcher` is exposed on `MacroAgentSystemV2.taskDispatcher` (optional, only present when dispatch is enabled) for observability and manual triggering via `dispatchNow()` / `reconcileNow()`.
+The `Orchestrator` is exposed on `MacroAgentSystemV2.taskDispatcher` (optional, only present when dispatch is enabled) for observability, snapshots, and manual triggering via `dispatchNow()` / `reconcileNow()`.
 
 **Configuration** (in `BootV2Config.dispatch`):
 ```yaml
 dispatch:
   enabled: true
-  pollIntervalMs: 15000      # Dispatch poll cadence
-  maxConcurrent: 3           # Global concurrency limit
-  defaultRole: worker        # Role for spawned agents
-  tags: [auto]               # Only dispatch tasks with these tags
-  maxRetries: 3              # Retry attempts per task
+  pollIntervalMs: 15000        # Dispatch poll cadence
+  maxConcurrent: 3             # Global concurrency limit
+  defaultRole: worker          # Role for spawned agents
+  tags: [auto]                 # Only dispatch tasks with these tags
+  maxRetries: 3                # Retry attempts per task
+  dispatchMode: prefer-route   # route-only | spawn-only | prefer-route | prefer-spawn
+  enableMailRouting: true       # Wire MessagePort via agent-inbox (default: true)
+  enableRoster: true            # Wire AgentRoster via inbox agent listing (default: true)
+  continuation:
+    delayMs: 1000               # Delay before continuation re-dispatch
+    maxTurns: 20                # Max continuation turns per task
   reconcile:
     enabled: true
-    intervalMs: 60000         # Reconciliation cadence
+    intervalMs: 60000           # Reconciliation cadence
+    stallTimeoutMs: 300000      # Terminate agents with no activity past this
   eligibility:
     minPriority: 2
     excludeTags: [wip]
-    minScore: 0.3
 ```
+
+**Dispatch flow:**
+1. Orchestrator polls opentasks for ready tasks
+2. For each eligible task: check AgentRoster for idle agents → route via MessagePort if found → spawn via AgentRuntime if not
+3. Agent works on the task; lifecycle events flow back through `onStopped`
+4. On normal completion: check if task is still active → if yes, schedule continuation (same logical run, next turn)
+5. On abnormal exit: queue retry with exponential backoff
+6. Reconcile tick: check external state (task closed? reassigned?), detect stalls, terminate stale agents
 
 **Key design decisions:**
 - Dispatch logic lives in `swarm-dispatch` (runtime-agnostic npm package), not macro-agent
+- **Mail-first, spawn-fallback**: when MessagePort + Roster are wired, the orchestrator prefers routing to existing idle agents over spawning new ones
 - Agents spawn parentless (`parent: null`) — the dispatcher is the coordination layer, not a parent agent
-- The dispatcher manages its own timers (`setInterval`), independent of the trigger system's CronService
+- **Continuation vs retry**: normal exit + still-active task = continuation (short delay, turn counter). Abnormal exit = retry (exponential backoff, attempt counter). Never mixed.
 - Each dispatcher instance uses a unique `claimantId` (`hostname:pid:instanceHash`) for multi-instance awareness
-- See [swarm-dispatch README](https://www.npmjs.com/package/swarm-dispatch) for full API documentation
+- The dispatcher registers itself as an agent in the inbox (`dispatcher:<claimantId>`) to receive mail-based work delegation from other agents
+- **Cancellation propagation**: spawned agents are terminated via `runtime.terminate`; routed agents receive `x-dispatch/cancel` messages via MessagePort
+- `promptUntilDone()` auto-terminates the agent when `done()` signals `shouldTerminate: true`
+- See [swarm-dispatch README](https://www.npmjs.com/package/swarm-dispatch) for the full API
 
 ### Agent Detection
 
@@ -717,9 +744,12 @@ E2E test files (selected):
 - `pull-mode.e2e.test.ts` — Task claiming workflows
 - `opentasks-integration.e2e.test.ts` — TasksAdapter integration
 - `live-agent.e2e.test.ts` — Full agent with real Claude Code (requires `RUN_FULL_AGENT_TESTS`)
-- `dispatch.e2e.test.ts` — Task dispatch boot wiring via swarm-dispatch (mocked agents)
+- `dispatch.e2e.test.ts` — Task dispatch Phase 1 boot wiring via swarm-dispatch (mocked agents)
+- `dispatch-phase2.e2e.test.ts` — Task dispatch Phase 2 boot wiring: MessagePort, AgentRoster, dispatch modes, snapshot, stall config (mocked agents)
 - `dispatch-live.e2e.test.ts` — Task dispatch with real agents via swarm-dispatch (requires `RUN_FULL_AGENT_TESTS`)
+- `dispatch-phase2-live.e2e.test.ts` — Task dispatch Phase 2 with real agents: prefer-route fallback, snapshot, lifecycle tracking, reconciliation (requires `RUN_FULL_AGENT_TESTS`)
 - `dispatch-opentasks.e2e.test.ts` — Task dispatch with real agents + real opentasks daemon via swarm-dispatch (requires `RUN_FULL_AGENT_TESTS`)
+- `dispatch-coordination.e2e.test.ts` — Dispatch coordination with mock MAP connection
 - `conflict-resolution-git.e2e.test.ts` — Git merge conflict handling
 - `real-git-operations.e2e.test.ts` — Real git worktree operations
 
@@ -815,8 +845,14 @@ E2E test files (selected):
 | `dispatch.defaultRole` | Role for spawned agents | `"worker"` |
 | `dispatch.tags` | Only dispatch tasks with these tags | -- |
 | `dispatch.maxRetries` | Retry attempts per failed task | `3` |
+| `dispatch.dispatchMode` | `route-only`, `spawn-only`, `prefer-route`, `prefer-spawn` | auto (`prefer-route` if inbox wired) |
+| `dispatch.enableMailRouting` | Wire MessagePort via agent-inbox | `true` |
+| `dispatch.enableRoster` | Wire AgentRoster via inbox agent listing | `true` |
+| `dispatch.continuation.delayMs` | Delay before continuation re-dispatch (ms) | `1000` |
+| `dispatch.continuation.maxTurns` | Max continuation turns per task | `20` |
 | `dispatch.reconcile.enabled` | Enable external state reconciliation | `true` |
 | `dispatch.reconcile.intervalMs` | Reconciliation cadence (ms) | `60000` |
+| `dispatch.reconcile.stallTimeoutMs` | Terminate agents with no activity past this (ms) | `300000` |
 
 ### Injected into MCP subprocesses (by AgentManagerV2)
 
@@ -850,7 +886,7 @@ E2E test files (selected):
 | `agent-inbox` | Messaging, threading, federation (embedded in-process) |
 | `opentasks` | Task graph, dependencies, providers (IPC to daemon) |
 | `acp-factory` | Agent process management (Claude Code sessions) |
-| `swarm-dispatch` | Autonomous task dispatch (poll, claim, spawn, retry, reconcile) |
+| `swarm-dispatch` | Autonomous task dispatch orchestrator (poll, route, spawn, continuation, retry, reconcile, mail-inbound, roster-aware) |
 | `openteams` | Team template loading and resolution |
 | `git-cascade` | Git worktree, stream/fork/merge/rebase, Change-Id tracking, cascade namespace, event emitter (0.0.3+) |
 | `better-sqlite3` | AgentStore + InboxAdapter persistence |
