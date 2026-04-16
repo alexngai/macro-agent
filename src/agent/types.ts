@@ -15,6 +15,7 @@ import type {
   StreamConfig,
   Workspace,
 } from "../workspace/types.js";
+import type { TaskRef } from "git-cascade/events";
 
 // ─────────────────────────────────────────────────────────────────
 // Spawn Options
@@ -90,16 +91,29 @@ export interface SpawnAgentOptions {
   streamConfig?: StreamConfig;
 
   /**
-   * Dataplane task ID to claim (for workers).
+   * git-cascade task ID to claim (for workers).
    * If provided, the worker will claim this task and work on it.
    */
-  dataplaneTaskId?: string;
+  gitCascadeTaskId?: string;
 
   /**
    * Resolved capabilities for this agent's role.
    * Injected by TeamRuntime spawn interceptor for capability-based workspace dispatch.
    */
   capabilities?: string[];
+
+  /**
+   * Optional reference to an external task this agent is working on. When
+   * set, the reference is woven into cascade event metadata so OpenHive (or
+   * any other observer) can bind the agent's commits, merges, and streams
+   * to the OpenTasks node. Propagates through:
+   *   - stream creation: `adapter.createStream({ metadata: { task_ref } })`
+   *   - commits: `adapter.commitChanges({ metadata: { task_ref } })` (pass
+   *     per-commit; each commit can carry a distinct sub-task binding)
+   * Can also arrive late via pull-mode `claim_task` — workers that claim a
+   * task mid-session should include the ref on subsequent commits.
+   */
+  taskRef?: TaskRef;
 }
 
 /**

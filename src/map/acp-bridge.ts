@@ -39,7 +39,8 @@ interface ACPEnvelope {
 /** Active ACP stream state */
 interface ACPStreamState {
   streamId: string;
-  agentId: string;
+  /** Macro-agent's internal store id (the agent the stream targets). */
+  peerAgentId: string;
   /** Push inbound ACP messages into the readable side */
   push: (message: AnyMessage) => void;
   /** Close the stream */
@@ -58,6 +59,13 @@ export interface ACPBridge {
    * Returns true if the message was an ACP envelope and was handled.
    */
   handleDelivery(agentId: string, message: any): boolean;
+
+  /**
+   * Inspect which agent each open ACP stream is bound to. Used for
+   * observability and routing tests — the binding is otherwise per-stream
+   * in-memory state and not externally observable.
+   */
+  getStreamBindings(): Array<{ streamId: string; peerAgentId: string }>;
 
   /** Close all active streams */
   close(): void;
@@ -212,14 +220,22 @@ export function createACPBridge(
     // Create the AgentSideConnection.
     // All outbound messages (responses + notifications) go through the
     // writable side of the stream, which calls sendToClient above.
+    //
+    // Bind the MacroAgent to this stream's target agent so `session/new`
+    // creates a session for the agent the MAP stream was opened against,
+    // not whichever head manager happens to share the same cwd.
     const conn = new AgentSideConnection(
-      (agentConn) => createMacroAgent(agentConn, { system }),
+      (agentConn) =>
+        createMacroAgent(agentConn, {
+          system,
+          initConfig: { targetAgentId: agentId },
+        }),
       stream,
     );
 
     const state: ACPStreamState = {
       streamId,
-      agentId,
+      peerAgentId: agentId,
       push,
       close,
       connection: conn,
@@ -258,6 +274,13 @@ export function createACPBridge(
       streamState.push(acp);
 
       return true;
+    },
+
+    getStreamBindings(): Array<{ streamId: string; peerAgentId: string }> {
+      return Array.from(streams.values()).map((s) => ({
+        streamId: s.streamId,
+        peerAgentId: s.peerAgentId,
+      }));
     },
 
     close(): void {

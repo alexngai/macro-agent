@@ -9,6 +9,7 @@
  */
 
 import type { AgentId, TaskId } from "../store/types/index.js";
+import type { TaskRef } from "git-cascade/events";
 
 // =============================================================================
 // Done Status Types
@@ -120,6 +121,17 @@ export interface LifecycleContext {
 
   /** Resolved capabilities for the agent's role (for capability-based handler dispatch) */
   capabilities?: string[];
+
+  /**
+   * Optional reference to an external task this agent is working on. When
+   * present, threaded into commit metadata so cascade events carry the
+   * binding (enabling task↔stream queries on the OpenHive hub).
+   *
+   * Sourced from `SpawnAgentOptions.taskRef` at spawn time and propagated
+   * via the agent manager. Late-binding (mid-session pull-mode claim) can
+   * mutate this on the live context.
+   */
+  taskRef?: TaskRef;
 }
 
 /**

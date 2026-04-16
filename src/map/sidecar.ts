@@ -35,7 +35,7 @@ export function createMAPSidecar(
   deps: MAPSidecarDeps,
   config: MAPSidecarConfig,
 ): MAPSidecar {
-  const { agentManager, agentStore, inboxAdapter, tasksAdapter } = deps;
+  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId, gitCascadeAdapter } = deps;
   const scope = config.scope ?? "swarm:macro-agent";
   const agentName = config.agentName ?? "macro-agent-sidecar";
 
@@ -50,6 +50,7 @@ export function createMAPSidecar(
   let trajectoryReporter: TrajectoryReporter | null = null;
   let taskBridge: TaskBridge | null = null;
   let coordinationCleanup: (() => void) | null = null;
+  let cascadeBridgeCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -64,6 +65,12 @@ export function createMAPSidecar(
     if (config.token) {
       parsed.searchParams.set("token", config.token);
     }
+    // Include swarm_id for stable identity across reconnections.
+    // When set, the hub reuses the pre-registered swarm record instead
+    // of auto-generating a new one on each connection.
+    if (config.swarmId) {
+      parsed.searchParams.set("swarm_id", config.swarmId);
+    }
     return parsed.toString();
   }
 
@@ -75,6 +82,10 @@ export function createMAPSidecar(
     if (coordinationCleanup) {
       coordinationCleanup();
       coordinationCleanup = null;
+    }
+    if (cascadeBridgeCleanup) {
+      try { cascadeBridgeCleanup(); } catch { /* non-critical */ }
+      cascadeBridgeCleanup = null;
     }
     if (trajectoryReporter) {
       trajectoryReporter.stop();
@@ -107,6 +118,8 @@ export function createMAPSidecar(
         role: "sidecar",
         scopes: [scope],
         capabilities: {
+          messaging: { canSend: true, canReceive: true },
+          mail: { canCreate: true, canJoin: true, canViewHistory: true },
           trajectory: { canReport: true, canServeContent: false },
           tasks: {
             canCreate: true,
@@ -118,6 +131,10 @@ export function createMAPSidecar(
         metadata: {
           systemId: config.systemId ?? "macro-agent",
           type: "macro-agent-sidecar",
+          // Signals that this swarm can spawn ACP-capable coordinators on demand,
+          // even before any coordinator has registered. The hub's /sessions/create-acp
+          // endpoint handles the spawn via _macro/spawnAgent when no ACP agent exists.
+          canHostAcp: true,
         },
         reconnection: {
           enabled: config.reconnection?.enabled ?? true,
@@ -166,6 +183,19 @@ export function createMAPSidecar(
       }
       isConnected = true;
       } // end if (!isConnected)
+
+      // Publish sidecar metadata to the hub. The MAP SDK's connect()/register()
+      // does not propagate the `metadata` field from connect options — it only
+      // forwards name/role/capabilities/scopes. Call updateMetadata explicitly
+      // so the hub sees canHostAcp (and any other metadata the UI relies on).
+      try {
+        const metadata = (connectOpts.metadata as Record<string, unknown>) ?? {};
+        if (typeof connection.updateMetadata === "function") {
+          await connection.updateMetadata(metadata);
+        }
+      } catch {
+        // Non-fatal — metadata is advisory
+      }
 
       // Monitor connection state
       connection.onStateChange(
@@ -244,6 +274,7 @@ export function createMAPSidecar(
       agentStore,
       scope,
       taskBridge,
+      getLocalMapId,
     );
     lifecycleCallback = bridge.callback;
     lifecycleCleanup = bridge.cleanup;
@@ -262,6 +293,13 @@ export function createMAPSidecar(
       tasksAdapter,
       trajectoryReporter,
     });
+
+    // 5. Cascade Bridge (optional — only when a GitCascadeAdapter is available)
+    if (gitCascadeAdapter) {
+      const { createCascadeBridge } = await import("./cascade-bridge.js");
+      const cascadeBridge = createCascadeBridge(connection, gitCascadeAdapter);
+      cascadeBridgeCleanup = cascadeBridge.dispose;
+    }
   }
 
   return {

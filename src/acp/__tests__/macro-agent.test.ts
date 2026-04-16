@@ -141,7 +141,7 @@ describe("createMacroAgent", () => {
   // ── newSession ──────────────────────────────────────────────
 
   describe("newSession", () => {
-    it("should create head manager and return session ID", async () => {
+    it("should create head manager and return session ID (cwd fallback)", async () => {
       const agent = createAgent();
       const result = await agent.newSession({
         cwd: "/tmp/test",
@@ -152,6 +152,44 @@ describe("createMacroAgent", () => {
       expect(system.agentManager.getOrCreateHeadManager).toHaveBeenCalledWith({
         cwd: "/tmp/test",
       });
+    });
+
+    it("binds the session to initConfig.targetAgentId when provided (skips cwd lookup)", async () => {
+      // Stub getActiveAgentSession on the mock system
+      system.agentManager.getActiveAgentSession = vi.fn().mockReturnValue({
+        id: "worker-7",
+        session_id: "worker-7-session",
+        agent: { id: "worker-7", role: "worker", state: "running" },
+        session: {},
+      });
+
+      // Bind this MacroAgent to a specific (non-coordinator) agent
+      const agent = createMacroAgent(connection, {
+        system,
+        initConfig: { targetAgentId: "worker-7" },
+      });
+      await agent.newSession({ cwd: "/tmp/whatever", mcpServers: [] });
+
+      expect(system.agentManager.getActiveAgentSession).toHaveBeenCalledWith("worker-7");
+      // cwd-based lookup must NOT run when a target is bound
+      expect(system.agentManager.getOrCreateHeadManager).not.toHaveBeenCalled();
+    });
+
+    it("throws AGENT_NOT_FOUND when targetAgentId has no live session", async () => {
+      system.agentManager.getActiveAgentSession = vi.fn().mockReturnValue(null);
+
+      const agent = createMacroAgent(connection, {
+        system,
+        initConfig: { targetAgentId: "ghost-agent" },
+      });
+
+      await expect(
+        agent.newSession({ cwd: "/tmp/test", mcpServers: [] }),
+      ).rejects.toMatchObject({
+        name: "ACPError",
+        code: "AGENT_NOT_FOUND",
+      });
+      expect(system.agentManager.getOrCreateHeadManager).not.toHaveBeenCalled();
     });
   });
 

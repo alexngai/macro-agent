@@ -124,15 +124,45 @@ export function detectCleanupStatus(
 // =============================================================================
 
 /**
- * Commit all uncommitted changes in a workspace
+ * Optional handle for routing commits through git-cascade so the resulting
+ * commit gets a Change-Id trailer and emits an `x-cascade/stream.committed`
+ * event. When omitted, commits are made via raw git (no Change-Id, no
+ * cascade event) — used by legacy/null-workspace paths.
+ */
+export interface TrackedCommitHandle {
+  /** WorkspaceManager-style commitChanges signature */
+  commitChanges(opts: {
+    streamId: string;
+    agentId: string;
+    worktree: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  }): { commit: string; changeId: string };
+  /** Stream this commit belongs to */
+  streamId: string;
+  /** Agent making the commit */
+  agentId: string;
+  /** Optional metadata threaded into the cascade event (e.g. `{ task_ref }`) */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Commit all uncommitted changes in a workspace.
+ *
+ * When a `TrackedCommitHandle` is supplied, the commit goes through
+ * git-cascade's tracker — gaining a stable Change-Id trailer and emitting
+ * `x-cascade/stream.committed` so OpenHive sees the work. Without a handle,
+ * falls back to raw git (legacy behavior).
  *
  * @param workspacePath - Path to the workspace
  * @param message - Commit message
+ * @param tracked - Optional handle to commit via the cascade tracker
  * @returns Commit hash if successful, undefined if nothing to commit
  */
 export function commitChanges(
   workspacePath: string,
-  message: string
+  message: string,
+  tracked?: TrackedCommitHandle
 ): string | undefined {
   try {
     // Check if there are changes to commit
@@ -140,7 +170,26 @@ export function commitChanges(
       return undefined;
     }
 
-    // Stage all changes
+    // Tracked path: stage + commit through git-cascade so Change-Id +
+    // x-cascade events fire.
+    if (tracked) {
+      try {
+        const { commit } = tracked.commitChanges({
+          streamId: tracked.streamId,
+          agentId: tracked.agentId,
+          worktree: workspacePath,
+          message,
+          metadata: tracked.metadata,
+        });
+        return commit;
+      } catch {
+        // Fall through to raw-git path on tracker failure (e.g., stream
+        // conflicted) so callers still get a commit. Caveat: no Change-Id
+        // and no cascade event in this fallback.
+      }
+    }
+
+    // Raw-git path: stage all changes
     execFileSync("git", ["add", "--all"], {
       cwd: workspacePath,
       encoding: "utf-8",

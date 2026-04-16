@@ -3,6 +3,15 @@
  *
  * Types for the merge queue layer that coordinates parallel worker merges.
  *
+ * @deprecated Since v3 workspace redesign. This module duplicates git-cascade's
+ *   built-in `mergeQueue` (see `GitCascadeAdapter.addToMergeQueue`,
+ *   `getNextToMerge`, etc.). New code should use `LandingStrategy`
+ *   ("queue-to-branch") + git-cascade's queue directly. Kept in place to
+ *   preserve the legacy role-name dispatch path (coordinator/worker/integrator)
+ *   until teams migrate to `macro_agent.workspace` YAML. Scheduled for
+ *   removal once self-driving is migrated. See `docs/workspace-redesign-plan.md`
+ *   Phases 6/8/9.
+ *
  * @module workspace/merge-queue/types
  * @implements [[s-bcqm]] Merge Queue Schema section
  */
@@ -36,7 +45,7 @@ export interface MergeRequest {
   /** Stream (integration branch) this MR targets */
   streamId: string;
 
-  /** Dataplane task ID this MR completes */
+  /** git-cascade task ID this MR completes */
   taskId: string;
 
   /** Git branch containing the worker's changes */
@@ -83,7 +92,7 @@ export interface SubmitMergeRequestOptions {
   /** Stream (integration branch) to merge into */
   streamId: string;
 
-  /** Dataplane task ID this completes */
+  /** git-cascade task ID this completes */
   taskId: string;
 
   /** Git branch containing the worker's changes */
@@ -140,6 +149,11 @@ export type MergeQueueEventCallback = (event: MergeQueueEvent) => void;
  *
  * Coordinates merging of parallel worker branches into the integration branch.
  * Workers submit completed work; Integrator processes sequentially.
+ */
+/**
+ * @deprecated Use git-cascade's built-in merge queue via
+ *   `GitCascadeAdapter.addToMergeQueue` / `getNextToMerge` etc. See module
+ *   doc for migration guidance.
  */
 export interface MergeQueueInterface {
   // ─────────────────────────────────────────────────────────────────────────────

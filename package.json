@@ -1,6 +1,6 @@
 {
   "name": "macro-agent",
-  "version": "0.1.3",
+  "version": "0.1.10",
   "description": "Interact with multiple agents as if they were a single agent.",
   "type": "module",
   "main": "dist/index.js",
@@ -49,7 +49,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@multi-agent-protocol/sdk": "^0.1.8",
+    "@multi-agent-protocol/sdk": "^0.1.11",
     "@sudocode-ai/claude-code-acp": "^0.13.9",
     "acp-factory": "^0.1.12",
     "agent-inbox": "^0.1.8",
@@ -57,7 +57,7 @@
     "chalk": "^5.6.2",
     "commander": "^14.0.2",
     "express": "^5.2.1",
-    "git-cascade": "0.0.1",
+    "git-cascade": "^0.0.7",
     "js-yaml": "^4.1.1",
     "nanoid": "^5.0.0",
     "opentasks": "^0.0.3",

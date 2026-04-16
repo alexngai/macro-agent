@@ -107,7 +107,7 @@ export function createMAPServerInstance(
             role: params.role ?? "worker",
             state: "idle",
             sessionId: ctx?.session?.id,
-            metadata: { localAgentId: spawned.id, task: params.task },
+            metadata: { peerAgentId: spawned.id, task: params.task },
           });
           if (registered?.id) {
             mapIdToLocalId.set(registered.id, spawned.id);
@@ -143,6 +143,38 @@ export function createMAPServerInstance(
     handlers["_macro/resume"] = async (params) => {
       const spawned = await agentManager.resume(params.agentId);
       return { agent: { id: spawned.id } };
+    };
+
+    /**
+     * Terminate a running agent. Accepts either the agent's local ID or the
+     * MAP-assigned ULID (we resolve back to local via mapIdToLocalId).
+     * Reason defaults to "stopped"; use "cancelled" for user-initiated stops.
+     */
+    handlers["_macro/terminateAgent"] = async (params) => {
+      const agentIdParam = params.agentId as string | undefined;
+      const reason = (params.reason as string) ?? "cancelled";
+      if (!agentIdParam) {
+        return { success: false, error: "agentId is required" };
+      }
+      // Resolve either a MAP ULID or a local agent ID to our internal ID.
+      const localId = mapIdToLocalId.get(agentIdParam) ?? agentIdParam;
+      try {
+        await agentManager.terminate(localId as any, reason as any);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: (err as Error).message };
+      }
+    };
+
+    /**
+     * Inspect ACP stream → peer agent bindings on this MAP server.
+     * Each stream carries the peer agent id (macro-agent's internal store id)
+     * it was opened against, set by the bridge from MAP routing. Useful for
+     * routing tests and debugging multi-coordinator scenarios.
+     */
+    handlers["_macro/getAcpStreamBindings"] = async () => {
+      if (!acpBridge) return { bindings: [] };
+      return { bindings: acpBridge.getStreamBindings() };
     };
 
     // ── Task extensions ───────────────────────────────────────────
@@ -290,14 +322,26 @@ export function createMAPServerInstance(
           const message = data?.message;
           if (!message) return;
 
+          // Check if this is an ACP envelope — these should always be handled
+          // by the bridge, even if the target agent can't be resolved to a
+          // specific local agent (the bridge creates a head manager on demand).
+          const payload = message?.payload;
+          const isAcp = payload && typeof payload === 'object' &&
+            'acp' in payload && 'acpContext' in payload;
+
           const toField = message.to;
           const mapTargetId = data?.agentId ??
             (typeof toField === "string" ? toField : toField?.agent ?? toField?.id);
           if (!mapTargetId) return;
 
           const localAgentId = mapIdToLocalId.get(mapTargetId) ?? mapTargetId;
-          const localAgent = deps.agentManager.get(localAgentId);
-          if (!localAgent) return;
+
+          // For ACP envelopes, always forward to bridge (it creates sessions on demand).
+          // For non-ACP messages, require a local agent to exist.
+          if (!isAcp) {
+            const localAgent = deps.agentManager.get(localAgentId);
+            if (!localAgent) return;
+          }
 
           // Defer ACP processing to next tick so map/send response goes out first
           setImmediate(() => {
@@ -392,16 +436,21 @@ export function createMAPServerInstance(
         try {
           if (event.type === "spawned" || event.type === "started") {
             const agent = event.agent;
-            // Register agent in MAPServer's registry so it's visible to clients.
-            // We wrap in try/catch because the registry's event bus may throw
-            // if subscription filters encounter unexpected state.
+            // Register agent ONCE. spawn() fires "spawned" immediately followed
+            // by "started", so without this guard the listener re-registers
+            // on the second event — generating a fresh MAP ULID and overwriting
+            // localIdToMapId. Consumers racing against that overwrite (like the
+            // sidecar's lifecycle bridge, which snapshots peerMapId into hub
+            // metadata) end up disagreeing with _macro/spawnAgent's return
+            // value on which ULID refers to this agent.
+            if (localIdToMapId.has(agent.id)) return;
             try {
               const registered = mapServer.agents.register({
                 name: agent.name ?? agent.id,
                 role: agent.role ?? "worker",
                 state: "idle",
                 metadata: {
-                  localAgentId: agent.id, // Store local ID in metadata
+                  peerAgentId: agent.id, // macro-agent's internal store id
                   parent: (agent as any).parent ?? null,
                   task: (agent as any).task ?? null,
                   cwd: (agent as any).cwd ?? null,
@@ -442,7 +491,7 @@ export function createMAPServerInstance(
             role: agent.role ?? "worker",
             state: agent.state === "running" ? "busy" : "idle",
             metadata: {
-              localAgentId: agent.id,
+              peerAgentId: agent.id,
               parent: agent.parent ?? null,
               task: agent.task ?? null,
             },
@@ -522,6 +571,10 @@ export function createMAPServerInstance(
 
     getConnectionCount(): number {
       return connectionCount;
+    },
+
+    getLocalMapId(localAgentId: string): string | undefined {
+      return localIdToMapId.get(localAgentId);
     },
   };
 }

@@ -35,6 +35,9 @@ export interface MAPSidecarConfig {
   /** Agent name for MAP registration (default: "macro-agent-sidecar") */
   agentName?: string;
 
+  /** Swarm ID for stable identity across reconnections */
+  swarmId?: string;
+
   /** Trajectory sync level */
   trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
 
@@ -65,6 +68,21 @@ export interface MAPSidecarDeps {
   agentStore: AgentStore;
   inboxAdapter: InboxAdapter;
   tasksAdapter: TasksAdapter;
+  /**
+   * Optional lookup for the local MAP server's ULID for a given local agent ID.
+   * When provided, the lifecycle bridge includes this ID in hub registration
+   * metadata so clients (e.g., SwarmCraft) can target the agent correctly on
+   * the macro-agent's own MAP server.
+   */
+  getLocalMapId?: (localAgentId: string) => string | undefined;
+  /**
+   * Optional GitCascadeAdapter. When provided, the sidecar wires a cascade
+   * bridge that forwards the adapter's event stream to the hub as
+   * `x-cascade/*` MAP notifications. Leave undefined to disable cascade
+   * event forwarding (macro-agent will still use cascade internally, just
+   * without hub observability).
+   */
+  gitCascadeAdapter?: import("../workspace/git-cascade-adapter.js").GitCascadeAdapter;
 }
 
 // =============================================================================
@@ -244,4 +262,9 @@ export interface MAPServerInstance {
   getUrl(): string;
   /** Get number of active connections */
   getConnectionCount(): number;
+  /**
+   * Resolve a local agent ID (macro-agent internal) to its MAP server-assigned ULID.
+   * Returns undefined if the agent is not registered on the MAP server yet.
+   */
+  getLocalMapId(localAgentId: string): string | undefined;
 }

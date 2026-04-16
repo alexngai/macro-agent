@@ -99,7 +99,13 @@ export interface BootV2Config {
   };
 
   /** MAP server config (accept inbound connections from TUI/clients) */
-  mapServer?: { enabled?: boolean; port?: number; host?: string; path?: string; name?: string };
+  mapServer?: {
+    enabled?: boolean;
+    port?: number;
+    host?: string;
+    path?: string;
+    name?: string;
+  };
 
   /** MAP sidecar config (connect to OpenHive hub) */
   map?: {
@@ -110,6 +116,7 @@ export interface BootV2Config {
     systemId?: string;
     credential?: string;
     agentName?: string;
+    swarmId?: string;
     trajectorySyncLevel?: "off" | "lifecycle" | "metrics" | "full";
     reconnectIntervalMs?: number;
     reconnection?: {
@@ -120,18 +127,64 @@ export interface BootV2Config {
     };
   };
 
+  /**
+   * Cascade event binding config. Controls how cascade events emitted by
+   * git-cascade-backed agents get tagged with external task references for
+   * hub projection (changelog, task↔stream binding). Independent of MAP
+   * transport: cascade events are data/identity, not transport.
+   */
+  cascade?: {
+    /**
+     * Default OpenTasks resource ID for this swarm. When set, the agent
+     * manager auto-builds `taskRef = { resource_id, node_id: task_id }`
+     * for spawned agents so cascade events carry the binding without
+     * callers constructing refs by hand.
+     *
+     * Leave undefined if:
+     *   - The swarm touches multiple opentasks graphs (use `resolveTaskRef`).
+     *   - Every caller sets `SpawnAgentOptions.taskRef` explicitly.
+     *   - You don't care about hub task↔stream binding.
+     */
+    taskResourceId?: string;
+
+    /**
+     * Custom resolver for multi-graph deployments. Called at every spawn;
+     * return a `TaskRef` to set the binding or `undefined` to skip.
+     * Precedence: explicit `SpawnAgentOptions.taskRef` > `resolveTaskRef` >
+     * `taskResourceId` fallback (combined with `spawnOptions.task_id`).
+     *
+     * Keep implementations cheap — this runs on every spawn.
+     *
+     * @example
+     *   resolveTaskRef: (opts) => {
+     *     const graph = graphForCwd(opts.cwd ?? process.cwd());
+     *     return graph ? { resource_id: graph.resourceId, node_id: String(opts.task_id) } : undefined;
+     *   }
+     */
+    resolveTaskRef?: (
+      spawnOptions: import("./agent/types.js").SpawnAgentOptions,
+    ) => import("git-cascade/events").TaskRef | undefined;
+
+    /**
+     * Override the default `x-cascade` event prefix. Useful for branded
+     * deployments or isolating cascade namespaces in testing. Affects all
+     * events emitted by the tracker embedded in this swarm.
+     */
+    eventPrefix?: string;
+  };
+
   /** minimem (agent memory) — registers as MCP server for all agents */
   minimem?: {
     enabled?: boolean;
-    dir?: string;          // default: ".swarm/minimem/"
-    provider?: string;     // "auto" | "openai" | "gemini" | "local"
-    global?: boolean;      // also search ~/.minimem
+    dir?: string; // default: ".swarm/minimem/"
+    provider?: string; // "auto" | "openai" | "gemini" | "local"
+    global?: boolean; // also search ~/.minimem
   };
 
   /** skill-tree (per-role skills) — compiles loadouts at team start, injects into prompts */
   skilltree?: {
     enabled?: boolean;
-    basePath?: string;     // default: ".swarm/skill-tree/"
+    basePath?: string; // default: ".swarm/skill-tree/"
     defaultProfile?: string;
   };
 
@@ -157,7 +210,11 @@ export interface BootV2Config {
     maxRetries?: number;
     retryBaseDelayMs?: number;
     retryMaxDelayMs?: number;
-    reconcile?: { enabled?: boolean; intervalMs?: number; stallTimeoutMs?: number };
+    reconcile?: {
+      enabled?: boolean;
+      intervalMs?: number;
+      stallTimeoutMs?: number;
+    };
     eligibility?: import("swarm-dispatch").EligibilityConfig;
     /** Dispatch mode: route-only, spawn-only, prefer-route, prefer-spawn. Default: prefer-route when inbox available, spawn-only otherwise. */
     dispatchMode?: import("swarm-dispatch").DispatchMode;
@@ -226,11 +283,10 @@ export interface MacroAgentSystemV2 {
 // =============================================================================
 
 export async function bootV2(
-  config: BootV2Config = {}
+  config: BootV2Config = {},
 ): Promise<MacroAgentSystemV2> {
   const cwd = config.cwd ?? process.cwd();
-  const baseDir =
-    config.baseDir ?? path.join(os.homedir(), ".macro-agent");
+  const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent");
 
   // Ensure base directory exists
   fs.mkdirSync(baseDir, { recursive: true });
@@ -241,8 +297,7 @@ export async function bootV2(
 
   // 2. Inbox Adapter (embedded agent-inbox, hybrid mode)
   const inboxSocketPath =
-    config.inbox?.socketPath ??
-    path.join(baseDir, "inbox.sock");
+    config.inbox?.socketPath ?? path.join(baseDir, "inbox.sock");
   const inboxSqlitePath = path.join(baseDir, "inbox.db");
 
   const inboxAdapter = new DefaultInboxAdapter({
@@ -272,7 +327,7 @@ export async function bootV2(
   } catch {
     // opentasks daemon may not be available — non-fatal
     console.warn(
-      "[boot-v2] opentasks daemon not available. Task operations will fail until connected."
+      "[boot-v2] opentasks daemon not available. Task operations will fail until connected.",
     );
   }
 
@@ -294,14 +349,20 @@ export async function bootV2(
       serverUrl: config.serverUrl,
       serverToken: config.serverToken,
       controlSocketPath,
-    }
+      taskResourceId: config.cascade?.taskResourceId,
+      resolveTaskRef: config.cascade?.resolveTaskRef,
+    },
   );
 
   // 6. Federation (cross-instance communication)
   let federationCleanup: (() => void) | null = null;
   if (config.federation) {
     const { setupFederation } = await import("./adapters/federation.js");
-    federationCleanup = setupFederation(agentManager, inboxAdapter, config.federation);
+    federationCleanup = setupFederation(
+      agentManager,
+      inboxAdapter,
+      config.federation,
+    );
   }
 
   // 7. Trigger System V2
@@ -316,7 +377,7 @@ export async function bootV2(
         enableHeartbeat: config.trigger?.enableHeartbeat ?? false,
         heartbeatIntervalMs: config.trigger?.heartbeatIntervalMs,
       },
-    }
+    },
   );
   await triggerSystem.start();
 
@@ -324,11 +385,8 @@ export async function bootV2(
   let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
 
   if (config.dispatch?.enabled && tasksAdapter) {
-    const {
-      createOrchestrator,
-      createOpenTasksSource,
-      createAgentInboxPort,
-    } = await import("swarm-dispatch");
+    const { createOrchestrator, createOpenTasksSource, createAgentInboxPort } =
+      await import("swarm-dispatch");
     const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
 
     const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
@@ -351,10 +409,13 @@ export async function bootV2(
             }
           },
           release: async (taskId: string) => tasksAdapter.unclaimTask(taskId),
-          transition: async (taskId: string, action: "start" | "complete" | "fail") =>
-            tasksAdapter.transitionTask(taskId, action),
+          transition: async (
+            taskId: string,
+            action: "start" | "complete" | "fail",
+          ) => tasksAdapter.transitionTask(taskId, action),
           getTask: async (taskId: string) => tasksAdapter.getTask(taskId),
-          listInProgress: async () => tasksAdapter.listTasks({ status: "in_progress" }),
+          listInProgress: async () =>
+            tasksAdapter.listTasks({ status: "in_progress" }),
         };
 
     // Adapt AgentManagerV2 → DispatchAgentRuntime
@@ -391,7 +452,11 @@ export async function bootV2(
           classifyMessage: (msg: any) => {
             // Classify inbox messages as dispatchable work when they carry
             // the x-dispatch/work schema. Other messages are ignored.
-            const content = msg.content as { type?: string; schema?: string; data?: any };
+            const content = msg.content as {
+              type?: string;
+              schema?: string;
+              data?: any;
+            };
             if (content?.schema !== "x-dispatch/work") return null;
             const data = content.data;
             if (!data?.taskId) return null;
@@ -412,7 +477,7 @@ export async function bootV2(
               },
             };
           },
-        }
+        },
       );
 
       // Register the dispatcher as an agent in the inbox so it can receive messages
@@ -433,7 +498,8 @@ export async function bootV2(
           return agents
             .filter((a: any) => {
               if (a.agentId === dispatchAgentId) return false;
-              if (criteria.role && a.role && a.role !== criteria.role) return false;
+              if (criteria.role && a.role && a.role !== criteria.role)
+                return false;
               if (criteria.notBusy && a.status === "busy") return false;
               return true;
             })
@@ -447,8 +513,9 @@ export async function bootV2(
 
     // Determine dispatch mode
     const hasRouting = !!messagePort && !!roster;
-    const dispatchMode = config.dispatch.dispatchMode
-      ?? (hasRouting ? "prefer-route" as const : "spawn-only" as const);
+    const dispatchMode =
+      config.dispatch.dispatchMode ??
+      (hasRouting ? ("prefer-route" as const) : ("spawn-only" as const));
 
     taskDispatcher = createOrchestrator(source, runtime, {
       claimantId,
@@ -495,7 +562,9 @@ export async function bootV2(
 
   const healthCheckTimer = setInterval(async () => {
     try {
-      const unhealthy = controlServer.getUnhealthyAgents(UNHEALTHY_THRESHOLD_MS);
+      const unhealthy = controlServer.getUnhealthyAgents(
+        UNHEALTHY_THRESHOLD_MS,
+      );
       for (const { agentId, lastSeen } of unhealthy) {
         const agent = agentStore.getAgent(agentId);
         if (!agent || agent.state !== "running") continue;
@@ -516,7 +585,7 @@ export async function bootV2(
                   staleSinceMs: Date.now() - lastSeen,
                 },
               },
-              { importance: "high", threadTag: `health:${agentId}` }
+              { importance: "high", threadTag: `health:${agentId}` },
             );
           } catch {
             // Best effort notification
@@ -529,23 +598,25 @@ export async function bootV2(
   }, HEALTH_CHECK_INTERVAL_MS);
   healthCheckTimer.unref(); // Don't prevent process exit
 
+  // Shared mutable system reference — passed to ACP server, MAP server, API server.
+  // Components created before the sidecar (steps 9-11) receive this object.
+  // When the sidecar is created (step 13), it's attached here so all components
+  // see it via the same reference (e.g., ACP handler accessing system.mapSidecar).
+  const systemRef = {
+    agentManager,
+    agentStore,
+    inboxAdapter,
+    tasksAdapter,
+    triggerSystem,
+    controlServer,
+    roleRegistry,
+    controlSocketPath,
+  } as any;
+
   // 9. REST API server (optional)
   let apiServer: ApiServer | null = null;
   if (config.api?.enabled) {
     const { createApiServer } = await import("./api/server.js");
-    // Build a partial system reference for the API server.
-    // The full system object is returned below; we create the API server
-    // first so it can be included in the return value and shut down cleanly.
-    const systemRef = {
-      agentManager,
-      agentStore,
-      inboxAdapter,
-      tasksAdapter,
-      triggerSystem,
-      controlServer,
-      roleRegistry,
-      controlSocketPath,
-    } as any;
     apiServer = createApiServer(systemRef, {
       port: config.api.port,
       host: config.api.host,
@@ -556,30 +627,19 @@ export async function bootV2(
   // 10. ACP WebSocket server (optional)
   let acpServer: WebSocketACPServer | null = null;
   if (config.acp?.enabled) {
-    const { createWebSocketACPServer } = await import("./acp/websocket-server.js");
-    acpServer = createWebSocketACPServer(
-      // Pass a partial system ref (the full object is built below)
-      {
-        agentManager,
-        agentStore,
-        inboxAdapter,
-        tasksAdapter,
-        triggerSystem,
-        controlServer,
-        roleRegistry,
-        controlSocketPath,
-      } as any,
-      {
-        port: config.acp.port,
-        host: config.acp.host,
-        path: config.acp.path,
-      },
-    );
+    const { createWebSocketACPServer } =
+      await import("./acp/websocket-server.js");
+    acpServer = createWebSocketACPServer(systemRef, {
+      port: config.acp.port,
+      host: config.acp.host,
+      path: config.acp.path,
+    });
     await acpServer.start();
   }
 
   // 11. MAP Server (optional — accept inbound connections from TUI/clients)
-  let mapServerInstance: import("./map/types.js").MAPServerInstance | null = null;
+  let mapServerInstance: import("./map/types.js").MAPServerInstance | null =
+    null;
   if (config.mapServer?.enabled) {
     try {
       const { createMAPServerInstance } = await import("./map/server.js");
@@ -589,17 +649,7 @@ export async function bootV2(
           agentStore,
           inboxAdapter,
           tasksAdapter,
-          // Pass partial system ref for ACP-over-MAP bridge
-          system: {
-            agentManager,
-            agentStore,
-            inboxAdapter,
-            tasksAdapter,
-            triggerSystem,
-            controlServer,
-            roleRegistry,
-            controlSocketPath,
-          } as any,
+          system: systemRef,
         },
         {
           port: config.mapServer.port,
@@ -622,15 +672,20 @@ export async function bootV2(
 
   // 12. Swarmkit integrations (minimem, skill-tree, sessionlog)
   agentManager.setIntegrationConfigs({
-    minimem: config.minimem?.enabled ? config.minimem as any : undefined,
-    skilltree: config.skilltree?.enabled ? config.skilltree as any : undefined,
-    sessionlog: config.sessionlog?.enabled ? config.sessionlog as any : undefined,
+    minimem: config.minimem?.enabled ? (config.minimem as any) : undefined,
+    skilltree: config.skilltree?.enabled
+      ? (config.skilltree as any)
+      : undefined,
+    sessionlog: config.sessionlog?.enabled
+      ? (config.sessionlog as any)
+      : undefined,
   });
 
   // 12b. Skill-tree loadout compilation (if enabled)
   if (config.skilltree?.enabled) {
     try {
-      const { compileAllRoleLoadouts } = await import("./integrations/skilltree.js");
+      const { compileAllRoleLoadouts } =
+        await import("./integrations/skilltree.js");
       // Gather roles from the role registry
       const registeredRoles = roleRegistry.listRoles();
       const roleNames = registeredRoles.map((r) => r.name);
@@ -653,8 +708,27 @@ export async function bootV2(
   if (config.map?.enabled && config.map.server) {
     try {
       const { createMAPSidecar } = await import("./map/sidecar.js");
+      // If a workspace manager is present, pull out its GitCascadeAdapter
+      // so the sidecar can forward cascade events to the hub.
+      const wsMgr = config.workspaceManager as
+        | {
+            getGitCascadeAdapter?: () =>
+              | import("./workspace/git-cascade-adapter.js").GitCascadeAdapter
+              | undefined;
+          }
+        | undefined;
+      const gitCascadeAdapter = wsMgr?.getGitCascadeAdapter?.();
       mapSidecar = createMAPSidecar(
-        { agentManager, agentStore, inboxAdapter, tasksAdapter },
+        {
+          agentManager,
+          agentStore,
+          inboxAdapter,
+          tasksAdapter,
+          getLocalMapId: mapServerInstance
+            ? (id: string) => mapServerInstance!.getLocalMapId(id)
+            : undefined,
+          gitCascadeAdapter,
+        },
         {
           server: config.map.server,
           token: config.map.token,
@@ -662,6 +736,7 @@ export async function bootV2(
           systemId: config.map.systemId,
           credential: config.map.credential,
           agentName: config.map.agentName,
+          swarmId: config.map.swarmId,
           trajectorySyncLevel: config.map.trajectorySyncLevel,
           reconnectIntervalMs: config.map.reconnectIntervalMs,
           reconnection: config.map.reconnection,
@@ -681,6 +756,8 @@ export async function bootV2(
           });
         });
       }
+      // Attach to shared system ref so ACP/MAP handlers can access it
+      systemRef.mapSidecar = mapSidecar;
     } catch (err) {
       // Non-fatal — MAP hub connectivity is optional
       console.warn(
@@ -704,7 +781,8 @@ export async function bootV2(
     ...(acpServer ? { acpServer } : {}),
     ...(mapServerInstance ? { mapServerInstance } : {}),
     ...(mapSidecar ? { mapSidecar } : {}),
-    _sessionlogSyncLevel: config.sessionlog?.sync ?? config.map?.trajectorySyncLevel ?? "full",
+    _sessionlogSyncLevel:
+      config.sessionlog?.sync ?? config.map?.trajectorySyncLevel ?? "full",
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);

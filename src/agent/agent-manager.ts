@@ -131,6 +131,12 @@ export interface AgentManager {
    */
   listHeadManagers(): Agent[];
 
+  /**
+   * Look up the SpawnedAgent shape for any agent (any role) that's running
+   * AND has a live session in this process. Returns null otherwise.
+   */
+  getActiveAgentSession(agentId: AgentId): SpawnedAgent | null;
+
   // ── Session Interaction ────────────────────────────────────────
 
   /**
@@ -295,6 +301,14 @@ export interface AgentManager {
    * Enables session-end checkpoint emission on terminate.
    */
   setSidecar(sidecar: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null): void;
+
+  /**
+   * Set a TopologyPolicy for workspace allocation decisions.
+   * When set, AgentManagerV2 delegates `createWorkspaceForRole` to the policy
+   * before falling back to role-name dispatch. Set by boot-v2 when team YAML
+   * contains `macro_agent.workspace`.
+   */
+  setTopologyPolicy(policy: import('../workspace/topology/types.js').TopologyPolicy | null): void;
 
   // ── Cleanup ────────────────────────────────────────────────────
 

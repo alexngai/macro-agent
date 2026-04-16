@@ -116,6 +116,29 @@ export interface AgentManagerV2Config {
   serverToken?: string;
   /** Control socket path for MCP subprocess lifecycle RPC */
   controlSocketPath?: string;
+  /**
+   * Default opentasks resource ID hosted on the OpenHive hub. When set,
+   * spawn paths build `taskRef = { resource_id: <this>, node_id: task_id }`
+   * automatically from `SpawnAgentOptions.task_id` (for any spawn where
+   * `resolveTaskRef` returned undefined AND the caller didn't supply an
+   * explicit `taskRef`).
+   *
+   * Operators set this once at swarm registration for the common
+   * single-graph case. Multi-graph deployments should use `resolveTaskRef`
+   * instead.
+   */
+  taskResourceId?: string;
+
+  /**
+   * Multi-graph resolver. Called at every spawn; return a `TaskRef` to set
+   * the binding or `undefined` to fall through to the `taskResourceId`
+   * default. Explicit `SpawnAgentOptions.taskRef` always wins over both.
+   *
+   * Keep cheap — runs per-spawn.
+   */
+  resolveTaskRef?: (
+    spawnOptions: SpawnAgentOptions
+  ) => import("git-cascade/events").TaskRef | undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -139,6 +162,8 @@ export function createAgentManagerV2(
     serverToken,
     agentTokenManager,
     controlSocketPath,
+    taskResourceId,
+    resolveTaskRef,
   } = config;
 
   // In-memory state
@@ -157,6 +182,12 @@ export function createAgentManagerV2(
   const skillLoadouts = new Map<string, string>();
   // MAP sidecar reference for trajectory reporting (set via setSidecar)
   let sidecarRef: { connected: boolean; reportCheckpoint(cp: any): Promise<any> } | null = null;
+
+  // TopologyPolicy for workspace allocation (Phase 3+); set via setTopologyPolicy.
+  // When null, createWorkspaceForRole falls back to legacy role-name dispatch.
+  let topologyPolicy:
+    | import('../workspace/topology/types.js').TopologyPolicy
+    | null = null;
 
   // ── Helpers ──────────────────────────────────────────────────
 
@@ -247,6 +278,109 @@ export function createAgentManagerV2(
 
   // ── Workspace Helper ─────────────────────────────────────────
 
+  /**
+   * Execute a TopologyPolicy decision against the WorkspaceManager.
+   *
+   * Translates declarative `WorkspaceDecision` into concrete workspace
+   * allocations. Returns a `Workspace` compatible with the legacy shape
+   * so the rest of AgentManagerV2 doesn't need to change.
+   */
+  async function executeWorkspaceDecision(
+    agentId: AgentId,
+    decision: import('../workspace/topology/types.js').WorkspaceDecision,
+    role?: string,
+    spawnOptions?: SpawnAgentOptions
+  ): Promise<Workspace | undefined> {
+    if (!workspaceManager) return undefined;
+
+    switch (decision.kind) {
+      case 'none':
+      case 'share-parent-cwd':
+        return undefined;
+
+      case 'share-with-agent': {
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          sharedWithAgent: decision.agentId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: worktree.currentStream
+            ? `stream/${worktree.currentStream}`
+            : 'unknown',
+          streamId: worktree.currentStream ?? '',
+          role: 'v3', // V3 path — bypass legacy worker task/merge-queue flows
+          createdAt: worktree.createdAt,
+        };
+      }
+
+      case 'attach-to-stream': {
+        // Record even if no worktree — the topology needs the stream↔role
+        // mapping for event-driven features like on_parent_advanced.
+        const attachPolicy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        attachPolicy.recordAgentStream?.(agentId, decision.streamId, role);
+
+        if (!decision.allocateWorktree) {
+          return undefined;
+        }
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          streamId: decision.streamId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: `stream/${decision.streamId}`,
+          streamId: decision.streamId,
+          role: 'v3', // V3 path — attach-to-team-root
+          createdAt: worktree.createdAt,
+        };
+      }
+
+      case 'new-stream': {
+        // If the spawning agent has a taskRef and the streamSpec doesn't
+        // already carry one, weave it into metadata so the resulting stream
+        // binds to the OpenTasks node. Explicit streamSpec.metadata.task_ref
+        // wins.
+        const taskRef = spawnOptions?.taskRef;
+        const existingMeta = decision.streamSpec.metadata as
+          | Record<string, unknown>
+          | undefined;
+        const streamSpec = taskRef && !existingMeta?.task_ref
+          ? {
+              ...decision.streamSpec,
+              metadata: { ...(existingMeta ?? {}), task_ref: taskRef },
+            }
+          : decision.streamSpec;
+        const streamId = workspaceManager.createStreamV3(streamSpec);
+        // Record the mapping in the topology if it supports it (for share-with lookup).
+        const policy = topologyPolicy as unknown as {
+          recordAgentStream?: (a: string, s: string, role?: string) => void;
+        };
+        policy.recordAgentStream?.(agentId, streamId, role);
+
+        if (!decision.allocateWorktree) {
+          return undefined;
+        }
+        const worktree = workspaceManager.allocateWorktree({
+          agentId,
+          streamId,
+        });
+        return {
+          agentId,
+          path: worktree.path,
+          branch: `stream/${streamId}`,
+          streamId,
+          role: 'v3', // V3 path — new-stream
+          createdAt: worktree.createdAt,
+        };
+      }
+    }
+  }
+
   async function createWorkspaceForRole(
     agentId: AgentId,
     role: string,
@@ -254,56 +388,92 @@ export function createAgentManagerV2(
   ): Promise<Workspace | undefined> {
     if (!workspaceManager) return undefined;
 
+    // V3 path — TopologyPolicy-driven. Set by boot-v2 when team YAML has
+    // `macro_agent.workspace`. When set, this takes precedence over the legacy
+    // capability/role-name dispatch below.
+    if (topologyPolicy) {
+      const decision = await topologyPolicy.onAgentSpawn({
+        agentId,
+        role,
+        parentAgentId: options.parent ?? undefined,
+        parentStreamId: options.streamId,
+        teamStreamId: (() => {
+          const stream = (
+            topologyPolicy as { getAgentStream?: (a: AgentId) => string | null }
+          ).getAgentStream?.(agentId);
+          return stream ?? undefined;
+        })(),
+        workspaceManager,
+        getAgentByRole: (r: string) => {
+          for (const [aid, ws] of agentWorkspaces) {
+            const rec = agentStore.getAgent(aid);
+            if (rec?.role === r) return aid;
+          }
+          return null;
+        },
+      });
+      return executeWorkspaceDecision(agentId, decision, role, options);
+    }
+
+    // Capability-based dispatch for programmatic callers that don't use
+    // team YAML. This is the supported path for libraries that construct
+    // WorkspaceManager + GitCascadeAdapter directly and spawn agents with
+    // explicit `capabilities` + `streamId` arguments. It coexists with the
+    // V3 topology path above.
+    return capabilityBasedDispatch(agentId, options, workspaceManager);
+  }
+
+  /**
+   * Capability-based workspace allocation for programmatic callers.
+   *
+   * Matches on `workspace.stream` / `workspace.integrate` / `workspace.worktree`
+   * capabilities + corresponding streamId/streamConfig args. Delegates to the
+   * role-shaped WorkspaceManager methods (createWorkerWorkspace,
+   * createIntegratorWorkspace, createCoordinatorWorkspace).
+   *
+   * Not used by team-YAML-driven teams — those go through TopologyPolicy above.
+   */
+  async function capabilityBasedDispatch(
+    agentId: AgentId,
+    options: SpawnAgentOptions,
+    ws: WorkspaceManager
+  ): Promise<Workspace | undefined> {
     const capabilities = options.capabilities ?? [];
     const streamId = options.streamId;
-    const streamConfig = options.streamConfig;
-    const dataplaneTaskId = options.dataplaneTaskId;
+    // Merge taskRef (if set at spawn time) into streamConfig.metadata so that
+    // adapter.createStream → x-cascade/stream.opened carries the binding to
+    // OpenTasks. Explicit streamConfig.metadata.task_ref wins if already set.
+    const streamConfig = options.streamConfig
+      ? options.taskRef &&
+        !(options.streamConfig.metadata &&
+          (options.streamConfig.metadata as Record<string, unknown>).task_ref)
+        ? {
+            ...options.streamConfig,
+            metadata: {
+              ...(options.streamConfig.metadata ?? {}),
+              task_ref: options.taskRef,
+            },
+          }
+        : options.streamConfig
+      : undefined;
+    const gitCascadeTaskId = options.gitCascadeTaskId;
 
-    // Capability-based dispatch
     if (capabilities.includes("workspace.stream") && streamConfig) {
-      const newStreamId = workspaceManager.createIntegrationStream(
-        agentId,
-        streamConfig
-      );
-      return workspaceManager.createCoordinatorWorkspace(agentId, newStreamId);
+      const newStreamId = ws.createIntegrationStream(agentId, streamConfig);
+      return ws.createCoordinatorWorkspace(agentId, newStreamId);
     }
 
     if (capabilities.includes("workspace.integrate") && streamId) {
-      return workspaceManager.createIntegratorWorkspace(agentId, streamId);
+      return ws.createIntegratorWorkspace(agentId, streamId);
     }
 
     if (capabilities.includes("workspace.worktree") && streamId) {
-      const taskId = dataplaneTaskId ?? agentId;
-      return workspaceManager.createWorkerWorkspace(agentId, taskId, streamId);
+      const taskId = gitCascadeTaskId ?? agentId;
+      return ws.createWorkerWorkspace(agentId, taskId, streamId);
     }
 
-    // Role-name fallback
-    switch (role) {
-      case "coordinator":
-        if (streamConfig) {
-          const sid = workspaceManager.createIntegrationStream(
-            agentId,
-            streamConfig
-          );
-          return workspaceManager.createCoordinatorWorkspace(agentId, sid);
-        }
-        return undefined;
-      case "integrator":
-        if (streamId) {
-          return workspaceManager.createIntegratorWorkspace(agentId, streamId);
-        }
-        return undefined;
-      case "worker":
-      case "worker.resolver": {
-        if (streamId) {
-          const tid = dataplaneTaskId ?? agentId;
-          return workspaceManager.createWorkerWorkspace(agentId, tid, streamId);
-        }
-        return undefined;
-      }
-      default:
-        return undefined;
-    }
+    // No matching capability — agent inherits parent cwd (no workspace)
+    return undefined;
   }
 
   // ── Core Lifecycle ───────────────────────────────────────────
@@ -317,9 +487,39 @@ export function createAgentManagerV2(
     }
 
     // Apply spawn interceptor (set by TeamRuntime)
-    const options = spawnInterceptor
+    const interceptedOptions = spawnInterceptor
       ? await spawnInterceptor(rawOptions)
       : rawOptions;
+
+    // Resolve taskRef with three-level precedence:
+    //   1. Explicit `options.taskRef` (caller knows exactly what graph).
+    //   2. `resolveTaskRef(opts)` (multi-graph deployments decide per spawn).
+    //   3. `taskResourceId` + `options.task_id` (single-graph default).
+    // If none resolves, spawn proceeds with no taskRef — cascade events
+    // land without a task binding (hub back-fills from first commit that
+    // carries one, if any).
+    let resolvedTaskRef = interceptedOptions.taskRef;
+    if (!resolvedTaskRef && resolveTaskRef) {
+      try {
+        resolvedTaskRef = resolveTaskRef(interceptedOptions);
+      } catch (err) {
+        // Resolver failures must not block spawn. Log + fall through.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[agent-manager-v2] resolveTaskRef threw; falling back to taskResourceId default:",
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+    if (!resolvedTaskRef && taskResourceId && interceptedOptions.task_id) {
+      resolvedTaskRef = {
+        resource_id: taskResourceId,
+        node_id: String(interceptedOptions.task_id),
+      };
+    }
+    const options = resolvedTaskRef === interceptedOptions.taskRef
+      ? interceptedOptions
+      : { ...interceptedOptions, taskRef: resolvedTaskRef };
 
     const {
       task,
@@ -404,7 +604,9 @@ export function createAgentManagerV2(
       systemPrompt += `\n\n${interactionPatterns.join("\n\n")}`;
     }
 
-    // Persist agent in store
+    // Persist agent in store. Stash taskRef in metadata so done()'s
+    // lifecycle context can read it without separate plumbing — this is the
+    // path that makes per-commit task_ref binding work end-to-end.
     const now = Date.now() as Timestamp;
     const agentRecord: AgentRecord = {
       id: agentId,
@@ -422,7 +624,7 @@ export function createAgentManagerV2(
       created_at: now,
       started_at: now,
       config: agentConfig as Record<string, unknown>,
-      metadata: {},
+      metadata: options.taskRef ? { task_ref: options.taskRef } : {},
     };
     agentStore.putAgent(agentRecord);
 
@@ -456,13 +658,13 @@ export function createAgentManagerV2(
       if (workspace) {
         agentWorkspaces.set(agentId, workspace);
 
-        // Create and claim dataplane task for workers
+        // Create and claim git-cascade task for workers
         if (
           workspace.role === "worker" &&
           workspace.streamId &&
           workspaceManager
         ) {
-          const dpTaskId = options.dataplaneTaskId ?? agentId;
+          const dpTaskId = options.gitCascadeTaskId ?? agentId;
           workspaceManager.createTask(workspace.streamId, {
             title: task ?? `Task for ${agentId}`,
           });
@@ -588,9 +790,11 @@ export function createAgentManagerV2(
         created_at: now,
       });
 
-      // Update agent with provider session ID
+      // Update agent with provider session ID. Merge with existing metadata
+      // so fields set at spawn time (e.g. task_ref) aren't clobbered.
+      const existingMeta = agentStore.getAgent(agentId)?.metadata ?? {};
       agentStore.updateAgent(agentId, {
-        metadata: { provider_session_id: session.id },
+        metadata: { ...existingMeta, provider_session_id: session.id },
       });
 
       // Register agent in inbox
@@ -599,20 +803,6 @@ export function createAgentManagerV2(
         role: role ?? "worker",
         scope: team_instance ?? "default",
       });
-
-      // Create task in opentasks
-      if (tasksAdapter.connected) {
-        try {
-          const otTaskId = await tasksAdapter.createTask({
-            title: task ?? `Task for ${agentId}`,
-            assignee: agentId,
-            tags: role ? [role] : [],
-          });
-          agentStore.updateAgent(agentId, { task_id: otTaskId });
-        } catch {
-          // Non-fatal — opentasks may not be available
-        }
-      }
 
       // Track active session
       const activeSession: ActiveSession = {
@@ -689,7 +879,16 @@ export function createAgentManagerV2(
       healthCheckService.stopForCoordinator(agentId);
     }
 
-    // Submit merge request if worker completed with workspace
+    // Land the worker's work if completed with a workspace.
+    //
+    // V3 path (preferred): look up the role's YAML landing strategy via
+    // TopologyPolicy.getRoleConfig and dispatch through
+    // WorkspaceManager.land(). This fires cascade events (stream.merged or
+    // queue.added) so the hub sees the work. Landing = 'none' short-circuits.
+    //
+    // Legacy fallback: if no TopologyPolicy is wired or it can't resolve a
+    // landing for this role, submit to the legacy MergeQueue as before.
+    // Keeps pre-V3 programmatic callers + tests that bypass YAML working.
     if (
       workspaceManager &&
       agentWorkspaces.has(agentId) &&
@@ -697,18 +896,45 @@ export function createAgentManagerV2(
     ) {
       const ws = agentWorkspaces.get(agentId)!;
       if (ws.role === "worker" && ws.streamId) {
-        try {
-          const mergeQueue = workspaceManager.getMergeQueue();
-          if (mergeQueue) {
-            mergeQueue.submit({
+        const roleConfig = topologyPolicy?.getRoleConfig?.(record.role);
+        const yamlLandingName = roleConfig?.landing;
+        const usingV3Landing =
+          typeof yamlLandingName === "string" && yamlLandingName.length > 0;
+
+        if (usingV3Landing) {
+          try {
+            const taskRef = (record.metadata as Record<string, unknown> | undefined)
+              ?.task_ref as { resource_id: string; node_id: string } | undefined;
+            await workspaceManager.land({
+              agentId,
               streamId: ws.streamId,
-              workerBranch: ws.branch,
-              taskId: record.task_id ?? agentId,
-              workerAgentId: agentId,
+              sourceWorktree: ws.path,
+              strategyName: yamlLandingName,
+              strategyConfig: roleConfig?.landing_config,
+              taskRef,
+              // Dispatcher overwrites this with `this`; placeholder keeps the
+              // type satisfied without a cast.
+              workspaceManager,
             });
+          } catch {
+            // Non-fatal landing failure — agent still terminates; conflicts
+            // and strategy errors surface via WorkspaceEvent emission and
+            // the strategy's own logs.
           }
-        } catch {
-          // Non-fatal merge queue submission failure
+        } else {
+          try {
+            const mergeQueue = workspaceManager.getMergeQueue();
+            if (mergeQueue) {
+              mergeQueue.submit({
+                streamId: ws.streamId,
+                workerBranch: ws.branch,
+                taskId: record.task_id ?? agentId,
+                workerAgentId: agentId,
+              });
+            }
+          } catch {
+            // Non-fatal merge queue submission failure
+          }
         }
       }
     }
@@ -726,21 +952,6 @@ export function createAgentManagerV2(
     // Revoke auth token
     if (agentTokenManager) {
       agentTokenManager.revokeToken(agentId);
-    }
-
-    // Transition task in opentasks
-    if (record.task_id && tasksAdapter.connected) {
-      try {
-        const action =
-          reason === "completed"
-            ? "complete"
-            : reason === "failed"
-              ? "fail"
-              : "block";
-        await tasksAdapter.transitionTask(record.task_id, action as any);
-      } catch {
-        // Non-fatal task transition failure
-      }
     }
 
     // Notify parent via inbox
@@ -812,11 +1023,16 @@ export function createAgentManagerV2(
               .map((r) => agentRecordToAgent(r)),
           terminate: (id: AgentId, r: AgentStopReason) => terminate(id, r),
         };
+        const parentTaskRef = (record.metadata as Record<string, unknown> | undefined)
+          ?.task_ref as { resource_id: string; node_id: string } | undefined;
         await terminateWithChangeConsolidation(
           child.id as AgentId,
           agentId,
           cascadeAdapter,
-          wsProvider
+          wsProvider,
+          undefined,
+          workspaceManager ?? undefined,
+          parentTaskRef
         );
       }
     }
@@ -1163,12 +1379,21 @@ export function createAgentManagerV2(
   async function getOrCreateHeadManager(
     options: HeadManagerOptions
   ): Promise<SpawnedAgent> {
-    // Check for existing head manager
+    // Check for an existing head manager matching this cwd that ALSO has a
+    // live session in this process. The activeSessions check has to be inside
+    // the predicate (not after .find) — the agentStore is persistent across
+    // process restarts, so without this filter we'd match stale "running"
+    // records from previous processes whose sessions are gone, then fall
+    // through to spawn() and create a duplicate coordinator.
     const existing = agentStore
       .listAgents({ parent_id: null, state: "running" })
-      .find((a) => a.cwd === options.cwd);
+      .find(
+        (a) =>
+          a.cwd === options.cwd &&
+          activeSessions.has(a.id as AgentId),
+      );
 
-    if (existing && activeSessions.has(existing.id as AgentId)) {
+    if (existing) {
       const sessionEntry = activeSessions.get(existing.id as AgentId)!;
       const storedSession = agentStore.getSession(existing.id as AgentId);
       return {
@@ -1194,6 +1419,30 @@ export function createAgentManagerV2(
     return agentStore
       .listAgents({ parent_id: null })
       .map(agentRecordToAgent);
+  }
+
+  /**
+   * Look up the spawned-agent shape for any agent that's still alive in this
+   * process (any role, not just coordinators). Returns null if the agent
+   * doesn't exist, isn't running, or has no live session in `activeSessions`.
+   *
+   * Used by the ACP layer to bind a session to a specific agent when the MAP
+   * stream targets one explicitly — preserving the routing intent that
+   * cwd-based head-manager lookup would otherwise lose in multi-coordinator
+   * scenarios.
+   */
+  function getActiveAgentSession(agentId: AgentId): SpawnedAgent | null {
+    if (!activeSessions.has(agentId)) return null;
+    const record = agentStore.getAgent(agentId);
+    if (!record || record.state !== "running") return null;
+    const sessionEntry = activeSessions.get(agentId)!;
+    const storedSession = agentStore.getSession(agentId);
+    return {
+      id: agentId,
+      session_id: storedSession?.session_id ?? sessionEntry.session.id ?? "",
+      agent: agentRecordToAgent(record),
+      session: sessionEntry.session,
+    };
   }
 
   // ── Session Interaction ──────────────────────────────────────
@@ -1409,6 +1658,12 @@ export function createAgentManagerV2(
     sidecarRef = sidecar;
   }
 
+  function setTopologyPolicyFn(
+    policy: import('../workspace/topology/types.js').TopologyPolicy | null
+  ): void {
+    topologyPolicy = policy;
+  }
+
   function setMailServices(): void {
     // No-op: agent-inbox handles conversation tracking
   }
@@ -1451,6 +1706,7 @@ export function createAgentManagerV2(
     getHierarchy,
     getOrCreateHeadManager,
     listHeadManagers,
+    getActiveAgentSession,
     prompt,
     promptUntilDone,
     getSession,
@@ -1470,6 +1726,7 @@ export function createAgentManagerV2(
     setIntegrationConfigs,
     setSkillLoadout,
     setSidecar,
+    setTopologyPolicy: setTopologyPolicyFn,
     setMailServices,
     close,
   } as AgentManager;

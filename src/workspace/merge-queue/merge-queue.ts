@@ -4,6 +4,13 @@
  * Coordinates merging of parallel worker branches into the integration branch.
  * Workers submit completed work; Integrator processes sequentially.
  *
+ * @deprecated Since v3 workspace redesign. Duplicates git-cascade's built-in
+ *   `mergeQueue` module. New code uses `GitCascadeAdapter.addToMergeQueue`
+ *   via `LandingStrategy` ("queue-to-branch"). Kept to preserve the legacy
+ *   role-name dispatch path until teams migrate to `macro_agent.workspace`
+ *   YAML. Scheduled for removal; see `docs/workspace-redesign-plan.md`
+ *   Phases 6/8/9.
+ *
  * @module workspace/merge-queue/merge-queue
  * @implements [[s-bcqm]] Merge Queue section
  */
@@ -99,6 +106,9 @@ export interface MergeQueueConfig {
  * MergeQueue implementation.
  *
  * Manages merge requests for coordinating parallel worker merges.
+ *
+ * @deprecated Use git-cascade's built-in queue via
+ *   `GitCascadeAdapter.addToMergeQueue` / `getNextToMerge`. See module doc.
  */
 export class MergeQueue implements MergeQueueInterface {
   private readonly db: Database.Database;

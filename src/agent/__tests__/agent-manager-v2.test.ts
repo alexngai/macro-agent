@@ -135,19 +135,13 @@ describe("AgentManagerV2", () => {
       );
     });
 
-    it("should create task in opentasks", async () => {
-      const result = await manager.spawn({
+    it("should not create task in opentasks on spawn", async () => {
+      await manager.spawn({
         task: "Implement feature",
         role: "worker",
       });
 
-      expect(tasksAdapter.createTask).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Implement feature",
-          assignee: result.id,
-          tags: ["worker"],
-        })
-      );
+      expect(tasksAdapter.createTask).not.toHaveBeenCalled();
     });
 
     it("should validate parent exists", async () => {
@@ -269,7 +263,7 @@ describe("AgentManagerV2", () => {
       expect(inboxAdapter.deregisterAgent).toHaveBeenCalledWith(spawned.id);
     });
 
-    it("should transition task in opentasks", async () => {
+    it("should not transition task in opentasks on terminate", async () => {
       const spawned = await manager.spawn({
         task: "Test",
         role: "worker",
@@ -277,7 +271,7 @@ describe("AgentManagerV2", () => {
 
       await manager.terminate(spawned.id, "completed");
 
-      expect(tasksAdapter.transitionTask).toHaveBeenCalled();
+      expect(tasksAdapter.transitionTask).not.toHaveBeenCalled();
     });
 
     it("should notify parent via inbox", async () => {
@@ -455,6 +449,72 @@ describe("AgentManagerV2", () => {
       });
       const session = manager.getSession(spawned.id);
       expect(session).not.toBeNull();
+    });
+  });
+
+  // ── getOrCreateHeadManager() ───────────────────────────────
+
+  describe("getOrCreateHeadManager()", () => {
+    it("reuses an existing head manager matching the requested cwd", async () => {
+      const first = await manager.getOrCreateHeadManager({ cwd: "/tmp/proj-a" });
+      const second = await manager.getOrCreateHeadManager({ cwd: "/tmp/proj-a" });
+      expect(second.id).toBe(first.id);
+    });
+
+    it("spawns a distinct head manager for a different cwd", async () => {
+      const a = await manager.getOrCreateHeadManager({ cwd: "/tmp/proj-a" });
+      const b = await manager.getOrCreateHeadManager({ cwd: "/tmp/proj-b" });
+      expect(b.id).not.toBe(a.id);
+    });
+
+    it("getActiveAgentSession returns null for unknown agents", () => {
+      expect(manager.getActiveAgentSession("never-spawned" as AgentId)).toBeNull();
+    });
+
+    it("getActiveAgentSession returns the spawned shape for any role with a live session", async () => {
+      // Spawn a non-coordinator (worker) so we exercise the role-agnostic path
+      const worker = await manager.spawn({ task: "Test work", role: "worker" });
+
+      const session = manager.getActiveAgentSession(worker.id as AgentId);
+      expect(session).not.toBeNull();
+      expect(session!.id).toBe(worker.id);
+      expect(session!.agent.role).toBe("worker");
+    });
+
+    it("getActiveAgentSession returns null after the agent is terminated", async () => {
+      const worker = await manager.spawn({ task: "Test work", role: "worker" });
+      await manager.terminate(worker.id as AgentId, "completed");
+      expect(manager.getActiveAgentSession(worker.id as AgentId)).toBeNull();
+    });
+
+    it("ignores stale 'running' store records whose session isn't live in this process", async () => {
+      // Simulate a crashed prior process: a coordinator record exists in the
+      // store with state='running' and parent_id=null, but has no matching
+      // activeSessions entry (the session was lost when the process died).
+      // Without the activeSessions filter in the predicate, getOrCreate would
+      // erroneously reuse this stale record and skip spawning.
+      agentStore.putAgent({
+        id: "stale-coord" as AgentId,
+        name: "stale-coord",
+        role: "coordinator",
+        state: "running",
+        parent_id: null,
+        lineage: [],
+        team: null,
+        scope: "default",
+        task: "",
+        task_id: "",
+        cwd: "/tmp/stale-proj",
+        capabilities: [],
+        created_at: Date.now() as any,
+        started_at: Date.now() as any,
+        config: {},
+        metadata: {},
+      });
+
+      const result = await manager.getOrCreateHeadManager({ cwd: "/tmp/stale-proj" });
+      expect(result.id).not.toBe("stale-coord");
+      expect(manager.hasActiveSession(result.id as AgentId)).toBe(true);
     });
   });
 
