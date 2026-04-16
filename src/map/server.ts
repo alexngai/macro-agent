@@ -74,6 +74,14 @@ export function createMAPServerInstance(
   const clientWebSockets = new Map<string, WebSocket>(); // participant/agent ID → WebSocket
   // Track subscription IDs by client agent ID for ACP response delivery
   const clientSubscriptions = new Map<string, string[]>(); // agent ID → subscription IDs
+  /**
+   * Per-subscription monotonic event counter. The MAP SDK's Subscription
+   * checks `sequenceNumber !== lastSequenceNumber + 1` and warns on gaps —
+   * using `Date.now()` (millisecond timestamp) breaks that assumption since
+   * each event becomes a "gap". Track a per-subscription counter starting
+   * at 1 and increment per event.
+   */
+  const subscriptionSequence = new Map<string, number>(); // subscription ID → next sequence number
   // Track original ws.send for each WebSocket (before interception)
   const originalSends = new Map<WebSocket, Function>();
 
@@ -288,15 +296,21 @@ export function createMAPServerInstance(
 
             // Send as subscription event notification (what ACPStreamConnection expects).
             // The _pushEvent method expects: { subscriptionId, sequenceNumber, eventId, timestamp, event }
+            //
+            // sequenceNumber must be a per-subscription monotonic counter that
+            // increments by exactly 1 — the SDK warns on any gap. Don't use
+            // Date.now() here (breaks the contract on every event).
             for (const subId of subIds) {
               const event = rawEvent.params?.event ?? rawEvent;
               const eventId = event.id ?? `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              const nextSeq = (subscriptionSequence.get(subId) ?? 0) + 1;
+              subscriptionSequence.set(subId, nextSeq);
               const notification = JSON.stringify({
                 jsonrpc: "2.0",
                 method: "map/event",
                 params: {
                   subscriptionId: subId,
-                  sequenceNumber: Date.now(),
+                  sequenceNumber: nextSeq,
                   eventId,
                   timestamp: Date.now(),
                   event,
@@ -413,6 +427,32 @@ export function createMAPServerInstance(
           return originalSend(data, ...args);
         } as any;
 
+        // Observe incoming messages so we drop subscription IDs from our
+        // routing array when the client unsubscribes. Without this, closed
+        // ACP streams keep receiving events ("MAP: Event for unknown
+        // subscription" warnings on the client). We don't intercept the
+        // SDK's processing — this listener runs alongside it.
+        ws.on("message", (data: any) => {
+          try {
+            const text = typeof data === "string"
+              ? data
+              : Buffer.isBuffer(data)
+                ? data.toString("utf-8")
+                : String(data);
+            const msg = JSON.parse(text);
+            if (msg?.method === "map/unsubscribe") {
+              const subId = msg?.params?.subscriptionId;
+              if (typeof subId === "string") {
+                const idx = subscriptionIds.indexOf(subId);
+                if (idx >= 0) subscriptionIds.splice(idx, 1);
+                subscriptionSequence.delete(subId);
+              }
+            }
+          } catch {
+            // Non-JSON or parse failure — ignore
+          }
+        });
+
         const stream = websocketStream(ws as unknown as globalThis.WebSocket);
         const router = mapServer.accept(stream, {
           role: "client",
@@ -422,6 +462,11 @@ export function createMAPServerInstance(
 
         ws.on("close", () => {
           connectionCount--;
+          // Clear sequence counters for any subscriptions belonging to this
+          // connection. Use a copy of subscriptionIds since we don't mutate it.
+          for (const subId of subscriptionIds) {
+            subscriptionSequence.delete(subId);
+          }
           if (clientAgentId) {
             clientWebSockets.delete(clientAgentId);
             clientSubscriptions.delete(clientAgentId);
