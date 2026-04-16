@@ -294,11 +294,19 @@ export function createMAPSidecar(
       trajectoryReporter,
     });
 
-    // 5. Cascade Bridge (optional — only when a GitCascadeAdapter is available)
+    // 5. Cascade Bridge + Action Handler (optional — only when a GitCascadeAdapter is available)
     if (gitCascadeAdapter) {
       const { createCascadeBridge } = await import("./cascade-bridge.js");
       const cascadeBridge = createCascadeBridge(connection, gitCascadeAdapter);
-      cascadeBridgeCleanup = cascadeBridge.dispose;
+
+      // 5b. Inbound action handler — receives x-cascade/request.* from hub
+      const { setupCascadeActionHandlers } = await import("./cascade-action-handler.js");
+      const actionCleanup = setupCascadeActionHandlers(connection, gitCascadeAdapter);
+
+      cascadeBridgeCleanup = () => {
+        cascadeBridge.dispose();
+        actionCleanup();
+      };
     }
   }
 
