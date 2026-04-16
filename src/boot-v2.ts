@@ -99,7 +99,13 @@ export interface BootV2Config {
   };
 
   /** MAP server config (accept inbound connections from TUI/clients) */
-  mapServer?: { enabled?: boolean; port?: number; host?: string; path?: string; name?: string };
+  mapServer?: {
+    enabled?: boolean;
+    port?: number;
+    host?: string;
+    path?: string;
+    name?: string;
+  };
 
   /** MAP sidecar config (connect to OpenHive hub) */
   map?: {
@@ -156,7 +162,7 @@ export interface BootV2Config {
      *   }
      */
     resolveTaskRef?: (
-      spawnOptions: import("./agent/types.js").SpawnAgentOptions
+      spawnOptions: import("./agent/types.js").SpawnAgentOptions,
     ) => import("git-cascade/events").TaskRef | undefined;
 
     /**
@@ -170,15 +176,15 @@ export interface BootV2Config {
   /** minimem (agent memory) — registers as MCP server for all agents */
   minimem?: {
     enabled?: boolean;
-    dir?: string;          // default: ".swarm/minimem/"
-    provider?: string;     // "auto" | "openai" | "gemini" | "local"
-    global?: boolean;      // also search ~/.minimem
+    dir?: string; // default: ".swarm/minimem/"
+    provider?: string; // "auto" | "openai" | "gemini" | "local"
+    global?: boolean; // also search ~/.minimem
   };
 
   /** skill-tree (per-role skills) — compiles loadouts at team start, injects into prompts */
   skilltree?: {
     enabled?: boolean;
-    basePath?: string;     // default: ".swarm/skill-tree/"
+    basePath?: string; // default: ".swarm/skill-tree/"
     defaultProfile?: string;
   };
 
@@ -192,6 +198,32 @@ export interface BootV2Config {
   mesh?: {
     enabled?: boolean;
     peerId?: string;
+  };
+
+  /** Task dispatch config — opt-in autonomous task dispatch mode */
+  dispatch?: {
+    enabled?: boolean;
+    pollIntervalMs?: number;
+    maxConcurrent?: number;
+    defaultRole?: string;
+    tags?: string[];
+    maxRetries?: number;
+    retryBaseDelayMs?: number;
+    retryMaxDelayMs?: number;
+    reconcile?: {
+      enabled?: boolean;
+      intervalMs?: number;
+      stallTimeoutMs?: number;
+    };
+    eligibility?: import("swarm-dispatch").EligibilityConfig;
+    /** Dispatch mode: route-only, spawn-only, prefer-route, prefer-spawn. Default: prefer-route when inbox available, spawn-only otherwise. */
+    dispatchMode?: import("swarm-dispatch").DispatchMode;
+    /** Enable mail-based work routing via agent-inbox (default: true when dispatch enabled). */
+    enableMailRouting?: boolean;
+    /** Enable roster-based agent discovery for route-first dispatch (default: true when dispatch enabled). */
+    enableRoster?: boolean;
+    /** Continuation config. */
+    continuation?: { delayMs?: number; maxTurns?: number };
   };
 }
 
@@ -224,6 +256,9 @@ export interface MacroAgentSystemV2 {
   /** Control socket path (for MCP subprocess connection) */
   controlSocketPath: string;
 
+  /** Task dispatcher (if dispatch mode enabled) */
+  taskDispatcher?: import("swarm-dispatch").TaskDispatcher;
+
   /** REST API server (if enabled) */
   apiServer?: ApiServer;
 
@@ -248,11 +283,10 @@ export interface MacroAgentSystemV2 {
 // =============================================================================
 
 export async function bootV2(
-  config: BootV2Config = {}
+  config: BootV2Config = {},
 ): Promise<MacroAgentSystemV2> {
   const cwd = config.cwd ?? process.cwd();
-  const baseDir =
-    config.baseDir ?? path.join(os.homedir(), ".macro-agent");
+  const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent");
 
   // Ensure base directory exists
   fs.mkdirSync(baseDir, { recursive: true });
@@ -263,8 +297,7 @@ export async function bootV2(
 
   // 2. Inbox Adapter (embedded agent-inbox, hybrid mode)
   const inboxSocketPath =
-    config.inbox?.socketPath ??
-    path.join(baseDir, "inbox.sock");
+    config.inbox?.socketPath ?? path.join(baseDir, "inbox.sock");
   const inboxSqlitePath = path.join(baseDir, "inbox.db");
 
   const inboxAdapter = new DefaultInboxAdapter({
@@ -294,7 +327,7 @@ export async function bootV2(
   } catch {
     // opentasks daemon may not be available — non-fatal
     console.warn(
-      "[boot-v2] opentasks daemon not available. Task operations will fail until connected."
+      "[boot-v2] opentasks daemon not available. Task operations will fail until connected.",
     );
   }
 
@@ -318,14 +351,18 @@ export async function bootV2(
       controlSocketPath,
       taskResourceId: config.cascade?.taskResourceId,
       resolveTaskRef: config.cascade?.resolveTaskRef,
-    }
+    },
   );
 
   // 6. Federation (cross-instance communication)
   let federationCleanup: (() => void) | null = null;
   if (config.federation) {
     const { setupFederation } = await import("./adapters/federation.js");
-    federationCleanup = setupFederation(agentManager, inboxAdapter, config.federation);
+    federationCleanup = setupFederation(
+      agentManager,
+      inboxAdapter,
+      config.federation,
+    );
   }
 
   // 7. Trigger System V2
@@ -340,11 +377,178 @@ export async function bootV2(
         enableHeartbeat: config.trigger?.enableHeartbeat ?? false,
         heartbeatIntervalMs: config.trigger?.heartbeatIntervalMs,
       },
-    }
+    },
   );
   await triggerSystem.start();
 
-  // 7. Control Server (lifecycle RPC for MCP subprocesses)
+  // 7a. Task Dispatch (opt-in autonomous task dispatch mode)
+  let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
+
+  if (config.dispatch?.enabled && tasksAdapter) {
+    const { createOrchestrator, createOpenTasksSource, createAgentInboxPort } =
+      await import("swarm-dispatch");
+    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
+
+    const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
+    const dispatchAgentId = `dispatcher:${claimantId}`;
+
+    // Adapt opentasks client → DispatchTaskSource
+    const opentasksClient = (tasksAdapter as any).client;
+    const source = opentasksClient
+      ? createOpenTasksSource(opentasksClient)
+      : {
+          // Fallback adapter when opentasks client is available via TasksAdapter methods
+          queryReady: async (opts?: { tags?: string[]; limit?: number }) =>
+            tasksAdapter.queryReady(opts),
+          claim: async (taskId: string, claimantIdArg: string) => {
+            try {
+              await tasksAdapter.assignTask(taskId, claimantIdArg);
+              return { success: true as const };
+            } catch {
+              return { success: false as const };
+            }
+          },
+          release: async (taskId: string) => tasksAdapter.unclaimTask(taskId),
+          transition: async (
+            taskId: string,
+            action: "start" | "complete" | "fail",
+          ) => tasksAdapter.transitionTask(taskId, action),
+          getTask: async (taskId: string) => tasksAdapter.getTask(taskId),
+          listInProgress: async () =>
+            tasksAdapter.listTasks({ status: "in_progress" }),
+        };
+
+    // Adapt AgentManagerV2 → DispatchAgentRuntime
+    const runtime: import("swarm-dispatch").DispatchAgentRuntime = {
+      spawn: async (opts: { prompt: string; taskId: string; role: string }) => {
+        const spawned = await agentManager.spawn({
+          task: opts.prompt,
+          task_id: opts.taskId,
+          role: opts.role,
+          parent: null,
+        });
+        return { id: spawned.id };
+      },
+      terminate: async (agentId: string, reason?: string) => {
+        await agentManager.terminate(agentId, (reason ?? "cancelled") as any);
+      },
+      onStopped: (callback: (agentId: string, reason: string) => void) =>
+        agentManager.onLifecycleEvent((event) => {
+          if (event.type === "stopped") {
+            callback(event.agent.id, event.reason);
+          }
+        }),
+    };
+
+    // Phase 2: Wire MessagePort via agent-inbox for mail-based work routing
+    let messagePort: import("swarm-dispatch").MessagePort | undefined;
+    if (config.dispatch.enableMailRouting !== false) {
+      const inbox = inboxAdapter.getInbox();
+      messagePort = createAgentInboxPort(
+        inbox.router as any,
+        inbox.events as any,
+        {
+          dispatcherAgentId: dispatchAgentId,
+          classifyMessage: (msg: any) => {
+            // Classify inbox messages as dispatchable work when they carry
+            // the x-dispatch/work schema. Other messages are ignored.
+            const content = msg.content as {
+              type?: string;
+              schema?: string;
+              data?: any;
+            };
+            if (content?.schema !== "x-dispatch/work") return null;
+            const data = content.data;
+            if (!data?.taskId) return null;
+            return {
+              messageId: msg.id,
+              correlationId: msg.thread_tag ?? msg.id,
+              replyTo: msg.sender_id ? { agentId: msg.sender_id } : undefined,
+              task: {
+                id: data.taskId,
+                title: data.title ?? `Delegated: ${data.taskId}`,
+                status: "open",
+                content: data.prompt ?? data.content,
+                tags: data.tags,
+                metadata: {
+                  ...data.metadata,
+                  role: data.role,
+                },
+              },
+            };
+          },
+        },
+      );
+
+      // Register the dispatcher as an agent in the inbox so it can receive messages
+      await inboxAdapter.registerAgent(dispatchAgentId, {
+        role: "dispatcher",
+        scope: "default",
+      });
+    }
+
+    // Phase 2: Wire AgentRoster via inbox agent listing for route-first dispatch
+    let roster: import("swarm-dispatch").AgentRoster | undefined;
+    if (config.dispatch.enableRoster !== false) {
+      const inbox = inboxAdapter.getInbox();
+      roster = {
+        async findAvailable(criteria) {
+          // List agents from inbox storage, filter by role and idle state
+          const agents = inbox.storage.listAgents();
+          return agents
+            .filter((a: any) => {
+              if (a.agentId === dispatchAgentId) return false;
+              if (criteria.role && a.role && a.role !== criteria.role)
+                return false;
+              if (criteria.notBusy && a.status === "busy") return false;
+              return true;
+            })
+            .map((a: any) => ({
+              agentId: a.agentId ?? a.agent_id ?? a.id,
+              host: a.host,
+            }));
+        },
+      };
+    }
+
+    // Determine dispatch mode
+    const hasRouting = !!messagePort && !!roster;
+    const dispatchMode =
+      config.dispatch.dispatchMode ??
+      (hasRouting ? ("prefer-route" as const) : ("spawn-only" as const));
+
+    taskDispatcher = createOrchestrator(source, runtime, {
+      claimantId,
+      pollIntervalMs: config.dispatch.pollIntervalMs ?? 15_000,
+      defaultRole: config.dispatch.defaultRole ?? "worker",
+      concurrency: { global: config.dispatch.maxConcurrent ?? 3 },
+      retry: {
+        maxRetries: config.dispatch.maxRetries ?? 3,
+        baseDelayMs: config.dispatch.retryBaseDelayMs ?? 10_000,
+        maxDelayMs: config.dispatch.retryMaxDelayMs ?? 300_000,
+      },
+      eligibility: config.dispatch.eligibility,
+      tags: config.dispatch.tags,
+      reconcile: {
+        enabled: config.dispatch.reconcile?.enabled ?? true,
+        intervalMs: config.dispatch.reconcile?.intervalMs ?? 60_000,
+        stallTimeoutMs: config.dispatch.reconcile?.stallTimeoutMs,
+      },
+      ...(config.dispatch.continuation && {
+        continuation: {
+          delayMs: config.dispatch.continuation.delayMs ?? 1_000,
+          maxTurns: config.dispatch.continuation.maxTurns ?? 20,
+        },
+      }),
+      messagePort,
+      roster,
+      dispatchMode,
+    });
+
+    await taskDispatcher.start();
+  }
+
+  // 7b. Control Server (lifecycle RPC for MCP subprocesses)
   const controlServer = new ControlServer(agentManager, {
     socketPath: controlSocketPath,
   });
@@ -358,7 +562,9 @@ export async function bootV2(
 
   const healthCheckTimer = setInterval(async () => {
     try {
-      const unhealthy = controlServer.getUnhealthyAgents(UNHEALTHY_THRESHOLD_MS);
+      const unhealthy = controlServer.getUnhealthyAgents(
+        UNHEALTHY_THRESHOLD_MS,
+      );
       for (const { agentId, lastSeen } of unhealthy) {
         const agent = agentStore.getAgent(agentId);
         if (!agent || agent.state !== "running") continue;
@@ -379,7 +585,7 @@ export async function bootV2(
                   staleSinceMs: Date.now() - lastSeen,
                 },
               },
-              { importance: "high", threadTag: `health:${agentId}` }
+              { importance: "high", threadTag: `health:${agentId}` },
             );
           } catch {
             // Best effort notification
@@ -421,20 +627,19 @@ export async function bootV2(
   // 10. ACP WebSocket server (optional)
   let acpServer: WebSocketACPServer | null = null;
   if (config.acp?.enabled) {
-    const { createWebSocketACPServer } = await import("./acp/websocket-server.js");
-    acpServer = createWebSocketACPServer(
-      systemRef,
-      {
-        port: config.acp.port,
-        host: config.acp.host,
-        path: config.acp.path,
-      },
-    );
+    const { createWebSocketACPServer } =
+      await import("./acp/websocket-server.js");
+    acpServer = createWebSocketACPServer(systemRef, {
+      port: config.acp.port,
+      host: config.acp.host,
+      path: config.acp.path,
+    });
     await acpServer.start();
   }
 
   // 11. MAP Server (optional — accept inbound connections from TUI/clients)
-  let mapServerInstance: import("./map/types.js").MAPServerInstance | null = null;
+  let mapServerInstance: import("./map/types.js").MAPServerInstance | null =
+    null;
   if (config.mapServer?.enabled) {
     try {
       const { createMAPServerInstance } = await import("./map/server.js");
@@ -467,15 +672,20 @@ export async function bootV2(
 
   // 12. Swarmkit integrations (minimem, skill-tree, sessionlog)
   agentManager.setIntegrationConfigs({
-    minimem: config.minimem?.enabled ? config.minimem as any : undefined,
-    skilltree: config.skilltree?.enabled ? config.skilltree as any : undefined,
-    sessionlog: config.sessionlog?.enabled ? config.sessionlog as any : undefined,
+    minimem: config.minimem?.enabled ? (config.minimem as any) : undefined,
+    skilltree: config.skilltree?.enabled
+      ? (config.skilltree as any)
+      : undefined,
+    sessionlog: config.sessionlog?.enabled
+      ? (config.sessionlog as any)
+      : undefined,
   });
 
   // 12b. Skill-tree loadout compilation (if enabled)
   if (config.skilltree?.enabled) {
     try {
-      const { compileAllRoleLoadouts } = await import("./integrations/skilltree.js");
+      const { compileAllRoleLoadouts } =
+        await import("./integrations/skilltree.js");
       // Gather roles from the role registry
       const registeredRoles = roleRegistry.listRoles();
       const roleNames = registeredRoles.map((r) => r.name);
@@ -536,6 +746,16 @@ export async function bootV2(
       await mapSidecar.start();
       // Wire sidecar into agent manager for session-end checkpoints
       agentManager.setSidecar(mapSidecar);
+
+      // Bridge dispatch events to MAP for observability
+      if (taskDispatcher && mapSidecar.emitEvent) {
+        taskDispatcher.onEvent((event) => {
+          mapSidecar!.emitEvent!({
+            type: `dispatch.${event.type}`,
+            ...event,
+          });
+        });
+      }
       // Attach to shared system ref so ACP/MAP handlers can access it
       systemRef.mapSidecar = mapSidecar;
     } catch (err) {
@@ -556,14 +776,17 @@ export async function bootV2(
     controlServer,
     roleRegistry,
     controlSocketPath,
+    ...(taskDispatcher ? { taskDispatcher } : {}),
     ...(apiServer ? { apiServer } : {}),
     ...(acpServer ? { acpServer } : {}),
     ...(mapServerInstance ? { mapServerInstance } : {}),
     ...(mapSidecar ? { mapSidecar } : {}),
-    _sessionlogSyncLevel: config.sessionlog?.sync ?? config.map?.trajectorySyncLevel ?? "full",
+    _sessionlogSyncLevel:
+      config.sessionlog?.sync ?? config.map?.trajectorySyncLevel ?? "full",
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (taskDispatcher) await taskDispatcher.stop();
       if (mapSidecar) await mapSidecar.stop();
       if (mapServerInstance) await mapServerInstance.stop();
       if (federationCleanup) federationCleanup();

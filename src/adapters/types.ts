@@ -188,6 +188,7 @@ export interface CreateTaskOptions {
   parent?: string;
   tags?: string[];
   priority?: number;
+  metadata?: Record<string, unknown>;
 }
 
 /**

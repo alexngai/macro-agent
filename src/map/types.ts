@@ -103,6 +103,9 @@ export interface MAPSidecar {
   reportCheckpoint(
     checkpoint: TrajectoryCheckpointPayload,
   ): Promise<TrajectoryCheckpointResult | null>;
+
+  /** Emit a custom event to the MAP hub scope (best-effort, no-op if disconnected) */
+  emitEvent?(event: Record<string, unknown>): Promise<void>;
 }
 
 // =============================================================================

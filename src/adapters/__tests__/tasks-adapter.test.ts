@@ -185,6 +185,7 @@ describe("TasksAdapter", () => {
 
       expect(mockClient.query).toHaveBeenCalledWith({
         ready: { tags: ["backend"], limit: 5 },
+        verbose: true,
       });
     });
   });
