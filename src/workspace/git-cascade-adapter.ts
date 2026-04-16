@@ -79,8 +79,9 @@ export type GitCascadeEventType =
   | 'stream:merged'         // mapped from git-cascade stream.merged
   | 'stream:conflicted'     // mapped from git-cascade stream.conflicted
   | 'stream:abandoned'      // mapped from git-cascade stream.abandoned
-  | 'stream:paused'         // local (pauseStream)
-  | 'stream:resumed'        // local (resumeStream)
+  | 'stream:paused'         // local (pauseStream) + cascade emit
+  | 'stream:resumed'        // local (resumeStream) + cascade emit
+  | 'stream:rolled_back'    // cascade emit (rollbackN, rollbackToOperation, rollbackToForkPoint)
   | 'worktree:created'
   | 'worktree:deallocated'
   | 'task:created'
@@ -391,6 +392,28 @@ export class GitCascadeAdapter {
           streamId: p.stream_id,
           targetBranch: p.target_branch,
           outcome: p.outcome,
+        });
+        break;
+      }
+      case 'stream.paused': {
+        // Tracker fires stream.paused after pauseStream. The adapter also
+        // emits stream:paused locally in its pauseStream() wrapper — the
+        // bridge uses the local event (not this cascade-forwarded one) for
+        // the MAP translation, so this case is mainly to keep the switch
+        // exhaustive. No double-emit: the bridge deduplicates by event type.
+        break;
+      }
+      case 'stream.resumed': {
+        // Same as stream.paused — adapter.resumeStream() fires the local event.
+        break;
+      }
+      case 'stream.rolled_back': {
+        const p = params as { stream_id: string; strategy?: string; target?: string | number; new_head?: string };
+        this.emit('stream:rolled_back', {
+          streamId: p.stream_id,
+          strategy: p.strategy,
+          target: p.target,
+          newHead: p.new_head,
         });
         break;
       }

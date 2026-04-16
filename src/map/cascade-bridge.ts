@@ -290,11 +290,41 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
         },
       };
 
-    // Local-only events with no MAP counterpart (Phase 1 scope).
-    // 'stream:updated', 'stream:forked', 'stream:paused', 'stream:resumed',
-    // 'worktree:*', 'task:*', 'change:*', 'conflict:*' (legacy local-only
-    // variant — cascade-bridge handles the cascade-driven 'conflict:resolved'
-    // separately above)
+    case 'stream:paused':
+      if (!d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.STREAM_PAUSED,
+        params: {
+          stream_id: d.streamId,
+          reason: d.reason,
+        },
+      };
+
+    case 'stream:resumed':
+      if (!d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.STREAM_RESUMED,
+        params: {
+          stream_id: d.streamId,
+        },
+      };
+
+    case 'stream:rolled_back':
+      if (!d.streamId) return null;
+      return {
+        method: CASCADE_METHODS.STREAM_ROLLED_BACK,
+        params: {
+          stream_id: d.streamId,
+          strategy: d.strategy,
+          target: d.target,
+          new_head: d.newHead,
+        },
+      };
+
+    // Local-only events with no MAP counterpart.
+    // 'stream:updated', 'stream:forked', 'worktree:*', 'task:*',
+    // 'change:*', 'conflict:*' (legacy local-only variant — cascade-bridge
+    // handles the cascade-driven 'conflict:resolved' separately above)
     default:
       return null;
   }
