@@ -274,7 +274,11 @@ describeFn("Task Dispatch Live Agent E2E", () => {
       );
 
       // Wait for lifecycle listener to process the stop event
-      await sleep(3_000);
+      await waitFor(
+        () => system.agentStore.getAgent(agentId)?.state === "stopped",
+        15_000,
+        500
+      );
 
       // Verify the lifecycle listener detected completion
       log(`Tracker active after done: ${dispatcher.tracker.activeCount()}`);
@@ -408,7 +412,11 @@ describeFn("Task Dispatch Live Agent E2E", () => {
       await system.agentManager.terminate(agentId, "cancelled");
 
       // Wait for lifecycle listener to process
-      await sleep(2_000);
+      await waitFor(
+        () => dispatcher.tracker.activeCount() === 0,
+        15_000,
+        500
+      );
 
       log(`Tracker active after terminate: ${dispatcher.tracker.activeCount()}`);
       log(`Tracker retries: ${dispatcher.tracker.listRetries().length}`);
@@ -469,7 +477,11 @@ describeFn("Task Dispatch Live Agent E2E", () => {
 
       log("Triggering reconciliation (task now closed externally)...");
       await dispatcher.reconcileNow();
-      await sleep(3_000);
+      await waitFor(
+        () => system.agentStore.getAgent(agentId)?.state === "stopped",
+        15_000,
+        500
+      );
 
       log(`Tracker active after reconcile: ${dispatcher.tracker.activeCount()}`);
 

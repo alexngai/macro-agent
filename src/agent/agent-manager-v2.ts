@@ -1541,6 +1541,18 @@ export function createAgentManagerV2(
       }
     }
 
+    // Auto-terminate when done() was called and the handler signaled shouldTerminate.
+    // This closes the lifecycle gap: without this, agents stay in "running" state
+    // after calling done() because nothing triggers terminate().
+    if (doneCalled) {
+      const reason = doneStatus === "completed" ? "completed" : (doneStatus ?? "failed");
+      try {
+        await terminate(agentId, reason as any);
+      } catch {
+        // Best effort — agent may already be stopping
+      }
+    }
+
     return { doneCalled, doneStatus, updates: allUpdates };
   }
 
