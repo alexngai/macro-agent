@@ -70,7 +70,8 @@ export class SpawnResolverStrategy implements ConflictRecoveryStrategy {
       };
     }
 
-    // Spawn the resolver
+    // Spawn the resolver. Injects MACRO_RECOVERY_STRATEGY + MACRO_CONFLICT_ID
+    // so the resolve_conflict MCP tool can tag the resolution correctly.
     let resolverAgentId: string;
     try {
       const spawnOpts: SpawnAgentOptions = {
@@ -78,6 +79,12 @@ export class SpawnResolverStrategy implements ConflictRecoveryStrategy {
         task: `Resolve conflict ${ctx.conflictId} on stream ${ctx.streamId}`,
         parent: ctx.landingAgentId,
         capabilities: ['workspace.commit', 'workspace.resolve', 'workspace.read'],
+        config: {
+          env: {
+            MACRO_RECOVERY_STRATEGY: 'spawn-resolver',
+            MACRO_CONFLICT_ID: ctx.conflictId,
+          },
+        },
       };
       const spawned = await this.opts.agentManager.spawn(spawnOpts);
       resolverAgentId = spawned.id;

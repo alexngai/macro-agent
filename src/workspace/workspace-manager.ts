@@ -1107,6 +1107,13 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     targetStreamId: StreamId;
     agentId: import('./types-v3.js').Principal;
     worktree: string;
+    /**
+     * Free-form metadata forwarded into the `x-cascade/stream.merged` emit.
+     * The canonical binding is `{ task_ref: { resource_id, node_id } }` —
+     * landing strategies thread `LandingContext.taskRef` through here so the
+     * hub's cascade_merges projection records which task drove the merge.
+     */
+    metadata?: import('git-cascade/events').EventMetadata;
   }): import('./types-v3.js').MergeResult {
     // git-cascade's MergeStreamOptions uses `sourceStream`/`targetStream`.
     // We adapt to v3's `sourceStreamId`/`targetStreamId` at the boundary.
@@ -1115,6 +1122,7 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
       targetStream: opts.targetStreamId,
       agentId: opts.agentId,
       worktree: opts.worktree,
+      metadata: opts.metadata,
     });
     if (result.success) {
       this.emit('stream:merged', {
@@ -1293,6 +1301,31 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
 
   registerLandingStrategy(strategy: import('./types-v3.js').LandingStrategy): void {
     this.landingStrategies.set(strategy.name, strategy);
+  }
+
+  async land(
+    ctx: import('./types-v3.js').LandingContext,
+  ): Promise<import('./types-v3.js').MergeResult> {
+    const internalName = resolveLandingStrategyName(ctx.strategyName);
+    if (internalName === 'none') {
+      return { success: true, alreadyMerged: true } as import('./types-v3.js').MergeResult;
+    }
+    const strategy = this.landingStrategies.get(internalName);
+    if (!strategy) {
+      throw new Error(
+        `No landing strategy registered for "${internalName}" (from ctx.strategyName="${ctx.strategyName ?? 'merge-to-parent'}"). Registered: ${Array.from(this.landingStrategies.keys()).join(', ') || '<none>'}.`,
+      );
+    }
+    const resolved: import('./types-v3.js').LandingContext = {
+      ...ctx,
+      workspaceManager: this,
+    };
+    if (strategy.canLand && !strategy.canLand(resolved)) {
+      throw new Error(
+        `Landing strategy "${internalName}" rejected context for agent ${ctx.agentId}, stream ${ctx.streamId}`,
+      );
+    }
+    return strategy.land(resolved);
   }
 
   reconcileV3(): import('./types-v3.js').MacroReconcileResult {
@@ -1515,4 +1548,28 @@ export function createWorkspaceManagerWithAdapter(
   config?: Partial<WorkspaceManagerConfig>
 ): DefaultWorkspaceManager {
   return new DefaultWorkspaceManager(adapter, config);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Landing strategy name resolution
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// YAML uses snake_case (`merge_to_parent_stream`, `queue_to_branch`, …) to
+// match the team-config naming convention. Strategy classes expose
+// kebab-case internal names (`merge-to-parent`, …). `WorkspaceManager.land()`
+// accepts either and normalizes before dispatch so AgentManagerV2 can pass
+// `roleConfig.landing` directly without another translation layer.
+
+const YAML_TO_INTERNAL_LANDING: Record<string, string> = {
+  merge_to_parent_stream: 'merge-to-parent',
+  queue_to_branch: 'queue-to-branch',
+  direct_push: 'direct-push',
+  optimistic_push: 'optimistic-push',
+  cherry_pick_stack: 'cherry-pick-stack',
+  none: 'none',
+};
+
+export function resolveLandingStrategyName(input?: string): string {
+  if (!input) return 'merge-to-parent';
+  return YAML_TO_INTERNAL_LANDING[input] ?? input;
 }

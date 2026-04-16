@@ -124,6 +124,13 @@ export interface LandingContext {
   streamId: StreamId;
   sourceWorktree: string;
   targetStreamId?: StreamId;
+  /**
+   * Strategy selector. Accepts either an internal strategy name
+   * (`merge-to-parent`, `queue-to-branch`, …) or the YAML form
+   * (`merge_to_parent_stream`, `queue_to_branch`, …). `WorkspaceManager.land`
+   * normalizes. When undefined, `merge-to-parent` is used.
+   */
+  strategyName?: string;
   strategyConfig?: Record<string, unknown>;
   /** Reference to the manager; strategies call back for merge/cascade. */
   workspaceManager: unknown; // WorkspaceManager — circular; narrowed at callsite

@@ -879,7 +879,16 @@ export function createAgentManagerV2(
       healthCheckService.stopForCoordinator(agentId);
     }
 
-    // Submit merge request if worker completed with workspace
+    // Land the worker's work if completed with a workspace.
+    //
+    // V3 path (preferred): look up the role's YAML landing strategy via
+    // TopologyPolicy.getRoleConfig and dispatch through
+    // WorkspaceManager.land(). This fires cascade events (stream.merged or
+    // queue.added) so the hub sees the work. Landing = 'none' short-circuits.
+    //
+    // Legacy fallback: if no TopologyPolicy is wired or it can't resolve a
+    // landing for this role, submit to the legacy MergeQueue as before.
+    // Keeps pre-V3 programmatic callers + tests that bypass YAML working.
     if (
       workspaceManager &&
       agentWorkspaces.has(agentId) &&
@@ -887,18 +896,45 @@ export function createAgentManagerV2(
     ) {
       const ws = agentWorkspaces.get(agentId)!;
       if (ws.role === "worker" && ws.streamId) {
-        try {
-          const mergeQueue = workspaceManager.getMergeQueue();
-          if (mergeQueue) {
-            mergeQueue.submit({
+        const roleConfig = topologyPolicy?.getRoleConfig?.(record.role);
+        const yamlLandingName = roleConfig?.landing;
+        const usingV3Landing =
+          typeof yamlLandingName === "string" && yamlLandingName.length > 0;
+
+        if (usingV3Landing) {
+          try {
+            const taskRef = (record.metadata as Record<string, unknown> | undefined)
+              ?.task_ref as { resource_id: string; node_id: string } | undefined;
+            await workspaceManager.land({
+              agentId,
               streamId: ws.streamId,
-              workerBranch: ws.branch,
-              taskId: record.task_id ?? agentId,
-              workerAgentId: agentId,
+              sourceWorktree: ws.path,
+              strategyName: yamlLandingName,
+              strategyConfig: roleConfig?.landing_config,
+              taskRef,
+              // Dispatcher overwrites this with `this`; placeholder keeps the
+              // type satisfied without a cast.
+              workspaceManager,
             });
+          } catch {
+            // Non-fatal landing failure — agent still terminates; conflicts
+            // and strategy errors surface via WorkspaceEvent emission and
+            // the strategy's own logs.
           }
-        } catch {
-          // Non-fatal merge queue submission failure
+        } else {
+          try {
+            const mergeQueue = workspaceManager.getMergeQueue();
+            if (mergeQueue) {
+              mergeQueue.submit({
+                streamId: ws.streamId,
+                workerBranch: ws.branch,
+                taskId: record.task_id ?? agentId,
+                workerAgentId: agentId,
+              });
+            }
+          } catch {
+            // Non-fatal merge queue submission failure
+          }
         }
       }
     }
@@ -987,11 +1023,16 @@ export function createAgentManagerV2(
               .map((r) => agentRecordToAgent(r)),
           terminate: (id: AgentId, r: AgentStopReason) => terminate(id, r),
         };
+        const parentTaskRef = (record.metadata as Record<string, unknown> | undefined)
+          ?.task_ref as { resource_id: string; node_id: string } | undefined;
         await terminateWithChangeConsolidation(
           child.id as AgentId,
           agentId,
           cascadeAdapter,
-          wsProvider
+          wsProvider,
+          undefined,
+          workspaceManager ?? undefined,
+          parentTaskRef
         );
       }
     }

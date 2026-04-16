@@ -353,12 +353,17 @@ export interface WorkspaceManager {
 
   /**
    * Merge a source stream into a target stream.
+   *
+   * `metadata` is forwarded into the `x-cascade/stream.merged` emit so
+   * consumers (e.g., the OpenHive hub) can bind the merge to a task ref.
+   * Landing strategies pass `{ task_ref: ctx.taskRef }` through here.
    */
   mergeStream(opts: {
     sourceStreamId: StreamId;
     targetStreamId: StreamId;
     agentId: import('./types-v3.js').Principal;
     worktree: string;
+    metadata?: import('git-cascade/events').EventMetadata;
   }): import('./types-v3.js').MergeResult;
 
   /**
@@ -421,6 +426,21 @@ export interface WorkspaceManager {
    * name from role YAML (see Phase 5 — `LandingStrategy` integration).
    */
   registerLandingStrategy(strategy: import('./types-v3.js').LandingStrategy): void;
+
+  /**
+   * Dispatch a landing. Resolves the strategy by `ctx.strategyName`
+   * (defaulting to `merge-to-parent`), accepts both internal and YAML-style
+   * names, and invokes the strategy's `land(ctx)`. Strategies call back
+   * into this manager via `ctx.workspaceManager`, which is filled in here.
+   *
+   * Returns the strategy's `MergeResult`. Conflicts are reflected in the
+   * result (`success: false` + `conflicts: [...]`); thrown errors indicate
+   * unrecoverable failures (unknown strategy, strategy rejected context,
+   * transport-level issues).
+   */
+  land(
+    ctx: import('./types-v3.js').LandingContext,
+  ): Promise<import('./types-v3.js').MergeResult>;
 
   /**
    * Run macro-level reconciliation:

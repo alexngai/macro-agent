@@ -81,6 +81,7 @@ export class MergeToParentStrategy implements LandingStrategy {
         targetStreamId,
         agentId: ctx.agentId,
         worktree: mergeWorktree.path,
+        metadata: ctx.taskRef ? { task_ref: ctx.taskRef } : undefined,
       });
 
       // Cascade rebase on dependents if requested.

@@ -129,11 +129,24 @@ export interface WorkspaceProvider {
  * If a merge conflict occurs, the merge is aborted and the child is
  * terminated with a "merge_conflict" reason.
  *
+ * When a `workspaceManager` is provided AND both workspaces carry stream
+ * ids, the merge is routed through `workspaceManager.mergeStream()` so
+ * it flows through git-cascade's tracker — gaining a `stream.merged`
+ * cascade event that propagates to the hub via CascadeBridge. This is
+ * the primary observability win of A3 in the integration plan.
+ *
+ * Falls back to raw `attemptMerge` (unchanged behavior) when either
+ * workspace lacks a stream id or no manager is passed — so
+ * programmatic/legacy callers keep working unchanged.
+ *
  * @param childId - Child agent to terminate
  * @param parentId - Parent agent to consolidate changes into
  * @param agentManager - Agent manager for operations
  * @param workspaceProvider - Optional workspace provider for getting agent workspaces
  * @param options - Optional consolidation options
+ * @param workspaceManager - Optional workspace manager; enables cascade-
+ *   event emission on the consolidation merge when both workspaces are
+ *   stream-backed.
  * @returns ConsolidationResult indicating success or failure
  */
 export async function terminateWithChangeConsolidation(
@@ -141,7 +154,15 @@ export async function terminateWithChangeConsolidation(
   parentId: AgentId,
   agentManager: CascadeAgentManager,
   workspaceProvider?: WorkspaceProvider,
-  options?: ConsolidationOptions
+  options?: ConsolidationOptions,
+  workspaceManager?: WorkspaceManager,
+  /**
+   * Optional task reference inherited from the parent agent's metadata.
+   * When provided + routing through the tracker, threaded into the
+   * `x-cascade/stream.merged` emit so the hub's cascade_merges row records
+   * which task drove the consolidation.
+   */
+  taskRef?: { resource_id: string; node_id: string }
 ): Promise<ConsolidationResult> {
   // If no workspace provider, just terminate normally
   if (!workspaceProvider) {
@@ -171,7 +192,61 @@ export async function terminateWithChangeConsolidation(
     // Continue with merge anyway - use the actual current branch
   }
 
-  // Attempt to merge child branch into parent's worktree
+  // Attempt to merge child branch into parent's worktree.
+  //
+  // Preferred path: route through workspaceManager.mergeStream when both
+  // workspaces have stream ids. Goes via git-cascade's tracker.mergeStream,
+  // which fires `x-cascade/stream.merged` with source/target stream ids so
+  // the hub's cascade projection + the source stream's `merged` status
+  // update in lockstep with the actual git operation.
+  if (
+    workspaceManager &&
+    childWorkspace.streamId &&
+    parentWorkspace.streamId
+  ) {
+    try {
+      const result = workspaceManager.mergeStream({
+        sourceStreamId: childWorkspace.streamId,
+        targetStreamId: parentWorkspace.streamId,
+        agentId: parentId,
+        worktree: parentWorkspace.path,
+        metadata: taskRef ? { task_ref: taskRef } : undefined,
+      });
+      if (result.success) {
+        await agentManager.terminate(childId, "changes_consolidated");
+        return {
+          success: true,
+          merged: true,
+          mergeCommit: result.newHead,
+        };
+      }
+      if (result.conflicts && result.conflicts.length > 0) {
+        // Tracker already aborted; emit and terminate with conflict reason.
+        console.warn(
+          `[cascade] Merge conflict consolidating ${childId} -> ${parentId} via tracker: ${result.conflicts.join(", ")}`
+        );
+        await agentManager.terminate(childId, "merge_conflict");
+        return {
+          success: false,
+          merged: false,
+          conflicts: result.conflicts,
+        };
+      }
+      // Tracker returned a non-conflict failure — fall through to raw
+      // git path so we don't regress the consolidation semantics for
+      // cases the tracker can't handle (e.g., stream in unexpected
+      // status, detached HEAD, branch-name mismatches).
+    } catch (err) {
+      console.warn(
+        `[cascade] tracker.mergeStream failed consolidating ${childId} -> ${parentId}; falling back to raw git: ${err instanceof Error ? err.message : String(err)}`
+      );
+      // Fall through to raw-git path below.
+    }
+  }
+
+  // Fallback: raw git merge. Preserves pre-A3 behavior when streams
+  // aren't available (programmatic callers, legacy role-shaped
+  // workspaces) or when the tracker path bailed.
   const mergeMessage =
     options?.mergeMessage ??
     `Merge changes from ${childId} (${childBranch})`;

@@ -75,6 +75,48 @@ describe('landing strategies', () => {
         expect.objectContaining({ targetStreamId: 'target-1' })
       );
     });
+
+    it('threads ctx.taskRef into mergeStream metadata when present', async () => {
+      const strategy = new MergeToParentStrategy();
+      const ws = {
+        listStreams: vi.fn(() => []),
+        mergeStream: vi.fn(() => ({ success: true, newHead: 'aaa' })),
+      } as unknown as WorkspaceManager;
+
+      const taskRef = { resource_id: 'res-a1', node_id: 'task-a1' };
+      await strategy.land({
+        agentId: 'agent-1',
+        streamId: 'src-1',
+        sourceWorktree: '/tmp/wt',
+        targetStreamId: 'target-1',
+        taskRef,
+        workspaceManager: ws,
+      });
+
+      expect(ws.mergeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: { task_ref: taskRef } })
+      );
+    });
+
+    it('omits metadata when ctx.taskRef is absent', async () => {
+      const strategy = new MergeToParentStrategy();
+      const ws = {
+        listStreams: vi.fn(() => []),
+        mergeStream: vi.fn(() => ({ success: true, newHead: 'bbb' })),
+      } as unknown as WorkspaceManager;
+
+      await strategy.land({
+        agentId: 'agent-1',
+        streamId: 'src-1',
+        sourceWorktree: '/tmp/wt',
+        targetStreamId: 'target-1',
+        workspaceManager: ws,
+      });
+
+      expect(ws.mergeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: undefined })
+      );
+    });
   });
 
   describe('QueueToBranchStrategy', () => {
