@@ -31,6 +31,8 @@ const REQUEST_METHODS = {
   PAUSE: 'x-cascade/request.pause',
   RESUME: 'x-cascade/request.resume',
   RESOLVE: 'x-cascade/request.resolve',
+  PUSH: 'x-cascade/request.push',
+  COMMIT: 'x-cascade/request.commit',
 } as const;
 
 /**
@@ -129,6 +131,68 @@ export function setupCascadeActionHandlers(
         },
       });
     } catch { /* non-fatal */ }
+  });
+
+  // ── Push ───────────────────────────────────────────────────────────
+  register(REQUEST_METHODS.PUSH, (params: unknown) => {
+    const p = params as {
+      stream_id?: string;
+      remote?: string;
+      target_ref?: string;
+    };
+    if (!p?.stream_id) return;
+
+    const worktreePath = findWorktreeForStream(p.stream_id);
+    if (!worktreePath) return;
+
+    const remote = p.remote ?? 'origin';
+    const streamBranch = `stream/${p.stream_id}`;
+    const targetRef = p.target_ref ?? streamBranch;
+
+    try {
+      const { execSync } = require('child_process');
+      execSync(`git push ${remote} ${streamBranch}:refs/heads/${targetRef}`, {
+        cwd: worktreePath,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
+      // Emit pushed event so the hub records it
+      adapter.notifyStreamPushed?.({
+        streamId: p.stream_id,
+        agentId: 'hub-request',
+        pushedCommit: execSync('git rev-parse HEAD', {
+          cwd: worktreePath,
+          encoding: 'utf-8',
+        }).trim(),
+        remote,
+        remoteRef: targetRef,
+        strategy: 'hub-push',
+      });
+    } catch { /* non-fatal — push failure is reported via absence of pushed event */ }
+  });
+
+  // ── Commit ────────────────────────────────────────────────────────
+  register(REQUEST_METHODS.COMMIT, (params: unknown) => {
+    const p = params as {
+      stream_id?: string;
+      message?: string;
+      metadata?: Record<string, unknown>;
+    };
+    if (!p?.stream_id) return;
+
+    const worktreePath = findWorktreeForStream(p.stream_id);
+    if (!worktreePath) return;
+
+    const message = p.message ?? 'checkpoint (hub-requested)';
+    try {
+      adapter.commitChanges({
+        streamId: p.stream_id,
+        agentId: 'hub-request',
+        worktree: worktreePath,
+        message,
+        metadata: p.metadata,
+      });
+    } catch { /* non-fatal — nothing to commit, or stream conflicted */ }
   });
 
   // ── Cleanup ───────────────────────────────────────────────────────
