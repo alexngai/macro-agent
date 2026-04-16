@@ -62,7 +62,7 @@
     "nanoid": "^5.0.0",
     "opentasks": "^0.0.3",
     "openteams": "^0.2.2",
-    "swarm-dispatch": "^0.1.1",
+    "swarm-dispatch": "^0.3.0",
     "unique-names-generator": "^4.7.1",
     "ws": "^8.20.0",
     "zod": "^4.2.1"

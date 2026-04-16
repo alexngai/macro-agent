@@ -88,6 +88,7 @@ export class DefaultTasksAdapter implements ITasksAdapter {
       parent_id: opts.parent,
       tags: opts.tags,
       priority: opts.priority,
+      metadata: opts.metadata,
     });
 
     return node?.id ?? "";
@@ -129,6 +130,7 @@ export class DefaultTasksAdapter implements ITasksAdapter {
         limit: opts?.limit,
         tags: opts?.tags,
       },
+      verbose: true,
     });
 
     return (result.items ?? []).map((n: NodeSummaryLike) =>
@@ -146,6 +148,7 @@ export class DefaultTasksAdapter implements ITasksAdapter {
         tags: filter?.tags,
         limit: filter?.limit,
       },
+      verbose: true,
     });
 
     return (result.items ?? []).map((n: NodeSummaryLike) =>

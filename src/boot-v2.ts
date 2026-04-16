@@ -157,8 +157,16 @@ export interface BootV2Config {
     maxRetries?: number;
     retryBaseDelayMs?: number;
     retryMaxDelayMs?: number;
-    reconcile?: { enabled?: boolean; intervalMs?: number };
+    reconcile?: { enabled?: boolean; intervalMs?: number; stallTimeoutMs?: number };
     eligibility?: import("swarm-dispatch").EligibilityConfig;
+    /** Dispatch mode: route-only, spawn-only, prefer-route, prefer-spawn. Default: prefer-route when inbox available, spawn-only otherwise. */
+    dispatchMode?: import("swarm-dispatch").DispatchMode;
+    /** Enable mail-based work routing via agent-inbox (default: true when dispatch enabled). */
+    enableMailRouting?: boolean;
+    /** Enable roster-based agent discovery for route-first dispatch (default: true when dispatch enabled). */
+    enableRoster?: boolean;
+    /** Continuation config. */
+    continuation?: { delayMs?: number; maxTurns?: number };
   };
 }
 
@@ -316,10 +324,15 @@ export async function bootV2(
   let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
 
   if (config.dispatch?.enabled && tasksAdapter) {
-    const { createTaskDispatcher, createOpenTasksSource } = await import("swarm-dispatch");
+    const {
+      createOrchestrator,
+      createOpenTasksSource,
+      createAgentInboxPort,
+    } = await import("swarm-dispatch");
     const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
 
     const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
+    const dispatchAgentId = `dispatcher:${claimantId}`;
 
     // Adapt opentasks client → DispatchTaskSource
     const opentasksClient = (tasksAdapter as any).client;
@@ -345,7 +358,7 @@ export async function bootV2(
         };
 
     // Adapt AgentManagerV2 → DispatchAgentRuntime
-    const runtime = {
+    const runtime: import("swarm-dispatch").DispatchAgentRuntime = {
       spawn: async (opts: { prompt: string; taskId: string; role: string }) => {
         const spawned = await agentManager.spawn({
           task: opts.prompt,
@@ -355,8 +368,8 @@ export async function bootV2(
         });
         return { id: spawned.id };
       },
-      terminate: async (agentId: string) => {
-        await agentManager.terminate(agentId, "cancelled");
+      terminate: async (agentId: string, reason?: string) => {
+        await agentManager.terminate(agentId, (reason ?? "cancelled") as any);
       },
       onStopped: (callback: (agentId: string, reason: string) => void) =>
         agentManager.onLifecycleEvent((event) => {
@@ -366,7 +379,78 @@ export async function bootV2(
         }),
     };
 
-    taskDispatcher = createTaskDispatcher(source, runtime, {
+    // Phase 2: Wire MessagePort via agent-inbox for mail-based work routing
+    let messagePort: import("swarm-dispatch").MessagePort | undefined;
+    if (config.dispatch.enableMailRouting !== false) {
+      const inbox = inboxAdapter.getInbox();
+      messagePort = createAgentInboxPort(
+        inbox.router as any,
+        inbox.events as any,
+        {
+          dispatcherAgentId: dispatchAgentId,
+          classifyMessage: (msg: any) => {
+            // Classify inbox messages as dispatchable work when they carry
+            // the x-dispatch/work schema. Other messages are ignored.
+            const content = msg.content as { type?: string; schema?: string; data?: any };
+            if (content?.schema !== "x-dispatch/work") return null;
+            const data = content.data;
+            if (!data?.taskId) return null;
+            return {
+              messageId: msg.id,
+              correlationId: msg.thread_tag ?? msg.id,
+              replyTo: msg.sender_id ? { agentId: msg.sender_id } : undefined,
+              task: {
+                id: data.taskId,
+                title: data.title ?? `Delegated: ${data.taskId}`,
+                status: "open",
+                content: data.prompt ?? data.content,
+                tags: data.tags,
+                metadata: {
+                  ...data.metadata,
+                  role: data.role,
+                },
+              },
+            };
+          },
+        }
+      );
+
+      // Register the dispatcher as an agent in the inbox so it can receive messages
+      await inboxAdapter.registerAgent(dispatchAgentId, {
+        role: "dispatcher",
+        scope: "default",
+      });
+    }
+
+    // Phase 2: Wire AgentRoster via inbox agent listing for route-first dispatch
+    let roster: import("swarm-dispatch").AgentRoster | undefined;
+    if (config.dispatch.enableRoster !== false) {
+      const inbox = inboxAdapter.getInbox();
+      roster = {
+        async findAvailable(criteria) {
+          // List agents from inbox storage, filter by role and idle state
+          const agents = inbox.storage.listAgents();
+          return agents
+            .filter((a: any) => {
+              if (a.agentId === dispatchAgentId) return false;
+              if (criteria.role && a.role && a.role !== criteria.role) return false;
+              if (criteria.notBusy && a.status === "busy") return false;
+              return true;
+            })
+            .map((a: any) => ({
+              agentId: a.agentId ?? a.agent_id ?? a.id,
+              host: a.host,
+            }));
+        },
+      };
+    }
+
+    // Determine dispatch mode
+    const hasRouting = !!messagePort && !!roster;
+    const dispatchMode = config.dispatch.dispatchMode
+      ?? (hasRouting ? "prefer-route" as const : "spawn-only" as const);
+
+    taskDispatcher = createOrchestrator(source, runtime, {
       claimantId,
       pollIntervalMs: config.dispatch.pollIntervalMs ?? 15_000,
       defaultRole: config.dispatch.defaultRole ?? "worker",
@@ -381,7 +465,17 @@ export async function bootV2(
       reconcile: {
         enabled: config.dispatch.reconcile?.enabled ?? true,
         intervalMs: config.dispatch.reconcile?.intervalMs ?? 60_000,
+        stallTimeoutMs: config.dispatch.reconcile?.stallTimeoutMs,
       },
+      ...(config.dispatch.continuation && {
+        continuation: {
+          delayMs: config.dispatch.continuation.delayMs ?? 1_000,
+          maxTurns: config.dispatch.continuation.maxTurns ?? 20,
+        },
+      }),
+      messagePort,
+      roster,
+      dispatchMode,
     });
 
     await taskDispatcher.start();

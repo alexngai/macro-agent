@@ -75,12 +75,24 @@ export function setupCoordinationHandlers(
     if (!p?.title) return;
 
     try {
-      // Create task in opentasks
+      // Extract tags and metadata from OpenHive context
+      const context = p.context ?? {};
+      const tags = Array.isArray(context.tags) ? context.tags as string[] : undefined;
+      const metadata: Record<string, unknown> = {
+        ...context,
+        ...(p.assigned_by ? { assigned_by: p.assigned_by } : {}),
+        ...(p.deadline ? { deadline: p.deadline } : {}),
+      };
+      // Remove tags from metadata (already a top-level field)
+      delete metadata.tags;
+
       const taskId = await tasksAdapter.createTask({
         title: p.title,
         content: p.description,
         assignee: p.assigned_to,
+        tags,
         priority: p.priority === "critical" ? 1 : p.priority === "high" ? 2 : p.priority === "low" ? 4 : 3,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       });
 
       // Optionally spawn an agent to work on the task
