@@ -98,11 +98,21 @@ export function createMAPServerInstance(
 
     // ── Agent extensions ──────────────────────────────────────────
     handlers["_macro/spawnAgent"] = async (params, ctx) => {
+      // Forward the full SpawnAgentOptions surface so callers can set
+      // permission mode, agent type, custom prompt, model config, etc.
+      // Previously this handler dropped everything except role/cwd/task,
+      // making _macro/spawnAgent useless for any non-default agent.
       const spawned = await agentManager.spawn({
         task: params.task ?? "Spawned via MAP",
         parent: params.parent ?? null,
         cwd: params.cwd,
         role: params.role ?? "worker",
+        permissionMode: params.permissionMode,
+        agentType: params.agentType,
+        customPrompt: params.customPrompt,
+        topics: params.topics,
+        config: params.config,
+        taskRef: params.taskRef,
       });
 
       // Ensure agent is registered in MAPServer's registry.

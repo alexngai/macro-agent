@@ -225,6 +225,30 @@ export interface BootV2Config {
     /** Continuation config. */
     continuation?: { delayMs?: number; maxTurns?: number };
   };
+
+  /**
+   * Boot-time agents to spawn after AgentManager is ready.
+   *
+   * Currently supports `coordinator` — when set, fires a non-blocking
+   * `agentManager.spawn({ role: 'coordinator', parent: null, cwd, ... })`
+   * during boot so the swarm has a default head manager ready for chat
+   * without an explicit spawn call. Pass `true` for defaults (uses the
+   * boot config's cwd) or an object for fine control.
+   *
+   * Also driven by env var `MACRO_BOOTSTRAP_COORDINATOR=true` (with
+   * optional `MACRO_BOOTSTRAP_CWD=<path>`) when this field is unset —
+   * lets indirect callers (e.g. openswarm host) opt in without modifying
+   * the bootConfig pass-through whitelist.
+   */
+  bootstrap?: {
+    coordinator?: boolean | {
+      cwd?: string;
+      permissionMode?: PermissionMode;
+      agentType?: string;
+      customPrompt?: string;
+      task?: string;
+    };
+  };
 }
 
 // =============================================================================
@@ -287,6 +311,24 @@ export async function bootV2(
 ): Promise<MacroAgentSystemV2> {
   const cwd = config.cwd ?? process.cwd();
   const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent");
+
+  // Env-var bridge for hosts that pass through bootConfig with a fixed
+  // whitelist (e.g. openswarm). Translates MACRO_BOOTSTRAP_COORDINATOR /
+  // MACRO_BOOTSTRAP_CWD into the structured bootstrap field if not already
+  // set programmatically. Programmatic config wins.
+  if (
+    process.env.MACRO_BOOTSTRAP_COORDINATOR === "true" &&
+    !config.bootstrap?.coordinator
+  ) {
+    const envCwd = process.env.MACRO_BOOTSTRAP_CWD;
+    config = {
+      ...config,
+      bootstrap: {
+        ...(config.bootstrap ?? {}),
+        coordinator: envCwd ? { cwd: envCwd } : true,
+      },
+    };
+  }
 
   // Ensure base directory exists
   fs.mkdirSync(baseDir, { recursive: true });
@@ -766,7 +808,39 @@ export async function bootV2(
     }
   }
 
-  // 13. Return system handle
+  // 13. Boot-time agents (opt-in)
+  // Fire after all subsystems are wired so the agent's lifecycle events
+  // (spawned/started) flow through the lifecycle bridge → MAP hub. Non-
+  // blocking: don't gate boot completion on agent process startup, which
+  // takes seconds. Failures are logged but do not abort boot.
+  if (config.bootstrap?.coordinator) {
+    const opts = config.bootstrap.coordinator === true
+      ? {}
+      : config.bootstrap.coordinator;
+    const bootstrapCwd = opts.cwd ?? cwd;
+    agentManager
+      .spawn({
+        role: "coordinator",
+        parent: null,
+        cwd: bootstrapCwd,
+        task: opts.task ?? "Default coordinator (auto-spawn on boot)",
+        permissionMode: opts.permissionMode,
+        agentType: opts.agentType,
+        customPrompt: opts.customPrompt,
+      })
+      .then((spawned) => {
+        console.log(
+          `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
+        );
+      })
+      .catch((err: Error) => {
+        console.warn(
+          `[boot-v2] Bootstrap coordinator spawn failed: ${err.message}`,
+        );
+      });
+  }
+
+  // 14. Return system handle
   return {
     agentManager,
     agentStore,

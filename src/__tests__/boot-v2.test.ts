@@ -193,4 +193,124 @@ describe("Boot V2", () => {
     // Prevent double-shutdown in afterEach
     system = null;
   });
+
+  describe("bootstrap", () => {
+    /**
+     * Wait for a coordinator to appear in the agent store. The bootstrap
+     * spawn is fired non-blocking (so boot doesn't gate on agent process
+     * startup), so direct `await bootV2(...)` returns before the coordinator
+     * exists. Poll with a short timeout to bridge the gap.
+     */
+    async function waitForCoordinator(
+      sys: MacroAgentSystemV2,
+      timeoutMs = 2000,
+    ): Promise<{ id: string; cwd?: string | null } | null> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const agents = sys.agentStore.listAgents({ role: "coordinator" });
+        if (agents.length > 0) return agents[0];
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return null;
+    }
+
+    afterEach(() => {
+      delete process.env.MACRO_BOOTSTRAP_COORDINATOR;
+      delete process.env.MACRO_BOOTSTRAP_CWD;
+    });
+
+    it("does not spawn when bootstrap is unset", async () => {
+      testDir = createTestDir();
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+      // Give any rogue spawn a chance to fire before asserting absence.
+      await new Promise((r) => setTimeout(r, 250));
+      const agents = system.agentStore.listAgents({ role: "coordinator" });
+      expect(agents).toHaveLength(0);
+    });
+
+    it("spawns a coordinator when bootstrap.coordinator: true", async () => {
+      testDir = createTestDir();
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true },
+      });
+      const agent = await waitForCoordinator(system);
+      expect(agent).not.toBeNull();
+      expect(agent!.cwd).toBe(testDir);
+    });
+
+    it("uses bootstrap.coordinator.cwd when provided", async () => {
+      testDir = createTestDir();
+      const projectDir = path.join(testDir, "project");
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: { cwd: projectDir } },
+      });
+      const agent = await waitForCoordinator(system);
+      expect(agent).not.toBeNull();
+      expect(agent!.cwd).toBe(projectDir);
+    });
+
+    it("env-var bridge: MACRO_BOOTSTRAP_COORDINATOR=true triggers bootstrap", async () => {
+      testDir = createTestDir();
+      process.env.MACRO_BOOTSTRAP_COORDINATOR = "true";
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+      const agent = await waitForCoordinator(system);
+      expect(agent).not.toBeNull();
+      expect(agent!.cwd).toBe(testDir);
+    });
+
+    it("env-var bridge: MACRO_BOOTSTRAP_CWD overrides default cwd", async () => {
+      testDir = createTestDir();
+      const projectDir = path.join(testDir, "project");
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      process.env.MACRO_BOOTSTRAP_COORDINATOR = "true";
+      process.env.MACRO_BOOTSTRAP_CWD = projectDir;
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+      const agent = await waitForCoordinator(system);
+      expect(agent!.cwd).toBe(projectDir);
+    });
+
+    it("programmatic bootstrap wins over env var", async () => {
+      testDir = createTestDir();
+      const programmaticDir = path.join(testDir, "programmatic");
+      const envDir = path.join(testDir, "env");
+      fs.mkdirSync(programmaticDir, { recursive: true });
+      fs.mkdirSync(envDir, { recursive: true });
+
+      process.env.MACRO_BOOTSTRAP_COORDINATOR = "true";
+      process.env.MACRO_BOOTSTRAP_CWD = envDir;
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: { cwd: programmaticDir } },
+      });
+      const agent = await waitForCoordinator(system);
+      // Programmatic value wins; env-bridge skipped because field already set.
+      expect(agent!.cwd).toBe(programmaticDir);
+    });
+  });
 });

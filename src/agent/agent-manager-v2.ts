@@ -1138,6 +1138,21 @@ export function createAgentManagerV2(
     });
 
     const agent = agentRecordToAgent(agentStore.getAgent(agentId)!);
+
+    // Re-publish the agent to subscribers (local MAP server, hub lifecycle
+    // bridge, team auto-join listeners) so a resumed agent is a first-class
+    // registered agent — not just an in-memory handle. Without this, the hub
+    // never re-registers the agent after cold-start; ACP routing works but
+    // the hub's "Registered Agents" view stays empty and capabilities never
+    // propagate back through `map/agents/register`.
+    //
+    // Spawn semantics are correct here: the process is new, the session is
+    // (re)loaded, and subscribers treat it as a fresh registration. Paired
+    // with the `stopped` event that fired on the prior termination, this
+    // keeps the bridge's `registered` map consistent.
+    notifyLifecycle({ type: "spawned", agent });
+    notifyLifecycle({ type: "started", agent });
+
     return {
       id: agentId,
       session_id: sessionRecord?.session_id ?? "",

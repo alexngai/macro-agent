@@ -587,12 +587,47 @@ export function createMacroAgent(
         return {};
       }
 
-      // No mapping — but if the client supplied provider_session_id via _meta,
-      // we can still replay history from the JSONL on disk. This is the
-      // cross-restart recovery path. We don't create a session mapping because
-      // there's no live agent to bind to — the client should create a fresh
-      // session if it wants to continue the conversation.
+      // No in-memory mapping and the ACP sessionId isn't an agent ID. If the
+      // client supplied provider_session_id via _meta, reverse-lookup the
+      // owning agent in the agent-store and resume it. This is the durable
+      // cross-restart recovery path: macro-agent's sessionMapper is
+      // in-memory, so after a process restart it's empty, but the agent +
+      // session records survive on disk keyed by provider_session_id.
+      //
+      // The critical piece is creating the sessionMapper entry here — without
+      // it, subsequent `prompt` calls throw `session not found` and the ACP
+      // layer catches that and returns stopReason:"cancelled", making the
+      // session appear unresponsive.
       if (metaProviderSessionId) {
+        const store = (system as any).agentStore;
+        const sessionRec = typeof store?.findSessionByProviderSessionId === "function"
+          ? store.findSessionByProviderSessionId(metaProviderSessionId)
+          : undefined;
+        if (sessionRec?.agent_id) {
+          const agentId = sessionRec.agent_id;
+          try {
+            // Idempotent: resume() throws ALREADY_RUNNING if the agent is
+            // already active (e.g. _macro/resumeAgent just brought it back).
+            // We still need to bind the ACP session to this agent.
+            if (!agentManager.hasActiveSession(agentId as any)) {
+              await agentManager.resume(agentId as any);
+            }
+            // Bind under BOTH the macro-agent ACP sessionId AND the provider
+            // session UUID. The MAP SDK's ACPStreamConnection often ends up
+            // storing _meta.provider_session_id as its stream.sessionId —
+            // which is what swarmcraft echoes back in session/prompt. Without
+            // the UUID mapping, prompt hits sessionMapper with the UUID key
+            // and fails (→ stopReason: cancelled).
+            sessionMapper.createMapping(sessionId, agentId);
+            if (metaProviderSessionId !== sessionId) {
+              sessionMapper.createMapping(metaProviderSessionId as any, agentId);
+            }
+            await replayHistory(agentId, metaProviderSessionId);
+            return {};
+          } catch {
+            // Fall through to history-only replay below
+          }
+        }
         await replayHistory(undefined, metaProviderSessionId);
         return {};
       }
@@ -931,7 +966,7 @@ export function createMacroAgent(
         }
 
         return { stopReason: "end_turn" };
-      } catch (err) {
+      } catch {
         // If prompt fails, still return a valid response
         return { stopReason: "cancelled" };
       } finally {
