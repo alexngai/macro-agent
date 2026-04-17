@@ -7,7 +7,9 @@
  * @module teams/team-loader
  */
 
+import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import { TemplateLoader } from "openteams";
 import type {
   ResolvedRole,
@@ -28,6 +30,15 @@ import {
 // =============================================================================
 
 const TEAMS_DIR = ".multiagent/teams";
+
+// Bundled team templates shipped with the macro-agent package. Used as a
+// fallback when a team name isn't present in the user's `.multiagent/teams/`
+// — so a fresh project can `startTeam('self-driving', cwd)` without first
+// running the seed step. User-local copies always win when present.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PACKAGE_ROOT = path.resolve(__dirname, "..", "..");
+const BUNDLED_TEAMS_DIR = path.join(PACKAGE_ROOT, "templates", "teams");
 
 // =============================================================================
 // TeamLoader
@@ -51,7 +62,13 @@ export async function loadTeam(
   basePath?: string
 ): Promise<TeamManifest> {
   const root = basePath ?? process.cwd();
-  const teamDir = path.join(root, TEAMS_DIR, teamName);
+  const userTeamDir = path.join(root, TEAMS_DIR, teamName);
+  // Prefer a user-customised template; fall back to the bundled default
+  // shipped under `<package>/templates/teams/<name>/`. This lets fresh
+  // projects use built-in teams without an explicit seed step, while
+  // still honouring per-project overrides.
+  const bundledTeamDir = path.join(BUNDLED_TEAMS_DIR, teamName);
+  const teamDir = fs.existsSync(userTeamDir) ? userTeamDir : bundledTeamDir;
 
   // 1. Load via openteams TemplateLoader with hooks
   let template;

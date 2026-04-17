@@ -13,9 +13,13 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Package root: up from src/teams/ → src/ → package root
+// Package root: up from src/teams/ → src/ → package root.
+// Bundled templates live under `templates/teams/` so they're clearly shipped
+// assets (not confused with user runtime config, which lives at
+// `<project>/.multiagent/teams/` — a gitignored directory that this module
+// seeds INTO on first use).
 const PACKAGE_ROOT = path.resolve(__dirname, "..", "..");
-const BUNDLED_TEAMS_DIR = path.join(PACKAGE_ROOT, ".multiagent", "teams");
+const BUNDLED_TEAMS_DIR = path.join(PACKAGE_ROOT, "templates", "teams");
 const TEAMS_DIR = ".multiagent/teams";
 
 /**

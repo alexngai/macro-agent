@@ -19,9 +19,17 @@ import type { WorkspaceManager } from '../types.js';
 import { vi } from 'vitest';
 
 describe('self-driving team YAML (V3 migration)', () => {
+  // Resolve relative to this test file so the path is cwd-independent and
+  // points at the shipped package asset (not a user-runtime copy under
+  // <project>/.multiagent/ — that only exists after `seed-defaults` runs).
+  // `src/workspace/__tests__/` → `../../../` → package root.
+  const PACKAGE_ROOT = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    '..', '..', '..'
+  );
   const yamlPath = path.join(
-    process.cwd(),
-    '.multiagent/teams/self-driving/team.yaml'
+    PACKAGE_ROOT,
+    'templates/teams/self-driving/team.yaml'
   );
 
   it('exists on disk', () => {

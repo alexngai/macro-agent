@@ -1,0 +1,142 @@
+name: self-driving
+description: "Cursor-style autonomous codebase development: planners explore and create tasks, grinders claim and execute in their own streams, judges evaluate quality."
+version: 1
+
+# ─────────────────────────────────────────────────────────────
+# Roles
+# ─────────────────────────────────────────────────────────────
+roles:
+  - planner
+  - grinder
+  - judge
+
+# ─────────────────────────────────────────────────────────────
+# Topology
+# ─────────────────────────────────────────────────────────────
+topology:
+  root:
+    role: planner
+    prompt: prompts/planner.md
+    config:
+      model: sonnet
+  companions:
+    - role: judge
+      prompt: prompts/judge.md
+      config:
+        model: haiku
+  spawn_rules:
+    planner: [grinder, planner]
+    judge: []
+    grinder: []
+
+# ─────────────────────────────────────────────────────────────
+# Communication
+# ─────────────────────────────────────────────────────────────
+communication:
+  enforcement: permissive
+
+  channels:
+    task_updates:
+      description: "Task lifecycle events"
+      signals: [TASK_CREATED, TASK_COMPLETED, TASK_FAILED]
+    work_coordination:
+      description: "Work assignment and completion"
+      signals: [WORK_ASSIGNED, WORKER_DONE, MERGE_REQUEST]
+    health:
+      description: "System health monitoring"
+      signals: [HEALTH_CHECK, METRIC_SNAPSHOT, GREEN_SNAPSHOT, FIXUP_CREATED]
+
+  subscriptions:
+    planner:
+      - channel: task_updates
+      - channel: work_coordination
+        signals: [WORKER_DONE]
+      - channel: health
+        signals: [METRIC_SNAPSHOT, GREEN_SNAPSHOT, FIXUP_CREATED]
+    judge:
+      - channel: task_updates
+        signals: [TASK_FAILED]
+      - channel: work_coordination
+        signals: [WORKER_DONE]
+      - channel: health
+    grinder:
+      - channel: work_coordination
+        signals: [WORK_ASSIGNED]
+
+  emissions:
+    planner: [TASK_CREATED, WORK_ASSIGNED, PLANNING_COMPLETE]
+    judge: [HEALTH_CHECK, GREEN_SNAPSHOT, FIXUP_CREATED]
+    grinder: [WORKER_DONE]
+
+  routing:
+    peers:
+      - from: judge
+        to: planner
+        via: direct
+        signals: [FIXUP_CREATED, GREEN_SNAPSHOT]
+      - from: planner
+        to: judge
+        via: direct
+        signals: [CONVERGENCE_CHECK]
+
+# ─────────────────────────────────────────────────────────────
+# macro-agent specific extensions
+# ─────────────────────────────────────────────────────────────
+macro_agent:
+  # V3 stream-first workspace topology.
+  # Compiled by YamlDrivenTopology into per-spawn WorkspaceDecision values.
+  workspace:
+    default_stream:
+      fork_from: main
+      name_template: "{team}"
+      change_id_tracking: true
+
+    on_team_complete: keep
+
+    roles:
+      # Planner shares the team root stream — continuous exploration lives on the
+      # same branch as the team's accumulated work; no per-planner fork.
+      planner:
+        workspace: attach_to_team_root
+        capabilities:
+          - workspace.read
+          - agent.spawn
+
+      # Grinders fork their own stream off the team root, land via direct-push
+      # (trunk integration). A conflict during landing aborts and leaves the
+      # stream for human / judge review.
+      grinder:
+        workspace: new_stream
+        stream_lineage: fork_from_team_root
+        landing: direct_push
+        on_conflict: defer
+        capabilities:
+          - workspace.commit
+          - workspace.land
+
+      # Judge is read-only — it observes repo state but doesn't need a
+      # workspace of its own.
+      judge:
+        workspace: none
+        capabilities:
+          - workspace.read
+
+  # Declarative shorthand read by TeamRuntimeV2.getStrategyName(). `trunk`
+  # pairs with the grinder's direct_push landing above: every task lands
+  # straight onto the team-root stream rather than going through a merge
+  # queue. Kept here as a top-level scalar so runtimes that don't parse the
+  # full V3 workspace block (env-var consumers, logs, metrics labels) still
+  # see the integration strategy.
+  integration:
+    strategy: trunk
+
+  task_assignment:
+    mode: pull
+    pull:
+      idle_timeout_s: 300
+      claim_retry_delay_ms: 2000
+      max_concurrent_per_agent: 1
+
+  observability:
+    metrics_window_s: 3600
+    snapshot_interval_s: 300
