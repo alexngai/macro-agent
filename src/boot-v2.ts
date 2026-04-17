@@ -264,6 +264,26 @@ export interface BootV2Config {
       customPrompt?: string;
       task?: string;
     };
+    /**
+     * Rehydration policy for agents that existed before this boot. Controls
+     * what the boot script does with agents that outlived their previous
+     * host process (agent-store is durable; a restart finds agents still
+     * marked `state='running'` but without any live ACP session).
+     *
+     *   - `'none'` — skip rehydration entirely. Always fall through to fresh
+     *     bootstrap spawn (or no spawn if `bootstrap.coordinator` is unset).
+     *   - `'coordinators'` (default) — revive only root coordinators for
+     *     this cwd. Matches the common openhive case where the workspace
+     *     intent is "I want a coordinator here" and workers are ephemeral.
+     *   - `'all'` — revive every `state='running'` agent at this cwd
+     *     (coordinators plus workers/integrators/monitors). Parent-first
+     *     ordering; children are skipped if their parent failed to revive
+     *     or is `state='stopped'` (deliberately down).
+     *
+     * Hosted swarms pass `'all'` via `MACRO_BOOTSTRAP_REHYDRATE=all` so a
+     * restart restores the full macro-agent team, not just head managers.
+     */
+    rehydrate?: "none" | "coordinators" | "all";
   };
 }
 
@@ -349,8 +369,9 @@ export async function bootV2(
 
   // Env-var bridge for hosts that pass through bootConfig with a fixed
   // whitelist (e.g. openswarm). Translates MACRO_BOOTSTRAP_COORDINATOR /
-  // MACRO_BOOTSTRAP_CWD into the structured bootstrap field if not already
-  // set programmatically. Programmatic config wins.
+  // MACRO_BOOTSTRAP_CWD / MACRO_BOOTSTRAP_REHYDRATE into the structured
+  // bootstrap field if not already set programmatically. Programmatic
+  // config wins per field.
   if (
     process.env.MACRO_BOOTSTRAP_COORDINATOR === "true" &&
     !config.bootstrap?.coordinator
@@ -361,6 +382,21 @@ export async function bootV2(
       bootstrap: {
         ...(config.bootstrap ?? {}),
         coordinator: envCwd ? { cwd: envCwd } : true,
+      },
+    };
+  }
+  const envRehydrate = process.env.MACRO_BOOTSTRAP_REHYDRATE;
+  if (
+    (envRehydrate === "none" ||
+      envRehydrate === "coordinators" ||
+      envRehydrate === "all") &&
+    config.bootstrap?.rehydrate === undefined
+  ) {
+    config = {
+      ...config,
+      bootstrap: {
+        ...(config.bootstrap ?? {}),
+        rehydrate: envRehydrate,
       },
     };
   }
@@ -848,13 +884,130 @@ export async function bootV2(
   // (spawned/started) flow through the lifecycle bridge → MAP hub. Non-
   // blocking: don't gate boot completion on agent process startup, which
   // takes seconds. Failures are logged but do not abort boot.
+  //
+  // Rehydration on restart: the agent-store persists across process
+  // restarts. When we boot into a workspace that already has one or more
+  // coordinators (e.g. openhive spawned this swarm previously + auto-
+  // revived it), resume THOSE agents instead of spawning a brand-new one.
+  // Otherwise the UI shows a different coordinator name after every
+  // server restart — the prior conversations still exist on disk but get
+  // buried under stale, state='stopped' records that the UI treats as
+  // dead.
   if (config.bootstrap?.coordinator) {
     const opts = config.bootstrap.coordinator === true
       ? {}
       : config.bootstrap.coordinator;
     const bootstrapCwd = opts.cwd ?? cwd;
-    agentManager
-      .spawn({
+    const policy = config.bootstrap.rehydrate ?? "coordinators";
+
+    // Build the revival set based on policy:
+    //   - 'none'          → empty set (always fall through to fresh spawn)
+    //   - 'coordinators'  → root coordinators at this cwd, running or stopped
+    //   - 'all'           → every agent at this cwd, running or stopped
+    //
+    // Both 'running' and 'stopped' count as revival candidates. The
+    // hosted-swarm graceful-restart path transitions agents to 'stopped'
+    // on shutdown; an abrupt parent crash leaves them as 'running'.
+    // Either way, the workspace intent survives the restart and we want
+    // the same coordinators + their children back. Agents that a user
+    // explicitly terminated are tracked with a distinct `stop_reason`
+    // and — since explicit termination clears them from the cascade — do
+    // not appear in the listAgents result at a cwd they no longer
+    // inhabit. The `state='failed'` set is also excluded.
+    let priors: import("./agent/agent-store.js").AgentRecord[] = [];
+    if (policy === "coordinators") {
+      priors = agentStore
+        .listAgents({ parent_id: null, role: "coordinator" })
+        .filter(
+          (a) =>
+            a.cwd === bootstrapCwd &&
+            (a.state === "running" || a.state === "stopped"),
+        );
+    } else if (policy === "all") {
+      priors = agentStore
+        .listAgents()
+        .filter(
+          (a) =>
+            a.cwd === bootstrapCwd &&
+            (a.state === "running" || a.state === "stopped"),
+        );
+    }
+
+    const rehydrateOrSpawn = async () => {
+      if (priors.length > 0) {
+        // Parent-first ordering so a child's `resume()` sees its parent
+        // already back (lineage bookkeeping, inbox subscriptions). Depth
+        // = lineage.length: roots are 0, direct children of roots are 1.
+        const byDepth = new Map<number, typeof priors>();
+        for (const p of priors) {
+          const d = p.lineage.length;
+          if (!byDepth.has(d)) byDepth.set(d, []);
+          byDepth.get(d)!.push(p);
+        }
+        const depths = Array.from(byDepth.keys()).sort((a, b) => a - b);
+
+        const priorIds = new Set(priors.map((p) => p.id));
+        const resumed = new Set<string>();
+        const failed = new Set<string>();
+
+        // Stagger spawns — each resume fires a Claude Code subprocess and
+        // we don't want a coordinator + five workers all booting at once.
+        const CONCURRENCY = 2;
+
+        for (const depth of depths) {
+          const atDepth = byDepth.get(depth)!;
+          const eligible = atDepth.filter((a) => {
+            if (!a.parent_id) return true; // roots are always eligible
+            // Skip children whose parent isn't being revived at all
+            // (deliberately stopped, or out of scope for this policy).
+            if (!priorIds.has(a.parent_id)) {
+              console.warn(
+                `[boot-v2] Skipping ${a.role} ${a.id}: parent ${a.parent_id} not in revival set`,
+              );
+              return false;
+            }
+            // Skip children whose parent resume failed.
+            if (failed.has(a.parent_id)) {
+              console.warn(
+                `[boot-v2] Skipping ${a.role} ${a.id}: parent ${a.parent_id} failed to resume`,
+              );
+              return false;
+            }
+            return resumed.has(a.parent_id);
+          });
+
+          for (let i = 0; i < eligible.length; i += CONCURRENCY) {
+            const batch = eligible.slice(i, i + CONCURRENCY);
+            await Promise.all(
+              batch.map(async (prior) => {
+                try {
+                  const r = await agentManager.resume(prior.id);
+                  resumed.add(prior.id);
+                  console.log(
+                    `[boot-v2] Rehydrated ${prior.role}: ${(r as any).name ?? r.id} at ${prior.cwd}`,
+                  );
+                } catch (err) {
+                  const msg = (err as Error).message;
+                  if (/ALREADY_RUNNING/i.test(msg)) {
+                    // Rare lifecycle race — treat as success so children
+                    // aren't held back waiting on a parent that's actually
+                    // already alive.
+                    resumed.add(prior.id);
+                  } else {
+                    failed.add(prior.id);
+                    console.warn(
+                      `[boot-v2] Failed to rehydrate ${prior.role} ${prior.id}: ${msg}`,
+                    );
+                  }
+                }
+              }),
+            );
+          }
+        }
+        return;
+      }
+      // No priors matched the policy → fresh spawn (first boot, or 'none').
+      const spawned = await agentManager.spawn({
         role: "coordinator",
         parent: null,
         cwd: bootstrapCwd,
@@ -862,17 +1015,17 @@ export async function bootV2(
         permissionMode: opts.permissionMode,
         agentType: opts.agentType,
         customPrompt: opts.customPrompt,
-      })
-      .then((spawned) => {
-        console.log(
-          `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
-        );
-      })
-      .catch((err: Error) => {
-        console.warn(
-          `[boot-v2] Bootstrap coordinator spawn failed: ${err.message}`,
-        );
       });
+      console.log(
+        `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
+      );
+    };
+
+    rehydrateOrSpawn().catch((err: Error) => {
+      console.warn(
+        `[boot-v2] Bootstrap coordinator init failed: ${err.message}`,
+      );
+    });
   }
 
   // 14. Return system handle

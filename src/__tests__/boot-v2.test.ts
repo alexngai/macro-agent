@@ -217,6 +217,7 @@ describe("Boot V2", () => {
     afterEach(() => {
       delete process.env.MACRO_BOOTSTRAP_COORDINATOR;
       delete process.env.MACRO_BOOTSTRAP_CWD;
+      delete process.env.MACRO_BOOTSTRAP_REHYDRATE;
     });
 
     it("does not spawn when bootstrap is unset", async () => {
@@ -311,6 +312,151 @@ describe("Boot V2", () => {
       const agent = await waitForCoordinator(system);
       // Programmatic value wins; env-bridge skipped because field already set.
       expect(agent!.cwd).toBe(programmaticDir);
+    });
+
+    it("env-var bridge: MACRO_BOOTSTRAP_REHYDRATE sets rehydrate policy", async () => {
+      testDir = createTestDir();
+      process.env.MACRO_BOOTSTRAP_COORDINATOR = "true";
+      process.env.MACRO_BOOTSTRAP_REHYDRATE = "none";
+
+      // First boot creates a coordinator and persists it to agent-store.
+      const sys1 = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+      const first = await waitForCoordinator(sys1);
+      expect(first).not.toBeNull();
+      await sys1.shutdown();
+
+      // Second boot with REHYDRATE=none should spawn a fresh coordinator
+      // rather than reviving the prior one — so we end up with two rows.
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+      await waitForCoordinator(system);
+      const coordinators = system.agentStore
+        .listAgents({ role: "coordinator" })
+        .filter((a) => a.cwd === testDir);
+      expect(coordinators.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("rehydrate: 'none' spawns a fresh coordinator even when priors exist", async () => {
+      testDir = createTestDir();
+
+      const sys1 = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true },
+      });
+      const first = await waitForCoordinator(sys1);
+      const firstId = first!.id;
+      await sys1.shutdown();
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true, rehydrate: "none" },
+      });
+      await waitForCoordinator(system);
+      const coordinators = system.agentStore
+        .listAgents({ role: "coordinator" })
+        .filter((a) => a.cwd === testDir);
+      expect(coordinators.length).toBeGreaterThanOrEqual(2);
+      // Prior is still present (not reused), new coordinator has a
+      // different id.
+      const priorStill = coordinators.find((c) => c.id === firstId);
+      const fresh = coordinators.find((c) => c.id !== firstId);
+      expect(priorStill).toBeDefined();
+      expect(fresh).toBeDefined();
+    });
+
+    it("rehydrate: 'all' revives workers alongside the coordinator", async () => {
+      testDir = createTestDir();
+
+      // First boot — create a coordinator then a worker under it so the
+      // agent-store carries both records into the second boot.
+      const sys1 = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true },
+      });
+      const coord = await waitForCoordinator(sys1);
+      expect(coord).not.toBeNull();
+
+      const worker = await sys1.agentManager.spawn({
+        task: "worker task",
+        role: "worker",
+        parent: coord!.id as any,
+        cwd: testDir,
+      });
+      const workerId = worker.id;
+
+      // Snapshot the worker's state before shutdown — it should still
+      // read 'running' because we never terminated it (mirrors the
+      // hosted-swarm-abrupt-restart case).
+      const preShutdown = sys1.agentStore.getAgent(workerId as any);
+      expect(preShutdown?.state).toBe("running");
+      await sys1.shutdown();
+
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true, rehydrate: "all" },
+      });
+      // Give the non-blocking rehydration loop a chance to resume both
+      // the coordinator (depth 0) and the worker (depth 1).
+      await waitForCoordinator(system);
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        if (system.agentManager.hasActiveSession(workerId as any)) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(system.agentManager.hasActiveSession(workerId as any)).toBe(true);
+    });
+
+    it("rehydrates prior coordinator instead of spawning a new one", async () => {
+      // Simulate the restart flow: boot once with bootstrap.coordinator,
+      // shut down (agent-store persists), then boot again at the same
+      // cwd/baseDir. The second boot should reuse the same agent id/name
+      // instead of creating a new one, so openhive-side "registered
+      // agents" stays stable across hosted-swarm revivals.
+      testDir = createTestDir();
+
+      const system1 = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true },
+      });
+      const first = await waitForCoordinator(system1);
+      expect(first).not.toBeNull();
+      const firstId = first!.id;
+      await system1.shutdown();
+
+      // Second boot — same baseDir so agent-store is reused.
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: testDir,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+        bootstrap: { coordinator: true },
+      });
+      const second = await waitForCoordinator(system);
+      expect(second).not.toBeNull();
+      // Same agent id → rehydrated, not re-spawned.
+      expect(second!.id).toBe(firstId);
+
+      // And only one coordinator for this cwd — no duplicates.
+      const coordinators = system.agentStore
+        .listAgents({ role: "coordinator" })
+        .filter((a) => a.cwd === testDir);
+      expect(coordinators).toHaveLength(1);
     });
   });
 
