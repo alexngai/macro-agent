@@ -860,12 +860,14 @@ export async function bootV2(
       // Wire sidecar into agent manager for session-end checkpoints
       agentManager.setSidecar(mapSidecar);
 
-      // Bridge dispatch events to MAP for observability
+      // Bridge dispatch events to MAP for observability. Spread the source
+      // event first, then namespace the `type` field — otherwise tsc warns
+      // about the literal key being overwritten by the spread.
       if (taskDispatcher && mapSidecar.emitEvent) {
         taskDispatcher.onEvent((event) => {
           mapSidecar!.emitEvent!({
-            type: `dispatch.${event.type}`,
             ...event,
+            type: `dispatch.${event.type}`,
           });
         });
       }

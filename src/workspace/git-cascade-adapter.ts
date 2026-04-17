@@ -251,7 +251,11 @@ export class GitCascadeAdapter {
     const suffix = matchCascadeSuffix(method);
     if (!suffix) return;
 
-    switch (suffix) {
+    // Widen to `string` so case labels for suffixes not yet in the installed
+    // git-cascade version (e.g. `stream.paused`, `stream.resumed`,
+    // `stream.rolled_back` — added after 0.0.7) still compile. The runtime
+    // value is always a string either way; this is a version-skew shim.
+    switch (suffix as string) {
       case 'stream.opened': {
         const p = params as StreamOpenedParams;
         this.emit('stream:created', {

@@ -21,6 +21,14 @@
  */
 
 import { CASCADE_METHODS } from 'git-cascade/events';
+
+// Fallback method names for events not yet present in the installed
+// git-cascade version (`STREAM_PAUSED`, `STREAM_RESUMED`,
+// `STREAM_ROLLED_BACK` were added after 0.0.7). When the dep is upgraded,
+// collapse these back into `CASCADE_METHODS.*` for a single source of truth.
+const X_CASCADE_STREAM_PAUSED = 'x-cascade/stream.paused' as const;
+const X_CASCADE_STREAM_RESUMED = 'x-cascade/stream.resumed' as const;
+const X_CASCADE_STREAM_ROLLED_BACK = 'x-cascade/stream.rolled_back' as const;
 import type { LifecycleBridgeConnection } from './lifecycle-bridge.js';
 import type {
   GitCascadeAdapter,
@@ -293,7 +301,7 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
     case 'stream:paused':
       if (!d.streamId) return null;
       return {
-        method: CASCADE_METHODS.STREAM_PAUSED,
+        method: X_CASCADE_STREAM_PAUSED,
         params: {
           stream_id: d.streamId,
           reason: d.reason,
@@ -303,7 +311,7 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
     case 'stream:resumed':
       if (!d.streamId) return null;
       return {
-        method: CASCADE_METHODS.STREAM_RESUMED,
+        method: X_CASCADE_STREAM_RESUMED,
         params: {
           stream_id: d.streamId,
         },
@@ -312,7 +320,7 @@ function translate(event: GitCascadeEvent): TranslatedCall | null {
     case 'stream:rolled_back':
       if (!d.streamId) return null;
       return {
-        method: CASCADE_METHODS.STREAM_ROLLED_BACK,
+        method: X_CASCADE_STREAM_ROLLED_BACK,
         params: {
           stream_id: d.streamId,
           strategy: d.strategy,

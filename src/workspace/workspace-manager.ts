@@ -1115,20 +1115,22 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
      */
     metadata?: import('git-cascade/events').EventMetadata;
   }): import('./types-v3.js').MergeResult {
-    // git-cascade's MergeStreamOptions uses `sourceStream`/`targetStream`.
-    // We adapt to v3's `sourceStreamId`/`targetStreamId` at the boundary.
+    // git-cascade's MergeStreamOptions uses `sourceStream`/`targetStream` and
+    // doesn't accept an opts.metadata field — the tagging is our concern, not
+    // the tracker's. Carry `opts.metadata` through on the emitted event
+    // instead, which is what the hub's cascade_merges projection reads.
     const result = this.adapter.mergeStream({
       sourceStream: opts.sourceStreamId,
       targetStream: opts.targetStreamId,
       agentId: opts.agentId,
       worktree: opts.worktree,
-      metadata: opts.metadata,
     });
     if (result.success) {
       this.emit('stream:merged', {
         sourceStreamId: opts.sourceStreamId,
         targetStreamId: opts.targetStreamId,
         mergeCommit: result.newHead,
+        ...(opts.metadata ? { metadata: opts.metadata } : {}),
       });
     } else {
       this.emit('stream:conflicted', {
