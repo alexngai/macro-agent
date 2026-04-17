@@ -340,6 +340,30 @@ export class AgentStore {
     };
   }
 
+  /**
+   * Reverse lookup: find the session row whose provider_session_id matches.
+   * Used by `_macro/resumeAgent` to resolve session → agent when only the
+   * Claude Code session UUID is known (e.g. OpenHive asks to resume a session
+   * by its persisted provider_session_id).
+   *
+   * Returns the most recently created session if multiple agents ever held
+   * the same provider_session_id — shouldn't happen, but defensive.
+   */
+  findSessionByProviderSessionId(providerSessionId: string): SessionRecord | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM sessions WHERE provider_session_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(providerSessionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      agent_id: row.agent_id as string,
+      session_id: row.session_id as string,
+      provider_session_id: (row.provider_session_id as string) || undefined,
+      created_at: row.created_at as number,
+    };
+  }
+
   removeSession(agentId: AgentId): void {
     this.db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(agentId);
   }

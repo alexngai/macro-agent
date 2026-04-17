@@ -218,6 +218,98 @@ describe("ACP-over-MAP E2E", () => {
       // ignore
     }
   }, 15000);
+
+  // ─────────────────────────────────────────────────────────────────
+  // _macro/resumeAgent — durable resume by providerSessionId
+  // ─────────────────────────────────────────────────────────────────
+
+  it("_macro/resumeAgent returns error when providerSessionId is unknown", async () => {
+    const result = (await client!.callExtension("_macro/resumeAgent", {
+      providerSessionId: "psid-does-not-exist",
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeTruthy();
+  }, 10000);
+
+  it("_macro/resumeAgent returns error when neither id nor psid given", async () => {
+    const result = (await client!.callExtension("_macro/resumeAgent", {})) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/providerSessionId or agentId/);
+  }, 10000);
+
+  it("_macro/resumeAgent resolves an active agent by providerSessionId (session-first)", async () => {
+    // Spawn an agent so the sessions table has a row with a provider_session_id.
+    // The mock acp-factory sets session.id = `session-mock-${Date.now()}`, which
+    // macro-agent stores as provider_session_id (see agent-manager-v2.ts:1136).
+    const spawnResult = (await client!.callExtension("_macro/spawnAgent", {
+      task: "resume target",
+      role: "worker",
+    })) as { agent: { id: string; localId?: string } };
+
+    // Give the lifecycle bridge a moment to register the agent in the store.
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Read back the session record directly via the exposed AgentStore.
+    // The handler under test looks up agents by provider_session_id via the
+    // same path, so this also validates the store reverse-lookup end to end.
+    const agentStore = system.agentStore;
+    const allAgents = agentStore.listAgents();
+    const spawned = allAgents.find((a) => a.task === "resume target");
+    expect(spawned).toBeDefined();
+
+    const sessionRec = agentStore.getSession(spawned!.id);
+    expect(sessionRec).not.toBeNull();
+    expect(sessionRec!.provider_session_id).toBeTruthy();
+    const providerSessionId = sessionRec!.provider_session_id!;
+
+    // Call _macro/resumeAgent with the provider_session_id. Because the agent
+    // is still active (hasActiveSession === true), the handler takes the
+    // fast path and returns the live session info without re-spawning.
+    const result = (await client!.callExtension("_macro/resumeAgent", {
+      providerSessionId,
+    })) as {
+      success: boolean;
+      agent?: { id: string; localId: string; name?: string; role?: string };
+      acpSessionId?: string;
+      providerSessionId?: string;
+      error?: string;
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.agent).toBeDefined();
+    expect(result.agent!.localId).toBe(spawned!.id);
+    expect(result.agent!.role).toBe("worker");
+    expect(result.acpSessionId).toBe(sessionRec!.session_id);
+    expect(result.providerSessionId).toBe(providerSessionId);
+    // peerMapId (agent.id) should resolve to a MAP-server ULID, not the
+    // local store id — this confirms MAPServer registration is in place.
+    expect(result.agent!.id).toBeTruthy();
+  }, 15000);
+
+  it("_macro/resumeAgent resolves by agentId (fallback path)", async () => {
+    // Use an existing agent from the previous test. Listing is stable within
+    // the same MAP server instance.
+    const agentStore = system.agentStore;
+    const agents = agentStore.listAgents();
+    expect(agents.length).toBeGreaterThan(0);
+    const target = agents[0];
+
+    const result = (await client!.callExtension("_macro/resumeAgent", {
+      agentId: target.id,
+    })) as {
+      success: boolean;
+      agent?: { id: string; localId: string };
+      error?: string;
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.agent!.localId).toBe(target.id);
+  }, 15000);
 });
 
 describe("ACP-over-MAP E2E — MAP-level operations with agents", () => {

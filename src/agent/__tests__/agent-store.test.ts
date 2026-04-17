@@ -409,5 +409,57 @@ describe("AgentStore", () => {
       const session = store.getSession("agent-1")!;
       expect(session.provider_session_id).toBeUndefined();
     });
+
+    it("findSessionByProviderSessionId returns the matching session", () => {
+      store.putAgent(makeAgent({ id: "agent-2" }));
+      store.putSession({
+        agent_id: "agent-1",
+        session_id: "session-abc",
+        provider_session_id: "psid-xyz",
+        created_at: Date.now(),
+      });
+      store.putSession({
+        agent_id: "agent-2",
+        session_id: "session-def",
+        provider_session_id: "psid-other",
+        created_at: Date.now(),
+      });
+
+      const found = store.findSessionByProviderSessionId("psid-xyz");
+      expect(found).not.toBeNull();
+      expect(found!.agent_id).toBe("agent-1");
+      expect(found!.session_id).toBe("session-abc");
+    });
+
+    it("findSessionByProviderSessionId returns null when no match", () => {
+      store.putSession({
+        agent_id: "agent-1",
+        session_id: "session-1",
+        provider_session_id: "psid-1",
+        created_at: Date.now(),
+      });
+      expect(store.findSessionByProviderSessionId("psid-missing")).toBeNull();
+    });
+
+    it("findSessionByProviderSessionId returns most recent on duplicate psid", () => {
+      // Shouldn't normally happen but verify the ORDER BY created_at DESC path.
+      store.putAgent(makeAgent({ id: "agent-old" }));
+      store.putAgent(makeAgent({ id: "agent-new" }));
+      store.putSession({
+        agent_id: "agent-old",
+        session_id: "session-old",
+        provider_session_id: "psid-dup",
+        created_at: 1000,
+      });
+      store.putSession({
+        agent_id: "agent-new",
+        session_id: "session-new",
+        provider_session_id: "psid-dup",
+        created_at: 2000,
+      });
+
+      const found = store.findSessionByProviderSessionId("psid-dup");
+      expect(found!.agent_id).toBe("agent-new");
+    });
   });
 });

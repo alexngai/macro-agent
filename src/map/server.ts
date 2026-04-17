@@ -154,6 +154,128 @@ export function createMAPServerInstance(
     };
 
     /**
+     * Resume an agent session with full routing + session info returned.
+     *
+     * Session-first resolution: given a Claude Code `providerSessionId` (the
+     * session UUID persisted on the session record), reverse-look-up the
+     * owning agent. Falls back to `agentId` (either the MAP ULID or the
+     * local store id) when no providerSessionId is given or the reverse
+     * lookup misses.
+     *
+     * Behavior:
+     *   1. Resolve the local agent id.
+     *   2. Call `agentManager.resume(localId)` — idempotent; the manager
+     *      re-spawns the coordinator/head-manager if its process isn't live,
+     *      otherwise returns the existing handle.
+     *   3. Ensure the agent is registered in the MAPServer's registry so
+     *      ACP streams can target it via the returned peerMapId.
+     *   4. Return `{ agent: { id: peerMapId, localId, name }, acpSessionId,
+     *      providerSessionId }` — the caller needs peerMapId to open the
+     *      ACP stream and providerSessionId to pass into `session/load` so
+     *      Claude Code replays its on-disk transcript.
+     *
+     * Used by OpenHive's POST /sessions/:id/resume to revive a session whose
+     * swarm has been offline for longer than the hub's stale-grace window.
+     */
+    handlers["_macro/resumeAgent"] = async (params, ctx) => {
+      const providerSessionIdParam = params.providerSessionId as string | undefined;
+      const agentIdParam = params.agentId as string | undefined;
+
+      let localId: string | undefined;
+      let providerSessionId: string | undefined;
+
+      if (providerSessionIdParam) {
+        const session = agentStore.findSessionByProviderSessionId(providerSessionIdParam);
+        if (session) {
+          localId = session.agent_id;
+          providerSessionId = session.provider_session_id;
+        }
+      }
+
+      if (!localId && agentIdParam) {
+        localId = mapIdToLocalId.get(agentIdParam) ?? agentIdParam;
+        const session = agentStore.getSession(localId);
+        providerSessionId = session?.provider_session_id;
+      }
+
+      if (!localId) {
+        return {
+          success: false,
+          error: "providerSessionId or agentId required",
+        };
+      }
+
+      const agentRec = agentStore.getAgent(localId);
+      if (!agentRec) {
+        return { success: false, error: `Agent not found: ${localId}` };
+      }
+
+      // Already-running case: skip resume() (which rejects with ALREADY_RUNNING)
+      // and return the live agent's session info straight from the store.
+      // This makes the call idempotent — callers don't need to pre-check.
+      let resumedId: string;
+      let resumedSessionId: string;
+      let resumedName: string | undefined;
+      if (agentManager.hasActiveSession(localId as any)) {
+        resumedId = localId;
+        resumedName = agentRec.name;
+        const liveSession = agentStore.getSession(localId);
+        if (!liveSession) {
+          return {
+            success: false,
+            error: `Agent ${localId} is active but has no session record`,
+          };
+        }
+        resumedSessionId = liveSession.session_id;
+      } else {
+        try {
+          const resumed = await agentManager.resume(localId as any);
+          resumedId = resumed.id;
+          resumedSessionId = resumed.session_id;
+          resumedName = (resumed as any).name;
+        } catch (err) {
+          return { success: false, error: (err as Error).message };
+        }
+      }
+
+      // Ensure agent is registered in MAPServer's registry. resume() fires
+      // the spawned lifecycle event, which the lifecycle bridge handles —
+      // but we also register here for subscription routing context on the
+      // current MAP session (mirrors _macro/spawnAgent).
+      if (mapServer && !localIdToMapId.has(resumedId)) {
+        try {
+          const registered = mapServer.agents.register({
+            name: resumedName ?? resumedId,
+            role: agentRec.role,
+            state: "idle",
+            sessionId: ctx?.session?.id,
+            metadata: { peerAgentId: resumedId },
+          });
+          if (registered?.id) {
+            mapIdToLocalId.set(registered.id, resumedId);
+            localIdToMapId.set(resumedId, registered.id);
+          }
+        } catch {
+          // Best effort; lifecycle bridge will register on spawned event
+        }
+      }
+
+      const peerMapId = localIdToMapId.get(resumedId) ?? resumedId;
+
+      return {
+        success: true,
+        agent: {
+          id: peerMapId,
+          localId: resumedId,
+          name: resumedName,
+          role: agentRec.role,
+        },
+        acpSessionId: resumedSessionId,
+        providerSessionId,
+      };
+    };
+
+    /**
      * Terminate a running agent. Accepts either the agent's local ID or the
      * MAP-assigned ULID (we resolve back to local via mapIdToLocalId).
      * Reason defaults to "stopped"; use "cancelled" for user-initiated stops.
