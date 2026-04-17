@@ -34,6 +34,10 @@ async function main() {
   try {
     const system = await bootV2({
       cwd: defaultCwd,
+      // `--instance-id` picks the on-disk compartment under ~/.macro-agent/
+      // so multiple runs with the same id share state. Omit to auto-derive
+      // from the cwd hash. See `BootV2Config.instanceId`.
+      ...(options.instanceId ? { instanceId: options.instanceId } : {}),
       // Enable ACP WebSocket server if port is specified (server mode)
       ...(options.port
         ? {

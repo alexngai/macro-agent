@@ -22,6 +22,7 @@
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import { AgentStore } from "./agent/agent-store.js";
 import {
   DefaultInboxAdapter,
@@ -52,7 +53,22 @@ export interface BootV2Config {
   /** Working directory (default: process.cwd()) */
   cwd?: string;
 
-  /** Base directory for data storage (default: ~/.macro-agent) */
+  /**
+   * Stable identifier for this macro-agent run. Controls the default on-disk
+   * layout at `~/.macro-agent/<instanceId>/` (agents.db, inbox.db, sockets).
+   *
+   * Precedence when choosing an id:
+   *   1. explicit `instanceId` (this field)
+   *   2. `map.swarmId` (the MAP identity, when provided)
+   *   3. `inst_<sha256(cwd)[:12]>` (stable per-project fallback)
+   *
+   * Explicit `baseDir` overrides all of the above. Hosts that manage their
+   * own storage layout (openswarm spawns hosted swarms with a unique
+   * per-spawn data dir) still win by setting `baseDir` directly.
+   */
+  instanceId?: string;
+
+  /** Base directory for data storage. Default: `~/.macro-agent/<instanceId>/` */
   baseDir?: string;
 
   /** Default permission mode for spawned agents */
@@ -310,7 +326,26 @@ export async function bootV2(
   config: BootV2Config = {},
 ): Promise<MacroAgentSystemV2> {
   const cwd = config.cwd ?? process.cwd();
-  const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent");
+  // Resolve the instance id with three-tier precedence so the on-disk layout
+  // stays meaningful across standalone, MAP-connected, and hosted runs:
+  //
+  //   1. Explicit `instanceId` — caller-chosen, human-readable.
+  //   2. `map.swarmId` — the MAP identity when the caller has pre-registered
+  //      one. This ties macro-agent's local store to its hub identity, so a
+  //      swarm with swarm_id=X always resumes its own state.
+  //   3. A stable hash of the resolved cwd — the last-resort fallback so two
+  //      processes in different projects never collide on agents.db, inbox.db,
+  //      or the control socket. Reruns in the same project reuse their store.
+  //
+  // Hosts that manage their own storage layout (e.g. openswarm spawning
+  // per-swarm instances under a unique data dir) still win by passing
+  // `baseDir` directly. Legacy `~/.macro-agent/*.db` from pre-instancing
+  // versions is left alone — new boots start fresh under their own subdir.
+  const instanceId =
+    config.instanceId
+    ?? config.map?.swarmId
+    ?? ("inst_" + crypto.createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 12));
+  const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent", instanceId);
 
   // Env-var bridge for hosts that pass through bootConfig with a fixed
   // whitelist (e.g. openswarm). Translates MACRO_BOOTSTRAP_COORDINATOR /

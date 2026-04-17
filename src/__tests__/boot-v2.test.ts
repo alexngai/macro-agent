@@ -313,4 +313,173 @@ describe("Boot V2", () => {
       expect(agent!.cwd).toBe(programmaticDir);
     });
   });
+
+  // ─── default baseDir isolation ─────────────────────────────────────
+  //
+  // Regression guard: without an explicit `baseDir`, macro-agent used to
+  // default to `~/.macro-agent/` — a singleton directory shared across
+  // every run on the box. Two instances in different projects would
+  // collide on `agents.db`, `inbox.db`, and `control.sock` (only one can
+  // bind the sockets). The default now compartmentalizes per-cwd via a
+  // stable hash, so sibling projects stay isolated while restarts in the
+  // same project still reuse their previous store.
+
+  describe("default baseDir (per-cwd isolation)", () => {
+    it("derives a stable cwd-hashed baseDir when none is provided", async () => {
+      testDir = createTestDir();
+      system = await bootV2({
+        cwd: testDir,
+        // baseDir omitted — want to verify the default picks a unique,
+        // stable path under ~/.macro-agent rather than the singleton.
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+
+      // The expected path is `~/.macro-agent/inst_<12-hex>` where the hex
+      // is sha256(resolved(cwd)).slice(0, 12). Reproduce the computation
+      // here and assert the agent store landed there.
+      const crypto = await import("node:crypto");
+      const expectedId =
+        "inst_" +
+        crypto
+          .createHash("sha256")
+          .update(path.resolve(testDir))
+          .digest("hex")
+          .slice(0, 12);
+      const expectedDir = path.join(os.homedir(), ".macro-agent", expectedId);
+
+      expect(fs.existsSync(path.join(expectedDir, "agents.db"))).toBe(true);
+      expect(fs.existsSync(path.join(expectedDir, "inbox.db"))).toBe(true);
+
+      // Clean up the derived dir so repeated test runs don't leave state behind.
+      await system.shutdown();
+      system = null;
+      try { fs.rmSync(expectedDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    it("two instances in sibling cwds get distinct stores", async () => {
+      const a = createTestDir();
+      const b = createTestDir();
+
+      // Keep a reference to clean up afterwards; the outer afterEach only
+      // tracks `system` and a single `testDir`.
+      const sysA = await bootV2({
+        cwd: a,
+        inbox: { socketPath: path.join(a, "inbox.sock") },
+      });
+      const sysB = await bootV2({
+        cwd: b,
+        inbox: { socketPath: path.join(b, "inbox.sock") },
+      });
+
+      const crypto = await import("node:crypto");
+      const hash = (p: string) =>
+        "inst_" + crypto.createHash("sha256").update(path.resolve(p)).digest("hex").slice(0, 12);
+      const dirA = path.join(os.homedir(), ".macro-agent", hash(a));
+      const dirB = path.join(os.homedir(), ".macro-agent", hash(b));
+
+      expect(dirA).not.toBe(dirB);
+      expect(fs.existsSync(path.join(dirA, "agents.db"))).toBe(true);
+      expect(fs.existsSync(path.join(dirB, "agents.db"))).toBe(true);
+
+      await sysA.shutdown();
+      await sysB.shutdown();
+      for (const d of [dirA, dirB, a, b]) {
+        try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    });
+
+    it("explicit baseDir still overrides the derived default", async () => {
+      testDir = createTestDir();
+      const explicit = createTestDir();
+      system = await bootV2({
+        cwd: testDir,
+        baseDir: explicit,
+        inbox: { socketPath: path.join(explicit, "inbox.sock") },
+      });
+
+      // Store landed in the explicit dir, not under ~/.macro-agent/.
+      expect(fs.existsSync(path.join(explicit, "agents.db"))).toBe(true);
+
+      const crypto = await import("node:crypto");
+      const derivedId =
+        "inst_" +
+        crypto.createHash("sha256").update(path.resolve(testDir)).digest("hex").slice(0, 12);
+      const derivedDir = path.join(os.homedir(), ".macro-agent", derivedId);
+      // Ensure the default path wasn't touched.
+      expect(fs.existsSync(path.join(derivedDir, "agents.db"))).toBe(false);
+
+      try { fs.rmSync(explicit, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    it("explicit instanceId wins over the cwd-hash fallback", async () => {
+      testDir = createTestDir();
+      // Pick an id that starts with `test-` so a stray leak is easy to spot.
+      const id = `test-inst-${Date.now().toString(36)}`;
+      system = await bootV2({
+        cwd: testDir,
+        instanceId: id,
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+
+      const explicitDir = path.join(os.homedir(), ".macro-agent", id);
+      expect(fs.existsSync(path.join(explicitDir, "agents.db"))).toBe(true);
+
+      // The cwd-hash default should NOT have been used.
+      const crypto = await import("node:crypto");
+      const derivedId =
+        "inst_" +
+        crypto.createHash("sha256").update(path.resolve(testDir)).digest("hex").slice(0, 12);
+      const derivedDir = path.join(os.homedir(), ".macro-agent", derivedId);
+      expect(fs.existsSync(path.join(derivedDir, "agents.db"))).toBe(false);
+
+      await system.shutdown();
+      system = null;
+      try { fs.rmSync(explicitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    it("falls through to map.swarmId when no instanceId is set", async () => {
+      testDir = createTestDir();
+      const swarmId = `swarm-test-${Date.now().toString(36)}`;
+      system = await bootV2({
+        cwd: testDir,
+        // No instanceId — map.swarmId should win over the cwd hash.
+        // `map.enabled: false` keeps the sidecar from actually trying
+        // to connect; we only need the id to flow into baseDir selection.
+        map: { enabled: false, swarmId },
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+
+      const swarmDir = path.join(os.homedir(), ".macro-agent", swarmId);
+      expect(fs.existsSync(path.join(swarmDir, "agents.db"))).toBe(true);
+
+      await system.shutdown();
+      system = null;
+      try { fs.rmSync(swarmDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    it("prefers explicit instanceId over map.swarmId", async () => {
+      testDir = createTestDir();
+      const id = `explicit-${Date.now().toString(36)}`;
+      const swarmId = `map-${Date.now().toString(36)}`;
+      system = await bootV2({
+        cwd: testDir,
+        instanceId: id,
+        map: { enabled: false, swarmId },
+        inbox: { socketPath: path.join(testDir, "inbox.sock") },
+      });
+
+      expect(fs.existsSync(
+        path.join(os.homedir(), ".macro-agent", id, "agents.db"),
+      )).toBe(true);
+      expect(fs.existsSync(
+        path.join(os.homedir(), ".macro-agent", swarmId, "agents.db"),
+      )).toBe(false);
+
+      await system.shutdown();
+      system = null;
+      try {
+        fs.rmSync(path.join(os.homedir(), ".macro-agent", id), { recursive: true, force: true });
+      } catch { /* best-effort */ }
+    });
+  });
 });
