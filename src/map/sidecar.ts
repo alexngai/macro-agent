@@ -35,7 +35,7 @@ export function createMAPSidecar(
   deps: MAPSidecarDeps,
   config: MAPSidecarConfig,
 ): MAPSidecar {
-  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId, gitCascadeAdapter } = deps;
+  const { agentManager, agentStore, inboxAdapter, tasksAdapter, getLocalMapId, gitCascadeAdapter, dispatcherAgentId } = deps;
   const scope = config.scope ?? "swarm:macro-agent";
   const agentName = config.agentName ?? "macro-agent-sidecar";
 
@@ -51,6 +51,7 @@ export function createMAPSidecar(
   let taskBridge: TaskBridge | null = null;
   let coordinationCleanup: (() => void) | null = null;
   let cascadeBridgeCleanup: (() => void) | null = null;
+  let mailBridgeCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -82,6 +83,10 @@ export function createMAPSidecar(
     if (coordinationCleanup) {
       coordinationCleanup();
       coordinationCleanup = null;
+    }
+    if (mailBridgeCleanup) {
+      try { mailBridgeCleanup(); } catch { /* non-critical */ }
+      mailBridgeCleanup = null;
     }
     if (cascadeBridgeCleanup) {
       try { cascadeBridgeCleanup(); } catch { /* non-critical */ }
@@ -294,6 +299,18 @@ export function createMAPSidecar(
       trajectoryReporter,
     });
 
+    // 4b. Mail Bridge — forwards `mail/turn.received` notifications from the
+    // hub into the local agent-inbox so swarm-dispatch's MessagePort can
+    // pick them up via its `inbox.events` subscription. Without this,
+    // hub-side mail never reaches the dispatcher.
+    const { setupMailBridge } = await import("./mail-bridge.js");
+    mailBridgeCleanup = await setupMailBridge({
+      connection,
+      inboxAdapter,
+      dispatcherAgentId,
+      log: (msg) => console.log(msg),
+    });
+
     // 5. Cascade Bridge + Action Handler (optional — only when a GitCascadeAdapter is available)
     if (gitCascadeAdapter) {
       const { createCascadeBridge } = await import("./cascade-bridge.js");
@@ -361,6 +378,24 @@ export function createMAPSidecar(
         await connection.send({ scope }, { ...event, _origin: "macro-agent" });
       } catch {
         // Best effort — MAP hub may be temporarily unavailable
+      }
+    },
+
+    async postMailTurn(
+      conversationId: string,
+      participantId: string,
+      content: string,
+    ): Promise<void> {
+      if (!connection || !isConnected) return;
+      try {
+        await connection.sendNotification("mail/turn", {
+          conversationId,
+          participantId,
+          contentType: "text/plain",
+          content,
+        });
+      } catch {
+        // Best effort — hub may be temporarily unavailable
       }
     },
   };

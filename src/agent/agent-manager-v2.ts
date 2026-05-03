@@ -648,13 +648,17 @@ export function createAgentManagerV2(
         env.SWARM_SESSIONLOG_SYNC = "metrics";
       }
 
+      console.log(`[spawn-diag] ${agentId} step=AgentFactory.spawn agentType=${agentType}`);
       handle = await AgentFactory.spawn(agentType, {
         permissionMode,
         env,
       });
+      console.log(`[spawn-diag] ${agentId} step=AgentFactory.spawn DONE`);
 
       // Create workspace if applicable
+      console.log(`[spawn-diag] ${agentId} step=createWorkspaceForRole role=${role ?? ""}`);
       workspace = await createWorkspaceForRole(agentId, role ?? "", options);
+      console.log(`[spawn-diag] ${agentId} step=createWorkspaceForRole DONE workspace=${workspace ? 'yes' : 'none'}`);
       if (workspace) {
         agentWorkspaces.set(agentId, workspace);
 
@@ -729,12 +733,15 @@ export function createAgentManagerV2(
         } as any);
       }
 
-      // Build agentMeta
-      let agentMeta: Record<string, any> | undefined;
-
-      if (permissionMode === "interactive") {
-        agentMeta = { claudeCode: { options: { settingSources: [] } } };
-      }
+      // Build agentMeta. Always strip user/project/local setting sources so
+      // spawned workers don't load the host's claude-code-swarm /
+      // oh-my-claudecode / etc plugin MCP servers. Those plugins assume the
+      // host's environment (sockets, daemons) is present and hang on init
+      // when run inside an isolated test sandbox or a dispatched-worker
+      // context that has no such infrastructure.
+      const agentMeta: Record<string, any> = {
+        claudeCode: { options: { settingSources: [] } },
+      };
 
       // Build capabilities context + skill-tree loadout for system prompt
       // Matches cc-swarm's context injection pattern (role-aware, tool-specific)
@@ -776,6 +783,7 @@ export function createAgentManagerV2(
         : systemPrompt;
 
       // Create session
+      console.log(`[spawn-diag] ${agentId} step=handle.createSession cwd=${effectiveCwd} mcpServers=${mcpServers.length}`);
       const session = await handle.createSession(effectiveCwd, {
         mcpServers,
         systemPrompt: enrichedPrompt ?? systemPrompt,
@@ -1094,10 +1102,10 @@ export function createAgentManagerV2(
       },
     ];
 
-    const agentMeta =
-      permMode === "interactive"
-        ? { claudeCode: { options: { settingSources: [] } } }
-        : undefined;
+    // Always strip user/project/local setting sources — see comment in
+    // spawn() for context. Same reason: avoid host-level plugin MCP
+    // servers hanging worker init.
+    const agentMeta = { claudeCode: { options: { settingSources: [] } } };
 
     // Try to load existing session or create new
     const sessionRecord = agentStore.getSession(agentId);

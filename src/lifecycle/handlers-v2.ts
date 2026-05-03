@@ -16,6 +16,7 @@
 import type { InboxAdapter } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { AgentManager } from "../agent/agent-manager.js";
+import type { AgentStore } from "../agent/agent-store.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -47,6 +48,12 @@ export interface HandlerDepsV2 {
    * Without it, commits use raw git (legacy / null-workspace path).
    */
   workspaceManager?: WorkspaceManager;
+  /**
+   * Optional agent store. When provided, the done() summary is persisted in
+   * agent metadata for parentless agents (mail-inbound dispatch workers) so
+   * the dispatch reply bridge can forward it as a hub mail turn.
+   */
+  agentStore?: AgentStore;
 }
 
 // =============================================================================
@@ -208,6 +215,24 @@ async function handleWorkerDone(
     signalsEmitted.push("WORKER_DONE");
   } catch {
     warnings.push("Failed to emit WORKER_DONE");
+  }
+
+  // Step 3b: For parentless agents (mail-inbound dispatch workers), persist the
+  // summary in agent metadata so the dispatch reply bridge can forward it as a
+  // hub mail turn after the stopped lifecycle event fires. emitSignal() is a
+  // no-op when parentId is null, so this is the only path for the summary.
+  if (!context.parentId && args.summary && deps.agentStore) {
+    try {
+      const existing = deps.agentStore.getAgent(context.agentId);
+      deps.agentStore.updateAgent(context.agentId, {
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          _lastSummary: args.summary,
+        },
+      });
+    } catch {
+      // best effort — don't block termination
+    }
   }
 
   // NOTE: Task transition is NOT done here — AgentManagerV2.terminate() handles

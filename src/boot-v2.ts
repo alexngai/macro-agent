@@ -496,14 +496,51 @@ export async function bootV2(
 
   // 7a. Task Dispatch (opt-in autonomous task dispatch mode)
   let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
+  // Hoisted so the MAP sidecar (step 13) can forward it to the mail bridge.
+  let dispatcherAgentId: string | undefined;
+  // Mail-inbound consumer — always wired (does not require dispatch.enabled).
+  let mailInboundConsumer: import("./dispatch/mail-inbound-consumer.js").MailInboundConsumer | null = null;
+
+  {
+    // Stable dispatcher ID used as the inbox recipient for bridged envelopes.
+    // Matches the id the mail-bridge registers and delivers to. The outbound
+    // orchestrator (below, opt-in) reuses the same id so both code paths share
+    // one inbox recipient — no double-processing because the consumer only
+    // fires spawn() while the orchestrator fires spawn() only when polling
+    // opentasks (different trigger paths).
+    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
+    const inboundClaimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
+    const inboundDispatcherId = `dispatcher:${inboundClaimantId}`;
+    dispatcherAgentId = inboundDispatcherId;
+
+    // Register the inbox recipient so mail-bridge's registerAgent call is a
+    // no-op (it uses an upsert) and the inbox accepts deliveries immediately.
+    await inboxAdapter.registerAgent(inboundDispatcherId, {
+      role: "dispatcher",
+      scope: "default",
+    });
+
+    const rawInbox = inboxAdapter.getInbox();
+    const { createMailInboundConsumer } = await import(
+      "./dispatch/mail-inbound-consumer.js"
+    );
+    mailInboundConsumer = createMailInboundConsumer({
+      dispatcherAgentId: inboundDispatcherId,
+      inboxEvents: rawInbox.events as any,
+      agentManager,
+      agentStore,
+      getSidecar: () => (systemRef as any).mapSidecar ?? null,
+      log: (msg) => console.log(msg),
+    });
+  }
 
   if (config.dispatch?.enabled && tasksAdapter) {
     const { createOrchestrator, createOpenTasksSource, createAgentInboxPort } =
       await import("swarm-dispatch");
-    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
 
-    const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
-    const dispatchAgentId = `dispatcher:${claimantId}`;
+    // dispatcherAgentId is already set by the unconditional mail-inbound block above.
+    // Use it directly so both paths share the same inbox recipient.
+    const dispatchAgentId = dispatcherAgentId!;
 
     // Adapt opentasks client → DispatchTaskSource
     const opentasksClient = (tasksAdapter as any).client;
@@ -569,6 +606,7 @@ export async function bootV2(
               type?: string;
               schema?: string;
               data?: any;
+              _conversationId?: string;
             };
             if (content?.schema !== "x-dispatch/work") return null;
             const data = content.data;
@@ -586,18 +624,19 @@ export async function bootV2(
                 metadata: {
                   ...data.metadata,
                   role: data.role,
+                  // Thread conversation_id through so the reply bridge can post
+                  // the worker's output back to the hub's mail conversation.
+                  ...(content._conversationId
+                    ? { _mailConversationId: content._conversationId }
+                    : {}),
                 },
               },
             };
           },
         },
       );
-
-      // Register the dispatcher as an agent in the inbox so it can receive messages
-      await inboxAdapter.registerAgent(dispatchAgentId, {
-        role: "dispatcher",
-        scope: "default",
-      });
+      // Note: registerAgent for dispatchAgentId was already called in the
+      // unconditional mail-inbound block above — no need to repeat here.
     }
 
     // Phase 2: Wire AgentRoster via inbox agent listing for route-first dispatch
@@ -631,7 +670,7 @@ export async function bootV2(
       (hasRouting ? ("prefer-route" as const) : ("spawn-only" as const));
 
     taskDispatcher = createOrchestrator(source, runtime, {
-      claimantId,
+      claimantId: dispatchAgentId,
       pollIntervalMs: config.dispatch.pollIntervalMs ?? 15_000,
       defaultRole: config.dispatch.defaultRole ?? "worker",
       concurrency: { global: config.dispatch.maxConcurrent ?? 3 },
@@ -841,6 +880,7 @@ export async function bootV2(
             ? (id: string) => mapServerInstance!.getLocalMapId(id)
             : undefined,
           gitCascadeAdapter,
+          dispatcherAgentId,
         },
         {
           server: config.map.server,
@@ -1050,6 +1090,7 @@ export async function bootV2(
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (mailInboundConsumer) mailInboundConsumer.stop();
       if (taskDispatcher) await taskDispatcher.stop();
       if (mapSidecar) await mapSidecar.stop();
       if (mapServerInstance) await mapServerInstance.stop();
