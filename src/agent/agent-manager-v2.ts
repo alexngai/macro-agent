@@ -719,6 +719,57 @@ export function createAgentManagerV2(
         })) ?? []),
       ];
 
+      // Always-on subsystem MCP servers (the "trinity"). The macro-agent
+      // architecture docs describe agent-inbox + opentasks as separate MCP
+      // servers available to spawned workers, but until this entry block
+      // existed they were only reachable when host-level Claude plugins
+      // happened to have wired them. That left mail-inbound workers
+      // (`parent: null` + `isolatedSettings: true`) without inbox/tasks
+      // tools — see openhive-2 docs/LOADOUTS_DESIGN.md "Loadout-provided
+      // MCP servers" live finding 2026-05-03.
+      //
+      // Registering them here makes them per-spawn defaults independent
+      // of host configuration. Caller-supplied `agentConfig.mcpServers`
+      // remains additive (Option C / "hybrid"): the trinity is always
+      // there, callers can layer more on top.
+
+      // agent-inbox — exposes send_message, check_inbox, read_thread,
+      // list_agents via the InboxMcpProxy stdio bridge.
+      if (inboxAdapter.socketPath) {
+        const inboxProxyEntry = new URL(
+          "../../dist/cli/inbox-mcp-proxy.js",
+          import.meta.url,
+        ).pathname;
+        mcpServers.push({
+          name: "agent-inbox",
+          command: "node",
+          args: [inboxProxyEntry],
+          env: [
+            { name: "INBOX_SOCKET_PATH", value: inboxAdapter.socketPath },
+            { name: "MACRO_AGENT_ID", value: agentId },
+          ],
+        } as any);
+      }
+
+      // opentasks — exposes task, link, annotate, query via the
+      // `opentasks mcp` CLI subcommand. The package's dist/mcp/stdio.js
+      // is an exports-only module (no auto-start); the CLI's `mcp`
+      // subcommand is what actually wires StdioServerTransport. Conditional
+      // on tasksAdapter.connected — when the daemon isn't running, skip
+      // rather than mount a server that would fail at every tool call.
+      if (tasksAdapter.connected) {
+        const opentasksCliEntry = new URL(
+          "opentasks/dist/cli.js",
+          import.meta.url,
+        ).pathname;
+        mcpServers.push({
+          name: "opentasks",
+          command: "node",
+          args: [opentasksCliEntry, "mcp"],
+          env: [],
+        } as any);
+      }
+
       // Register minimem MCP server (agent-type independent — works for any MCP-capable agent)
       if (minimemConfig?.enabled) {
         mcpServers.push({
