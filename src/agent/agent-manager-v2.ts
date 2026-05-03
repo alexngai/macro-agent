@@ -624,7 +624,12 @@ export function createAgentManagerV2(
       created_at: now,
       started_at: now,
       config: agentConfig as Record<string, unknown>,
-      metadata: options.taskRef ? { task_ref: options.taskRef } : {},
+      metadata: {
+        ...(options.taskRef ? { task_ref: options.taskRef } : {}),
+        // Persist isolatedSettings so resume() applies the same agentMeta
+        // policy without needing the original SpawnAgentOptions.
+        ...(options.isolatedSettings ? { isolatedSettings: true } : {}),
+      },
     };
     agentStore.putAgent(agentRecord);
 
@@ -648,17 +653,13 @@ export function createAgentManagerV2(
         env.SWARM_SESSIONLOG_SYNC = "metrics";
       }
 
-      console.log(`[spawn-diag] ${agentId} step=AgentFactory.spawn agentType=${agentType}`);
       handle = await AgentFactory.spawn(agentType, {
         permissionMode,
         env,
       });
-      console.log(`[spawn-diag] ${agentId} step=AgentFactory.spawn DONE`);
 
       // Create workspace if applicable
-      console.log(`[spawn-diag] ${agentId} step=createWorkspaceForRole role=${role ?? ""}`);
       workspace = await createWorkspaceForRole(agentId, role ?? "", options);
-      console.log(`[spawn-diag] ${agentId} step=createWorkspaceForRole DONE workspace=${workspace ? 'yes' : 'none'}`);
       if (workspace) {
         agentWorkspaces.set(agentId, workspace);
 
@@ -733,15 +734,18 @@ export function createAgentManagerV2(
         } as any);
       }
 
-      // Build agentMeta. Always strip user/project/local setting sources so
-      // spawned workers don't load the host's claude-code-swarm /
-      // oh-my-claudecode / etc plugin MCP servers. Those plugins assume the
-      // host's environment (sockets, daemons) is present and hang on init
-      // when run inside an isolated test sandbox or a dispatched-worker
-      // context that has no such infrastructure.
-      const agentMeta: Record<string, any> = {
-        claudeCode: { options: { settingSources: [] } },
-      };
+      // Build agentMeta. When the caller requests isolated settings (e.g.
+      // mail-inbound dispatch workers via SpawnAgentOptions.isolatedSettings),
+      // strip user/project/local setting sources so the worker doesn't load
+      // the host's claude-code-swarm / oh-my-claudecode / etc plugin MCP
+      // servers — those plugins assume host-shaped environment (sockets,
+      // daemons) and hang at session/new MCP-init when missing. Interactive
+      // `multiagent` callers leave this false so their installed plugins
+      // load normally.
+      let agentMeta: Record<string, any> | undefined;
+      if (options.isolatedSettings || permissionMode === "interactive") {
+        agentMeta = { claudeCode: { options: { settingSources: [] } } };
+      }
 
       // Build capabilities context + skill-tree loadout for system prompt
       // Matches cc-swarm's context injection pattern (role-aware, tool-specific)
@@ -783,7 +787,6 @@ export function createAgentManagerV2(
         : systemPrompt;
 
       // Create session
-      console.log(`[spawn-diag] ${agentId} step=handle.createSession cwd=${effectiveCwd} mcpServers=${mcpServers.length}`);
       const session = await handle.createSession(effectiveCwd, {
         mcpServers,
         systemPrompt: enrichedPrompt ?? systemPrompt,
@@ -1102,10 +1105,14 @@ export function createAgentManagerV2(
       },
     ];
 
-    // Always strip user/project/local setting sources — see comment in
-    // spawn() for context. Same reason: avoid host-level plugin MCP
-    // servers hanging worker init.
-    const agentMeta = { claudeCode: { options: { settingSources: [] } } };
+    // Strip user/project/local setting sources for isolated workers (the
+    // metadata flag is set at spawn time when SpawnAgentOptions.isolatedSettings
+    // was true) or interactive mode. See spawn() for the rationale.
+    const isIsolated = (record.metadata as Record<string, unknown> | undefined)?.isolatedSettings === true;
+    const agentMeta =
+      isIsolated || permMode === "interactive"
+        ? { claudeCode: { options: { settingSources: [] } } }
+        : undefined;
 
     // Try to load existing session or create new
     const sessionRecord = agentStore.getSession(agentId);

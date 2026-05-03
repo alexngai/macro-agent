@@ -88,8 +88,17 @@ export interface MailInboundConsumerOptions {
   log?: (msg: string) => void;
 }
 
+export interface MailInboundConsumerStats {
+  /** Count of envelopes dropped because they lacked a taskId. */
+  droppedMalformed: number;
+  /** Number of distinct taskIds currently tracked for dedup. */
+  seenTaskIds: number;
+}
+
 export interface MailInboundConsumer {
   stop(): void;
+  /** Snapshot of consumer-level counters for observability. */
+  stats(): MailInboundConsumerStats;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -119,15 +128,29 @@ export function createMailInboundConsumer(
   // mail-inbound envelope; read when the agent's stopped event fires.
   const agentConversationMap = new Map<string, string>();
 
-  // taskId → 1: idempotency guard keyed on the dispatch envelope's task
-  // identifier (which is stable across redeliveries). The local inbox can
-  // re-fire `inbox.message` for the same logical delivery — without
-  // this, a single bridged turn would trigger N concurrent spawn()
-  // calls, each producing a long-lived ACP subprocess. We dedupe on
-  // taskId because (a) message.id may not survive routing transforms
-  // and (b) the dispatch contract guarantees each taskId is processed
-  // exactly once on the agent side.
-  const seenTaskIds = new Set<string>();
+  // taskId → expiresAt: idempotency guard keyed on the dispatch envelope's
+  // task identifier. The local inbox can re-fire `inbox.message` for the
+  // same logical delivery — without this guard, a single bridged turn would
+  // trigger N concurrent spawn() calls, each producing a long-lived ACP
+  // subprocess.
+  //
+  // Bounded by TTL so the map cannot grow unbounded over a long-running
+  // deployment. SEEN_TASK_TTL_MS is generous (1 hour) — re-deliveries within
+  // that window are dropped, beyond it the dedup expires and a stale retry
+  // could legitimately re-spawn (preferable to permanent memory growth).
+  const SEEN_TASK_TTL_MS = 60 * 60 * 1000;
+  const seenTaskIds = new Map<string, number>();
+  function pruneSeenTaskIds(): void {
+    const now = Date.now();
+    for (const [id, expiresAt] of seenTaskIds) {
+      if (expiresAt <= now) seenTaskIds.delete(id);
+    }
+  }
+
+  // Counter for envelopes dropped because they are malformed (no taskId).
+  // Surfaced via the consumer handle's stats() method so operators can
+  // distinguish "no work" from "work is broken".
+  let droppedMalformedCount = 0;
 
   log(
     `[mail-inbound] Consumer ready — listening for x-dispatch/work envelopes ` +
@@ -157,18 +180,24 @@ export function createMailInboundConsumer(
 
     const data = content.data;
     if (!data?.taskId) {
-      log(`[mail-inbound] Dropping envelope with missing taskId`);
+      droppedMalformedCount++;
+      log(
+        `[mail-inbound] Dropping malformed envelope (no taskId, total=${droppedMalformedCount}) — ` +
+          `keys=${Object.keys(data ?? {}).join(',')} from=${event.message?.sender_id ?? '?'}`,
+      );
       return;
     }
 
     const taskId = data.taskId;
-    if (seenTaskIds.has(taskId)) {
-      // Already spawned a worker for this dispatch — silently ignore the
-      // re-delivery. The hub treats dispatch as exactly-once on the
-      // worker side, so dropping is correct.
+    pruneSeenTaskIds();
+    const seenExpiresAt = seenTaskIds.get(taskId);
+    if (seenExpiresAt !== undefined && seenExpiresAt > Date.now()) {
+      // Already spawned a worker for this dispatch within the dedup window
+      // — silently ignore the re-delivery. The hub treats dispatch as
+      // exactly-once on the worker side, so dropping is correct.
       return;
     }
-    seenTaskIds.add(taskId);
+    seenTaskIds.set(taskId, Date.now() + SEEN_TASK_TTL_MS);
 
     const conversationId = content._conversationId;
     const prompt = data.prompt ?? data.content ?? "";
@@ -180,19 +209,21 @@ export function createMailInboundConsumer(
     );
 
     // Spawn is async — fire and forget. Errors are logged, not thrown.
-    log(`[mail-inbound] Calling agentManager.spawn for taskId=${taskId}...`);
-    const spawnStart = Date.now();
     agentManager
       .spawn({
         task: prompt,
         task_id: taskId,
         role,
         parent: null,
+        // Mail-inbound dispatch workers run sandboxed — strip the host's
+        // user-level Claude setting sources so installed plugin MCP servers
+        // (claude-code-swarm, oh-my-claudecode, …) don't auto-load and hang
+        // session/new on environments where the host services aren't reachable.
+        isolatedSettings: true,
       })
       .then(async (spawned) => {
-        const elapsed = Date.now() - spawnStart;
         log(
-          `[mail-inbound] Spawned worker agentId=${spawned.id} for taskId=${taskId} (${elapsed}ms)`,
+          `[mail-inbound] Spawned worker agentId=${spawned.id} for taskId=${taskId}`,
         );
         if (conversationId) {
           agentConversationMap.set(spawned.id, conversationId);
@@ -208,9 +239,6 @@ export function createMailInboundConsumer(
           await agentManager.promptUntilDone(spawned.id, prompt, {
             maxFollowUps: 0,
           });
-          log(
-            `[mail-inbound] promptUntilDone completed for agentId=${spawned.id}`,
-          );
         } catch (err) {
           log(
             `[mail-inbound] promptUntilDone failed for agentId=${spawned.id}: ` +
@@ -219,9 +247,8 @@ export function createMailInboundConsumer(
         }
       })
       .catch((err: unknown) => {
-        const elapsed = Date.now() - spawnStart;
         log(
-          `[mail-inbound] Spawn failed for taskId=${taskId} after ${elapsed}ms: ${
+          `[mail-inbound] Spawn failed for taskId=${taskId}: ${
             (err as Error).message ?? String(err)
           }`,
         );
@@ -253,7 +280,7 @@ export function createMailInboundConsumer(
 
     log(
       `[mail-inbound] Worker agentId=${agentId} stopped — posting reply to ` +
-        `conv=${conversationId} (summary first 120 chars: ${JSON.stringify(summary.slice(0, 120))})`,
+        `conv=${conversationId}`,
     );
 
     const sidecar = getSidecar();
@@ -262,9 +289,24 @@ export function createMailInboundConsumer(
       return;
     }
 
-    sidecar.postMailTurn(conversationId, agentId, summary).catch(() => {
-      // best-effort — hub may be temporarily unreachable
-    });
+    sidecar.postMailTurn(conversationId, agentId, summary)
+      .then(() => {
+        // Clear the stored summary so it can't replay if the same agentId
+        // is ever reused for another dispatch (the AgentManager generally
+        // mints fresh ids, but this is cheap insurance against a future
+        // change).
+        try {
+          const existingMeta = agentStore.getAgent(agentId)?.metadata ?? {};
+          const { _lastSummary: _drop, ...rest } = existingMeta as Record<string, unknown>;
+          void _drop;
+          agentStore.updateAgent(agentId, { metadata: rest });
+        } catch {
+          // best-effort — store may be closing during shutdown
+        }
+      })
+      .catch(() => {
+        // best-effort — hub may be temporarily unreachable
+      });
   });
 
   // ── Cleanup ──────────────────────────────────────────────────
@@ -284,6 +326,13 @@ export function createMailInboundConsumer(
       }
       unsubscribeLifecycle();
       log(`[mail-inbound] Consumer stopped`);
+    },
+    stats() {
+      pruneSeenTaskIds();
+      return {
+        droppedMalformed: droppedMalformedCount,
+        seenTaskIds: seenTaskIds.size,
+      };
     },
   };
 }

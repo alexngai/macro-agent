@@ -386,7 +386,13 @@ export function createMAPSidecar(
       participantId: string,
       content: string,
     ): Promise<void> {
-      if (!connection || !isConnected) return;
+      if (!connection || !isConnected) {
+        console.warn(
+          `[map-sidecar] postMailTurn skipped (connection=${!!connection} ` +
+            `isConnected=${isConnected}) conv=${conversationId}`,
+        );
+        return;
+      }
       try {
         await connection.sendNotification("mail/turn", {
           conversationId,
@@ -394,8 +400,13 @@ export function createMAPSidecar(
           contentType: "text/plain",
           content,
         });
-      } catch {
-        // Best effort — hub may be temporarily unavailable
+      } catch (err) {
+        // Best effort — hub may be temporarily unavailable. Log at warn
+        // so silent failures are visible during postmortem.
+        console.warn(
+          `[map-sidecar] postMailTurn failed for conv=${conversationId}: ` +
+            `${(err as Error).message ?? String(err)}`,
+        );
       }
     },
   };

@@ -404,4 +404,116 @@ describe("mail-bridge → mail-inbound-consumer integration", () => {
       );
     },
   );
+
+  it(
+    "echo-loop containment: when the worker's reply turn is echoed back via mail/turn.received, the bridge drops it without spawning a second worker",
+    async () => {
+      // Reproduces the runaway-spawn scenario the hub-side echo would
+      // create absent the bridge's plain-text drop:
+      //   1. Worker A processes dispatch, calls done() with summary.
+      //   2. Consumer posts the summary back via mapSidecar.postMailTurn.
+      //   3. Hub fires mail.turn.added → forwardTurnToSwarms re-fires the
+      //      same conversation back to the swarm as mail/turn.received.
+      //   4. Bridge MUST classify the plain-text content as non-JSON and
+      //      drop it; the consumer MUST NOT see it as a new dispatch and
+      //      spawn worker B.
+      const { inboxAdapter, inboxEvents, sendSpy } = buildFakeInboxAdapter("dispatcher-echo");
+      const conn = buildFakeConnection();
+      const am = buildFakeAgentManager("agent-echo");
+      const store = buildFakeAgentStore();
+      const sidecar = buildFakeSidecar();
+
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inboxAdapter as never,
+        dispatcherAgentId: "dispatcher-echo",
+      });
+      createMailInboundConsumer({
+        dispatcherAgentId: "dispatcher-echo",
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      // First, deliver a real dispatch so we have a non-zero baseline.
+      await conn._fire({
+        conversation_id: "conv-echo-001",
+        turn_id: "turn-echo-001",
+        participant_id: "openhive:dispatcher",
+        content_type: "application/json",
+        content: JSON.stringify({
+          type: "x-dispatch/work",
+          body: { taskId: "task-echo-001", prompt: "do thing", role: "worker" },
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(am.spawnFn).toHaveBeenCalledTimes(1);
+
+      // Now simulate the echo: hub re-fires mail/turn.received with the
+      // worker's plain-text reply. content_type matches what postMailTurn
+      // sets; content is a plain string starting with the SENTINEL prefix.
+      await conn._fire({
+        conversation_id: "conv-echo-001",
+        turn_id: "turn-echo-002-reply",
+        participant_id: "agent-echo",
+        content_type: "text/plain",
+        content: "WIDGET_SENTINEL_42 Hello! Worker task acknowledged and completed.",
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Bridge dropped the echo: inbox.send was NOT called for the reply.
+      // (sendSpy was called once for the original dispatch envelope, not
+      // again for the echoed text reply.)
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+
+      // Consumer MUST NOT have spawned a second worker.
+      expect(am.spawnFn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it(
+    "echo-loop containment: a malformed JSON payload (looks like JSON but isn't a dispatch envelope) does not spawn a worker",
+    async () => {
+      // Defensive: even if the echoed content happens to be JSON-shaped
+      // (e.g. an agent that wraps its reply as a JSON message), the
+      // consumer must reject it because schema !== "x-dispatch/work".
+      const { inboxAdapter, inboxEvents, sendSpy } = buildFakeInboxAdapter("dispatcher-echo-2");
+      const conn = buildFakeConnection();
+      const am = buildFakeAgentManager("agent-echo-2");
+      const store = buildFakeAgentStore();
+      const sidecar = buildFakeSidecar();
+
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inboxAdapter as never,
+        dispatcherAgentId: "dispatcher-echo-2",
+      });
+      createMailInboundConsumer({
+        dispatcherAgentId: "dispatcher-echo-2",
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      // Echo containing a JSON payload but with a different schema.
+      await conn._fire({
+        conversation_id: "conv-fake-echo",
+        turn_id: "turn-fake-echo",
+        participant_id: "agent-echo-2",
+        content_type: "application/json",
+        content: JSON.stringify({
+          schema: "x-agent/reply",
+          data: { text: "WIDGET_SENTINEL_42 some reply" },
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Bridge forwarded once (it doesn't classify by schema), but the
+      // consumer's onMessage filter (schema === "x-dispatch/work") rejects.
+      expect(sendSpy).toHaveBeenCalledOnce();
+      expect(am.spawnFn).not.toHaveBeenCalled();
+    },
+  );
 });

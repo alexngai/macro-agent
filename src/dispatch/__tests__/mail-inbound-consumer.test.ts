@@ -307,4 +307,162 @@ describe("createMailInboundConsumer", () => {
     expect(am.spawnFn).not.toHaveBeenCalled();
     expect(logs.some((l) => l.includes("Consumer stopped"))).toBe(true);
   });
+
+  // ── Failure-mode coverage ─────────────────────────────────────────
+
+  it("forwards summary unchanged when it lacks the expected sentinel — consumer is not a content validator", async () => {
+    // The consumer's job is mechanical relay: whatever the worker put in
+    // _lastSummary is what gets posted back. Content-level checks (e.g.,
+    // "must start with WIDGET_SENTINEL_42") belong to the dispatch
+    // initiator's verifier, not to the consumer.
+    store = makeAgentStore("plain reply with no sentinel");
+    sidecar = makeSidecar();
+
+    createMailInboundConsumer({
+      dispatcherAgentId: DISPATCHER_ID,
+      inboxEvents,
+      agentManager: am.manager as AgentManager,
+      agentStore: store as AgentStore,
+      getSidecar: () => sidecar,
+    });
+
+    inboxEvents.fire(workEnvelope("task-no-sentinel", "go", "conv-no-sentinel"));
+    await new Promise((r) => setTimeout(r, 20));
+    am.fireLifecycle({ type: "stopped", agent: { id: "agent-001" }, reason: "completed" });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(sidecar.postMailTurn).toHaveBeenCalledOnce();
+    expect(sidecar.postMailTurn).toHaveBeenCalledWith(
+      "conv-no-sentinel",
+      "agent-001",
+      "plain reply with no sentinel",
+    );
+  });
+
+  it("agentManager.spawn() rejecting does not crash the consumer — error is logged", async () => {
+    const logs: string[] = [];
+    am.spawnFn.mockRejectedValueOnce(new Error("acp-factory: handshake timeout"));
+
+    createMailInboundConsumer({
+      dispatcherAgentId: DISPATCHER_ID,
+      inboxEvents,
+      agentManager: am.manager as AgentManager,
+      agentStore: store as AgentStore,
+      getSidecar: () => sidecar,
+      log: (m) => logs.push(m),
+    });
+
+    inboxEvents.fire(workEnvelope("task-spawn-fails", "go", "conv-X"));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Spawn was attempted, failed, was logged, and the consumer is still alive.
+    expect(am.spawnFn).toHaveBeenCalledOnce();
+    expect(logs.some((l) => l.includes("Spawn failed for taskId=task-spawn-fails"))).toBe(true);
+    expect(logs.some((l) => l.includes("handshake timeout"))).toBe(true);
+
+    // No reply posted, since no agent ever stopped (we never fired lifecycle).
+    expect(sidecar.postMailTurn).not.toHaveBeenCalled();
+
+    // Consumer still functional — a subsequent dispatch goes through.
+    am.spawnFn.mockResolvedValueOnce({ id: "agent-after-fail" } as never);
+    inboxEvents.fire(workEnvelope("task-after-fail", "go", "conv-Y"));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(am.spawnFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears _lastSummary on the agent record after successful postMailTurn", async () => {
+    // Prevents a stale summary from re-firing if the same agentId is ever
+    // reused for another dispatch (defensive — the manager normally mints
+    // fresh ids, but this is cheap insurance).
+    store = makeAgentStore("WIDGET_SENTINEL_42 done");
+    const updateAgentSpy = vi.fn();
+    (store as { updateAgent?: typeof updateAgentSpy }).updateAgent = updateAgentSpy;
+    sidecar = makeSidecar();
+
+    createMailInboundConsumer({
+      dispatcherAgentId: DISPATCHER_ID,
+      inboxEvents,
+      agentManager: am.manager as AgentManager,
+      agentStore: store as AgentStore,
+      getSidecar: () => sidecar,
+    });
+
+    inboxEvents.fire(workEnvelope("task-clear", "go", "conv-clear"));
+    await new Promise((r) => setTimeout(r, 20));
+    am.fireLifecycle({ type: "stopped", agent: { id: "agent-001" }, reason: "completed" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(sidecar.postMailTurn).toHaveBeenCalledOnce();
+    expect(updateAgentSpy).toHaveBeenCalledWith(
+      "agent-001",
+      { metadata: expect.not.objectContaining({ _lastSummary: expect.anything() }) },
+    );
+  });
+
+  it("dedup TTL: a re-delivered taskId can spawn again after the dedup window expires", async () => {
+    vi.useFakeTimers();
+    try {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      inboxEvents.fire(workEnvelope("task-ttl", "go", "conv-ttl"));
+      await Promise.resolve();
+      expect(am.spawnFn).toHaveBeenCalledTimes(1);
+
+      // Same taskId within the dedup window → drop
+      inboxEvents.fire(workEnvelope("task-ttl", "go", "conv-ttl"));
+      await Promise.resolve();
+      expect(am.spawnFn).toHaveBeenCalledTimes(1);
+
+      // Past the TTL (1h)
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1_000);
+
+      // Re-fire — now allowed because the dedup entry expired
+      inboxEvents.fire(workEnvelope("task-ttl", "go", "conv-ttl"));
+      await Promise.resolve();
+      expect(am.spawnFn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stats(): malformed-envelope counter increments and seenTaskIds reflects current state", async () => {
+    const consumer = createMailInboundConsumer({
+      dispatcherAgentId: DISPATCHER_ID,
+      inboxEvents,
+      agentManager: am.manager as AgentManager,
+      agentStore: store as AgentStore,
+      getSidecar: () => sidecar,
+    });
+
+    expect(consumer.stats()).toEqual({ droppedMalformed: 0, seenTaskIds: 0 });
+
+    // Malformed: schema is x-dispatch/work but data has no taskId
+    inboxEvents.fire({
+      agentId: DISPATCHER_ID,
+      message: {
+        id: "malformed-1",
+        content: { schema: "x-dispatch/work", data: { prompt: "no id" } },
+      },
+    });
+    inboxEvents.fire({
+      agentId: DISPATCHER_ID,
+      message: {
+        id: "malformed-2",
+        content: { schema: "x-dispatch/work", data: {} },
+      },
+    });
+    expect(consumer.stats()).toEqual({ droppedMalformed: 2, seenTaskIds: 0 });
+
+    // Well-formed envelope adds to seenTaskIds
+    inboxEvents.fire(workEnvelope("task-stats", "go", "conv-stats"));
+    await Promise.resolve();
+    expect(consumer.stats().seenTaskIds).toBe(1);
+    expect(consumer.stats().droppedMalformed).toBe(2);
+  });
 });

@@ -84,7 +84,9 @@ export async function loadTeam(
 
   const manifest = template.manifest;
   const communication = (manifest.communication ?? {}) as CommunicationConfig;
-  const macroAgent = parseMacroAgentExtensions(manifest.macro_agent);
+  const macroAgent = parseMacroAgentExtensions(
+    manifest.macro_agent as Record<string, unknown> | undefined,
+  );
 
   // 2. Build enforcement-enriched roles
   const resolvedRoles = new Map<string, ResolvedTeamRole>();

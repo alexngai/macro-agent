@@ -63,6 +63,8 @@ function manifestToResolved(manifest: TeamManifest): MacroResolvedTemplate {
       roles: new Map(),
       prompts: new Map(),
       mcpServers: manifest._mcpServers,
+      mcpProviders: new Map(),
+      loadouts: new Map(),
       sourcePath: "",
     },
     resolvedRoles: manifest._resolvedRoles,

@@ -79,6 +79,17 @@ export interface SpawnAgentOptions {
   team_instance?: string;
 
   /**
+   * When true, spawn the worker with `claudeCode.options.settingSources = []`
+   * so it does NOT inherit the host machine's user/project/local Claude
+   * settings. This prevents host-level plugin MCP servers (e.g.
+   * claude-code-swarm, oh-my-claudecode) from auto-mounting and hanging
+   * the worker's session/new at MCP-init time. Mail-inbound dispatch
+   * workers always set this; interactive `multiagent` users typically
+   * don't (they want their plugins).
+   */
+  isolatedSettings?: boolean;
+
+  /**
    * Stream ID to join (for workers and integrators).
    * Required for workers and integrators when using workspace isolation.
    */
