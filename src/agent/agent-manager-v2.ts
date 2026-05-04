@@ -805,6 +805,16 @@ export function createAgentManagerV2(
       //     wiring avoids file collisions when concurrent workers share
       //     a CWD (no `.claude/settings.json` written to disk).
       //
+      //     SDK contract pinned by the boundary test in
+      //     `src/agent/__tests__/agent-manager-v2.permissions.test.ts` —
+      //     it captures the literal `agentMeta` argument passed to
+      //     `handle.createSession` and asserts both `settingSources: []`
+      //     AND `settings.permissions` are present together (the
+      //     interaction between filesystem-stripping and inline
+      //     reconciliation that the SDK's docs don't fully spell out).
+      //     If a future SDK version changes how `settings` reconciles
+      //     with empty `settingSources`, that test will catch it.
+      //
       //     `ask` rules collapse based on `fullAutonomous`:
       //       - fullAutonomous: true  → ask → allow (autonomous worker
       //         opts to proceed when there's no human to answer)

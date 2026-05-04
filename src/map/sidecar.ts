@@ -53,6 +53,7 @@ export function createMAPSidecar(
   let cascadeBridgeCleanup: (() => void) | null = null;
   let mailBridgeCleanup: (() => void) | null = null;
   let dispatchSpawnHandlerCleanup: (() => void) | null = null;
+  let dispatchMessageHandlerCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -92,6 +93,10 @@ export function createMAPSidecar(
     if (cascadeBridgeCleanup) {
       try { cascadeBridgeCleanup(); } catch { /* non-critical */ }
       cascadeBridgeCleanup = null;
+    }
+    if (dispatchMessageHandlerCleanup) {
+      try { dispatchMessageHandlerCleanup(); } catch { /* non-critical */ }
+      dispatchMessageHandlerCleanup = null;
     }
     if (dispatchSpawnHandlerCleanup) {
       try { dispatchSpawnHandlerCleanup(); } catch { /* non-critical */ }
@@ -289,6 +294,7 @@ export function createMAPSidecar(
     lifecycleCallback = bridge.callback;
     lifecycleCleanup = bridge.cleanup;
     const awaitAcpRegistration = bridge.awaitRegistration;
+    const findLocalAgentByMapId = bridge.findLocalAgentByMapId;
     lifecycleUnsubscribe = agentManager.onLifecycleEvent(lifecycleCallback);
 
     // 3. Trajectory Reporter
@@ -378,6 +384,80 @@ export function createMAPSidecar(
           connection.offNotification(
             "dispatch/spawn-agent.request",
             spawnAgentRequestHandler,
+          );
+        }
+      } catch {
+        /* connection already torn down */
+      }
+    };
+
+    // 4d. map/dispatch/message handler — receives hub-routed envelopes
+    // addressed to a specific agent on this swarm via MAP scope. The hub
+    // takes this path (not mail/turn) when the target agent declares
+    // `messaging.canReceive: true` per-agent but not `mail.canJoin`,
+    // which is the default for long-lived workers/coordinators registered
+    // by the lifecycle bridge. Without this handler, mail+reuse dispatches
+    // are silently dropped on the swarm side.
+    //
+    // Translate the hub-assigned MAP ULID (`to_agent_id`) → local agent
+    // id and forward the envelope into the local inbox so the new
+    // `mail-inbound-reuse-consumer` picks it up.
+    const dispatchMessageHandler = async (params: unknown): Promise<void> => {
+      const p = params as
+        | (Record<string, unknown> & {
+            to_agent_id?: string;
+            envelope?: unknown;
+            from_agent_id?: string;
+          })
+        | undefined;
+      const toAgentId = p?.to_agent_id;
+      const envelope = p?.envelope;
+      if (!toAgentId || !envelope) {
+        console.warn(
+          "[sidecar] map/dispatch/message missing to_agent_id or envelope; ignoring",
+        );
+        return;
+      }
+      const localAgentId = findLocalAgentByMapId(toAgentId);
+      if (!localAgentId) {
+        console.warn(
+          `[sidecar] map/dispatch/message recipient ${toAgentId} not registered locally; dropping`,
+        );
+        return;
+      }
+      // Translate envelope { type, body } → { schema, data } shape that the
+      // mail-inbound-reuse-consumer expects (mirrors mail-bridge's
+      // translation for `mail/turn.received`).
+      const env = envelope as { type?: string; body?: Record<string, unknown> };
+      const content: Record<string, unknown> =
+        env.type && env.body
+          ? { schema: env.type, data: env.body }
+          : (envelope as Record<string, unknown>);
+      const contentWithMarker: Record<string, unknown> = {
+        type: "data",
+        ...content,
+      };
+      try {
+        await inboxAdapter.send(
+          (p?.from_agent_id as string | undefined) ?? "openhive-hub",
+          localAgentId,
+          contentWithMarker as never,
+          { importance: "normal" },
+        );
+      } catch (err) {
+        console.warn(
+          `[sidecar] map/dispatch/message inbox.send failed for ${localAgentId}: ` +
+            `${(err as Error).message}`,
+        );
+      }
+    };
+    connection.onNotification("map/dispatch/message", dispatchMessageHandler);
+    dispatchMessageHandlerCleanup = () => {
+      try {
+        if (typeof connection.offNotification === "function") {
+          connection.offNotification(
+            "map/dispatch/message",
+            dispatchMessageHandler,
           );
         }
       } catch {

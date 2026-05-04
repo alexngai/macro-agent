@@ -50,6 +50,14 @@ export function createLifecycleBridge(
    * Returns false if the timeout elapses before registration completes.
    */
   awaitRegistration: (agentId: string, timeoutMs?: number) => Promise<boolean>;
+  /**
+   * Reverse-lookup: hub-assigned MAP ULID → local agent id. Used by the
+   * `map/dispatch/message` handler in the sidecar to translate envelope
+   * recipients (which the hub addresses by MAP ULID) into local agent ids
+   * (which the inbox addresses messages by). Returns undefined when no
+   * registered agent matches.
+   */
+  findLocalAgentByMapId: (mapId: string) => string | undefined;
 } {
   const registered = new Map<string, RegisteredAgent>();
 
@@ -217,5 +225,12 @@ export function createLifecycleBridge(
     return Boolean(registered.get(agentId)?.mapId);
   };
 
-  return { callback, cleanup, awaitRegistration };
+  const findLocalAgentByMapId = (mapId: string): string | undefined => {
+    for (const [localId, entry] of registered) {
+      if (entry.mapId === mapId) return localId;
+    }
+    return undefined;
+  };
+
+  return { callback, cleanup, awaitRegistration, findLocalAgentByMapId };
 }

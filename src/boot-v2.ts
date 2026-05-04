@@ -500,6 +500,14 @@ export async function bootV2(
   let dispatcherAgentId: string | undefined;
   // Mail-inbound consumer — always wired (does not require dispatch.enabled).
   let mailInboundConsumer: import("./dispatch/mail-inbound-consumer.js").MailInboundConsumer | null = null;
+  // Mail-inbound REUSE consumer — handles `x-dispatch/work` envelopes
+  // addressed to non-sidecar agents (long-lived workers/coordinators) and
+  // drives them through the dispatch turn using their existing session.
+  // Always wired so reuse routing works even without the outbound
+  // orchestrator. Filters non-overlapping with mailInboundConsumer.
+  let mailInboundReuseConsumer:
+    | import("./dispatch/mail-inbound-reuse-consumer.js").MailInboundReuseConsumer
+    | null = null;
 
   {
     // Stable dispatcher ID used as the inbox recipient for bridged envelopes.
@@ -525,6 +533,20 @@ export async function bootV2(
       "./dispatch/mail-inbound-consumer.js"
     );
     mailInboundConsumer = createMailInboundConsumer({
+      dispatcherAgentId: inboundDispatcherId,
+      inboxEvents: rawInbox.events as any,
+      agentManager,
+      agentStore,
+      getSidecar: () => (systemRef as any).mapSidecar ?? null,
+      log: (msg) => console.log(msg),
+    });
+
+    // Reuse consumer for envelopes addressed to long-lived workers/
+    // coordinators. Non-overlapping filter (event.agentId !== sidecarId).
+    const { createMailInboundReuseConsumer } = await import(
+      "./dispatch/mail-inbound-reuse-consumer.js"
+    );
+    mailInboundReuseConsumer = createMailInboundReuseConsumer({
       dispatcherAgentId: inboundDispatcherId,
       inboxEvents: rawInbox.events as any,
       agentManager,
@@ -1091,6 +1113,7 @@ export async function bootV2(
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
       if (mailInboundConsumer) mailInboundConsumer.stop();
+      if (mailInboundReuseConsumer) mailInboundReuseConsumer.stop();
       if (taskDispatcher) await taskDispatcher.stop();
       if (mapSidecar) await mapSidecar.stop();
       if (mapServerInstance) await mapServerInstance.stop();
