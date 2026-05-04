@@ -90,6 +90,36 @@ export interface SpawnAgentOptions {
   isolatedSettings?: boolean;
 
   /**
+   * Per-spawn permission rules — Claude Code permission patterns
+   * (e.g., `Read(**)`, `Bash(rm -rf:*)`).
+   *
+   * Wired through `agentMeta.claudeCode.options.settings.permissions` so
+   * Claude's permission engine consults them on every tool call. `deny`
+   * always wins, even over `permissionMode: "auto-approve"` (verified live).
+   *
+   * `ask` resolution depends on `fullAutonomous`:
+   *   - fullAutonomous: true  → `ask` rules collapse to `allow` (no human
+   *     to answer; opt-in by callers like the mail-inbound consumer)
+   *   - fullAutonomous: false → `ask` rules collapse to `deny` (safe
+   *     default — autonomous workers shouldn't make judgment calls)
+   *
+   * No file I/O — passed inline via SDK options, so concurrent spawns
+   * sharing a CWD never collide on `.claude/settings.json`.
+   */
+  permissions?: {
+    allow?: string[];
+    deny?: string[];
+    ask?: string[];
+  };
+
+  /**
+   * When true, treat `permissions.ask` rules as auto-approve. Use only for
+   * autonomous workers with no user-interactive permission round-trip
+   * available (e.g., mail-inbound dispatch). Default: false.
+   */
+  fullAutonomous?: boolean;
+
+  /**
    * Stream ID to join (for workers and integrators).
    * Required for workers and integrators when using workspace isolation.
    */

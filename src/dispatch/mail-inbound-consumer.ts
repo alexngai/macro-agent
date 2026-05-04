@@ -29,6 +29,7 @@
 
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-store.js";
+import { loadoutToSpawnOptions, type WireLoadout } from "./loadout-translation.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Dependency interfaces (narrow — keeps the module testable without
@@ -171,6 +172,7 @@ export function createMailInboundConsumer(
         title?: string;
         role?: string;
         tags?: string[];
+        loadout?: WireLoadout;
         metadata?: Record<string, unknown>;
       };
       _conversationId?: string;
@@ -203,9 +205,43 @@ export function createMailInboundConsumer(
     const prompt = data.prompt ?? data.content ?? "";
     const role = data.role ?? "worker";
 
+    // Loadout-derived structured fields ride in the envelope. We prefer the
+    // canonical top-level `data.loadout` slot (Step 3 of the ACP+lifecycle
+    // plan) but fall back to the legacy `data.metadata.permissions` shape
+    // for one deprecation cycle so older hubs that haven't rolled the new
+    // wire shape continue to work.
+    //
+    // `loadoutToSpawnOptions` is shared with the new `dispatch/spawn-agent`
+    // MAP handler so both wire paths produce identical spawn options.
+    //
+    // `fullAutonomous: true` because mail-inbound workers have no human in
+    // the loop to answer `ask` rules — collapse them to `allow` (vs. the
+    // safer `deny` default for spawns where a human might still be reached).
+    let wireLoadout: WireLoadout | undefined = data.loadout;
+    if (!wireLoadout) {
+      const legacyPermissions = data.metadata?.permissions as
+        | { allow?: string[]; deny?: string[]; ask?: string[] }
+        | undefined;
+      const legacyMcpProviders = data.metadata?.mcpProviders as
+        | WireLoadout["mcpProviders"]
+        | undefined;
+      if (legacyPermissions || legacyMcpProviders) {
+        wireLoadout = {
+          ...(legacyPermissions ? { permissions: legacyPermissions } : {}),
+          ...(legacyMcpProviders ? { mcpProviders: legacyMcpProviders } : {}),
+        };
+      }
+    }
+    const spawnLoadoutOpts = loadoutToSpawnOptions(wireLoadout, {
+      fullAutonomous: true,
+    });
+
     log(
       `[mail-inbound] Received x-dispatch/work taskId=${taskId} ` +
-        `conv=${conversationId ?? "(none)"} role=${role}`,
+        `conv=${conversationId ?? "(none)"} role=${role}` +
+        (spawnLoadoutOpts.permissions
+          ? ` permissions=${JSON.stringify(spawnLoadoutOpts.permissions)}`
+          : ""),
     );
 
     // Spawn is async — fire and forget. Errors are logged, not thrown.
@@ -220,6 +256,7 @@ export function createMailInboundConsumer(
         // (claude-code-swarm, oh-my-claudecode, …) don't auto-load and hang
         // session/new on environments where the host services aren't reachable.
         isolatedSettings: true,
+        ...spawnLoadoutOpts,
       })
       .then(async (spawned) => {
         log(

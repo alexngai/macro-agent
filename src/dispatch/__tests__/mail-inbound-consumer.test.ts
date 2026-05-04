@@ -431,6 +431,127 @@ describe("createMailInboundConsumer", () => {
     }
   });
 
+  // ── Loadout / permission coverage ────────────────────────────────
+
+  describe("loadout permissions wiring", () => {
+    function envelopeWith(
+      taskId: string,
+      data: Record<string, unknown>,
+      conversationId = "conv-loadout",
+    ): InboxMessageEvent {
+      return {
+        agentId: DISPATCHER_ID,
+        message: {
+          id: `msg-${taskId}`,
+          content: {
+            schema: "x-dispatch/work",
+            data: { taskId, prompt: "go", role: "worker", ...data },
+            _conversationId: conversationId,
+          },
+        },
+      };
+    }
+
+    it("data.loadout (canonical) → spawn called with permissions + fullAutonomous: true", async () => {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      inboxEvents.fire(
+        envelopeWith("task-loadout-1", {
+          loadout: { permissions: { deny: ["Bash(rm -rf:*)"] } },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const args = am.spawnFn.mock.calls[0][0];
+      expect(args.permissions).toEqual({
+        allow: [],
+        deny: ["Bash(rm -rf:*)"],
+        ask: [],
+      });
+      expect(args.fullAutonomous).toBe(true);
+    });
+
+    it("legacy data.metadata.permissions (no data.loadout) → spawn called with permissions + fullAutonomous: true", async () => {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      inboxEvents.fire(
+        envelopeWith("task-legacy-1", {
+          metadata: { permissions: { deny: ["Bash(rm -rf:*)"] } },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const args = am.spawnFn.mock.calls[0][0];
+      expect(args.permissions).toEqual({
+        allow: [],
+        deny: ["Bash(rm -rf:*)"],
+        ask: [],
+      });
+      expect(args.fullAutonomous).toBe(true);
+    });
+
+    it("data.loadout wins over data.metadata.permissions when both are present", async () => {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      inboxEvents.fire(
+        envelopeWith("task-both-1", {
+          // canonical
+          loadout: { permissions: { deny: ["Bash(canonical:*)"] } },
+          // legacy — should be ignored because canonical is present
+          metadata: { permissions: { deny: ["Bash(legacy:*)"] } },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const args = am.spawnFn.mock.calls[0][0];
+      expect(args.permissions).toEqual({
+        allow: [],
+        deny: ["Bash(canonical:*)"],
+        ask: [],
+      });
+      expect(args.fullAutonomous).toBe(true);
+    });
+
+    it("envelope with neither data.loadout nor data.metadata.permissions → spawn called WITHOUT permissions", async () => {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+      });
+
+      inboxEvents.fire(envelopeWith("task-bare", {}));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const args = am.spawnFn.mock.calls[0][0];
+      expect(args.permissions).toBeUndefined();
+      expect(args.fullAutonomous).toBeUndefined();
+    });
+  });
+
   it("stats(): malformed-envelope counter increments and seenTaskIds reflects current state", async () => {
     const consumer = createMailInboundConsumer({
       dispatcherAgentId: DISPATCHER_ID,

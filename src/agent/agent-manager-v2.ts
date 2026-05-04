@@ -785,18 +785,49 @@ export function createAgentManagerV2(
         } as any);
       }
 
-      // Build agentMeta. When the caller requests isolated settings (e.g.
-      // mail-inbound dispatch workers via SpawnAgentOptions.isolatedSettings),
-      // strip user/project/local setting sources so the worker doesn't load
-      // the host's claude-code-swarm / oh-my-claudecode / etc plugin MCP
-      // servers — those plugins assume host-shaped environment (sockets,
-      // daemons) and hang at session/new MCP-init when missing. Interactive
-      // `multiagent` callers leave this false so their installed plugins
-      // load normally.
-      let agentMeta: Record<string, any> | undefined;
+      // Build agentMeta. Two layers:
+      //
+      //  1. `settingSources: []` — when the caller requests isolated
+      //     settings (mail-inbound dispatch workers via
+      //     SpawnAgentOptions.isolatedSettings), strip user/project/local
+      //     setting sources so the worker doesn't load the host's
+      //     claude-code-swarm / oh-my-claudecode / etc plugin MCP servers
+      //     — those plugins assume host-shaped environment (sockets,
+      //     daemons) and hang at session/new MCP-init when missing.
+      //     Interactive `multiagent` callers leave this false so their
+      //     installed plugins load normally.
+      //
+      //  2. `settings.permissions` — when the caller passes
+      //     SpawnAgentOptions.permissions (e.g., from a materialized
+      //     loadout), wire the rules inline via the Claude Agent SDK's
+      //     session-level settings pass-through. Verified live: `deny`
+      //     wins even over `permissionMode: "auto-approve"`. Inline
+      //     wiring avoids file collisions when concurrent workers share
+      //     a CWD (no `.claude/settings.json` written to disk).
+      //
+      //     `ask` rules collapse based on `fullAutonomous`:
+      //       - fullAutonomous: true  → ask → allow (autonomous worker
+      //         opts to proceed when there's no human to answer)
+      //       - fullAutonomous: false → ask → deny (safe default;
+      //         autonomous workers shouldn't make judgment calls)
+      const claudeCodeOptions: Record<string, any> = {};
       if (options.isolatedSettings || permissionMode === "interactive") {
-        agentMeta = { claudeCode: { options: { settingSources: [] } } };
+        claudeCodeOptions.settingSources = [];
       }
+      if (options.permissions) {
+        const { allow = [], deny = [], ask = [] } = options.permissions;
+        const finalAllow = options.fullAutonomous ? [...allow, ...ask] : [...allow];
+        const finalDeny = options.fullAutonomous ? [...deny] : [...deny, ...ask];
+        claudeCodeOptions.settings = {
+          permissions: {
+            ...(finalAllow.length ? { allow: finalAllow } : {}),
+            ...(finalDeny.length ? { deny: finalDeny } : {}),
+          },
+        };
+      }
+      const agentMeta = Object.keys(claudeCodeOptions).length > 0
+        ? { claudeCode: { options: claudeCodeOptions } }
+        : undefined;
 
       // Build capabilities context + skill-tree loadout for system prompt
       // Matches cc-swarm's context injection pattern (role-aware, tool-specific)

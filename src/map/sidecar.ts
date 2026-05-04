@@ -52,6 +52,7 @@ export function createMAPSidecar(
   let coordinationCleanup: (() => void) | null = null;
   let cascadeBridgeCleanup: (() => void) | null = null;
   let mailBridgeCleanup: (() => void) | null = null;
+  let dispatchSpawnHandlerCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -91,6 +92,10 @@ export function createMAPSidecar(
     if (cascadeBridgeCleanup) {
       try { cascadeBridgeCleanup(); } catch { /* non-critical */ }
       cascadeBridgeCleanup = null;
+    }
+    if (dispatchSpawnHandlerCleanup) {
+      try { dispatchSpawnHandlerCleanup(); } catch { /* non-critical */ }
+      dispatchSpawnHandlerCleanup = null;
     }
     if (trajectoryReporter) {
       trajectoryReporter.stop();
@@ -283,6 +288,7 @@ export function createMAPSidecar(
     );
     lifecycleCallback = bridge.callback;
     lifecycleCleanup = bridge.cleanup;
+    const awaitAcpRegistration = bridge.awaitRegistration;
     lifecycleUnsubscribe = agentManager.onLifecycleEvent(lifecycleCallback);
 
     // 3. Trajectory Reporter
@@ -310,6 +316,74 @@ export function createMAPSidecar(
       dispatcherAgentId,
       log: (msg) => console.log(msg),
     });
+
+    // 4c. dispatch/spawn-agent handler — notification-pair pattern.
+    //
+    // The MAP SDK's AgentConnection doesn't expose setRequestHandler, so
+    // the hub→swarm `dispatch/spawn-agent` "request" is sent as a
+    // `dispatch/spawn-agent.request` notification with a correlation_id.
+    // We process and reply with a `dispatch/spawn-agent.response`
+    // notification carrying the same correlation_id (or an error).
+    //
+    // The hub side correlates and resolves the matching pending Promise
+    // via `src/map/notification-rpc.ts` in openhive-2.
+    const { handleDispatchSpawnAgent } = await import(
+      "../dispatch/spawn-agent-handler.js"
+    );
+    const spawnAgentRequestHandler = async (params: unknown): Promise<void> => {
+      const p = params as
+        | (Record<string, unknown> & { correlation_id?: string })
+        | undefined;
+      const correlationId = p?.correlation_id;
+      if (!correlationId) {
+        console.warn(
+          "[sidecar] dispatch/spawn-agent.request missing correlation_id; ignoring",
+        );
+        return;
+      }
+      try {
+        const result = await handleDispatchSpawnAgent(
+          p as unknown as Parameters<typeof handleDispatchSpawnAgent>[0],
+          {
+            agentManager,
+            // Wait barrier: lifecycle-bridge resolves once
+            // `map/agents/register` completes, so the orchestrator's
+            // subsequent `findAcpAgentInfo` lookup doesn't race.
+            waitForAcpRegistration: awaitAcpRegistration,
+            log: (msg) => console.log(msg),
+          },
+        );
+        await connection.sendNotification("dispatch/spawn-agent.response", {
+          correlation_id: correlationId,
+          result,
+        });
+      } catch (err) {
+        await connection
+          .sendNotification("dispatch/spawn-agent.response", {
+            correlation_id: correlationId,
+            error: { message: (err as Error).message ?? String(err) },
+          })
+          .catch(() => {
+            /* response failed; hub will time out */
+          });
+      }
+    };
+    connection.onNotification(
+      "dispatch/spawn-agent.request",
+      spawnAgentRequestHandler,
+    );
+    dispatchSpawnHandlerCleanup = () => {
+      try {
+        if (typeof connection.offNotification === "function") {
+          connection.offNotification(
+            "dispatch/spawn-agent.request",
+            spawnAgentRequestHandler,
+          );
+        }
+      } catch {
+        /* connection already torn down */
+      }
+    };
 
     // 5. Cascade Bridge + Action Handler (optional — only when a GitCascadeAdapter is available)
     if (gitCascadeAdapter) {
