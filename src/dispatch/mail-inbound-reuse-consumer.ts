@@ -31,13 +31,20 @@
 
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-store.js";
-import type { ExtendedSessionUpdate } from "../agent/types.js";
+import type { ExtendedSessionUpdate } from "acp-factory";
 import type {
   InboxEvents,
   InboxMessageEvent,
   MailInboundSidecar,
 } from "./mail-inbound-consumer.js";
-import type { WireLoadout } from "./loadout-translation.js";
+import {
+  collapsePermissionsForAutonomous,
+  type WireLoadout,
+} from "./loadout-translation.js";
+import {
+  setPermissionOverlay,
+  clearPermissionOverlay,
+} from "./permission-overlay.js";
 
 export interface MailInboundReuseConsumerOptions {
   /**
@@ -231,11 +238,19 @@ export function createMailInboundReuseConsumer(
     // done() — fatal for long-lived workers we want to reuse. We watch
     // the update stream ourselves for the done() tool call and capture
     // the summary inline.
-    void driveDispatch(targetAgentId, taskId, prompt, conversationId).finally(
-      () => {
-        inflightDispatches.delete(targetAgentId);
-      },
-    );
+    void driveDispatch(
+      targetAgentId,
+      taskId,
+      prompt,
+      conversationId,
+      data.loadout,
+    ).finally(() => {
+      inflightDispatches.delete(targetAgentId);
+      // Always clear the permission overlay, even if driveDispatch
+      // didn't set one — keeps the registry tidy and defends against
+      // a future code path that sets one but skips its own cleanup.
+      clearPermissionOverlay(targetAgentId);
+    });
   };
 
   async function driveDispatch(
@@ -243,10 +258,32 @@ export function createMailInboundReuseConsumer(
     taskId: string,
     prompt: string,
     conversationId: string | null,
+    loadout: WireLoadout | undefined,
   ): Promise<void> {
+    // Apply the dispatch's loadout permissions as a runtime overlay
+    // for the duration of this prompt drive. The PreToolUse hook
+    // installed at spawn-time consults the overlay registry per tool
+    // call and denies calls that match the loadout's deny rules.
+    // `fullAutonomous: true` because mail-inbound workers have no
+    // human in the loop — `ask` rules collapse to `allow`. Cleared
+    // unconditionally in `finally` so a crash mid-prompt doesn't
+    // leave a stale overlay on the agent.
+    const overlay = collapsePermissionsForAutonomous(
+      loadout?.permissions,
+      /* fullAutonomous */ true,
+    );
+    if (overlay) {
+      setPermissionOverlay(targetAgentId, overlay);
+      log(
+        `[mail-inbound-reuse] Applied permission overlay for agent=${targetAgentId} ` +
+          `taskId=${taskId} (deny=${overlay.deny.length} allow=${overlay.allow.length})`,
+      );
+    }
+
     let summary: string | undefined;
     let status: string | undefined;
     let doneSeen = false;
+    let promptError: Error | undefined;
 
     try {
       for await (const update of agentManager.prompt(targetAgentId, prompt)) {
@@ -258,13 +295,58 @@ export function createMailInboundReuseConsumer(
         }
       }
     } catch (err) {
+      promptError = err as Error;
       log(
         `[mail-inbound-reuse] prompt() threw for agent=${targetAgentId} taskId=${taskId}: ` +
-          `${(err as Error).message ?? String(err)}`,
+          `${promptError.message ?? String(promptError)}`,
       );
+    }
+
+    // Fallback: read `_lastSummary` from agentStore. The done() handler
+    // persists this for in-flight agents (Phase 2C) so the reply path
+    // is reliable even when the prompt iterator's update stream raced
+    // the ACP connection close. Covers:
+    //   - prompt() threw before yielding the done() update (catch above)
+    //   - inline capture saw done() but `args.summary` was empty
+    //   - iterator yielded but our captureDoneCall missed (shape drift)
+    if (!summary) {
+      try {
+        const record = agentStore.getAgent(targetAgentId);
+        const fallback = record?.metadata?._lastSummary;
+        if (typeof fallback === "string" && fallback.length > 0) {
+          summary = fallback;
+          doneSeen = true;
+          log(
+            `[mail-inbound-reuse] Recovered summary from _lastSummary fallback for agent=${targetAgentId} taskId=${taskId}`,
+          );
+        }
+      } catch {
+        /* best effort — store may be closing during shutdown */
+      }
+    }
+
+    // Post reply: prefer real summary, fall back to status notes when
+    // we genuinely have nothing.
+    if (summary) {
+      void postReplyTurn(conversationId, targetAgentId, summary).then(() => {
+        // Clear the persisted summary so it doesn't replay if the same
+        // agentId is dispatched again. Best-effort.
+        try {
+          const existing = agentStore.getAgent(targetAgentId)?.metadata ?? {};
+          const { _lastSummary: _drop, ...rest } = existing as Record<string, unknown>;
+          void _drop;
+          agentStore.updateAgent(targetAgentId, { metadata: rest });
+        } catch {
+          /* best effort */
+        }
+      });
+      return;
+    }
+
+    if (promptError) {
       void postReplyTurn(conversationId, targetAgentId, {
         status: "failed",
-        reason: `Prompt failed: ${(err as Error).message ?? String(err)}`,
+        reason: `Prompt failed: ${promptError.message ?? String(promptError)}`,
       });
       return;
     }
@@ -281,8 +363,11 @@ export function createMailInboundReuseConsumer(
       return;
     }
 
-    const replyContent = summary ?? `Dispatch ${taskId} ${status ?? "completed"} (no summary)`;
-    void postReplyTurn(conversationId, targetAgentId, replyContent);
+    void postReplyTurn(
+      conversationId,
+      targetAgentId,
+      `Dispatch ${taskId} ${status ?? "completed"} (no summary)`,
+    );
   }
 
   /**

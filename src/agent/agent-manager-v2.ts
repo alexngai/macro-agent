@@ -65,10 +65,60 @@ import { AgentTokenManager } from "../auth/token.js";
 import type { InboxAdapter } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { AgentManager, SpawnInterceptor } from "./agent-manager.js";
+import { getPermissionOverlay } from "../dispatch/permission-overlay.js";
+import { evaluatePermission } from "../dispatch/permission-evaluator.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Helper
 // ─────────────────────────────────────────────────────────────────
+
+/**
+ * Derive the canonical Claude Code tool name from a `permission_request`
+ * `toolCall` object.
+ *
+ * Why this is needed: claude-agent-acp's `toolInfoFromToolUse` mangles
+ * built-in tool names into display titles (e.g., `Read /tmp/x` instead of
+ * `Read`). MCP tools use their fully-qualified `mcp__server__tool` name as
+ * the title. The `kind` field (Claude SDK's tool category) is the
+ * cleanest signal for built-ins, with the input shape disambiguating
+ * within a category (e.g., `edit` covers Write/Edit/MultiEdit — we look
+ * at `old_string`/`edits` to pick which).
+ *
+ * Pure: no side effects; safe to call from the prompt iterator.
+ */
+function deriveToolName(toolCall: {
+  title?: string;
+  kind?: string;
+  rawInput?: unknown;
+} | undefined): string {
+  const title = toolCall?.title ?? "";
+  const kind = toolCall?.kind ?? "";
+  // MCP tools — title is the canonical name.
+  if (title.startsWith("mcp__")) return title.split(/\s/)[0] ?? "";
+  const input =
+    toolCall?.rawInput && typeof toolCall.rawInput === "object"
+      ? (toolCall.rawInput as Record<string, unknown>)
+      : {};
+  switch (kind) {
+    case "read":
+      return "Read";
+    case "execute":
+      return "Bash";
+    case "edit":
+      if ("edits" in input) return "MultiEdit";
+      if ("old_string" in input) return "Edit";
+      return "Write";
+    case "search":
+      return "path" in input ? "Grep" : "Glob";
+    case "think":
+      return "Task";
+    case "switch_mode":
+      return "ExitPlanMode";
+  }
+  // Fallback: first whitespace-delimited token of the title (Read/Write/
+  // Edit cases not caught above; built-ins newer than this matrix).
+  return title.split(/\s/)[0] ?? "";
+}
 
 function getSpawnCapability(childRole: string): Capability {
   const baseRole = childRole.split(".")[0];
@@ -835,6 +885,45 @@ export function createAgentManagerV2(
           },
         };
       }
+      // P3 spike: when an agent should funnel every tool call through the host
+      // (so the prompt-iterator handler can apply runtime overlays), set
+      // `ask: ['*']` on settings.permissions. The SDK then consults canUseTool
+      // for every tool, which emits `permission_request` session updates.
+      // Used for dispatch-target agents (mail+reuse, ACP+reuse) that need
+      // dynamic enforcement; chat agents and parented children stay on
+      // their session's static rules.
+      if (options.askForAllTools) {
+        const existingPerms =
+          claudeCodeOptions.settings?.permissions ?? {};
+        claudeCodeOptions.settings = {
+          ...claudeCodeOptions.settings,
+          permissions: {
+            ...existingPerms,
+            ask: ["*"],
+          },
+        };
+      }
+
+      // 3. Runtime permission overlay enforcement lives in the prompt
+      //    iterator (see `prompt()` below), NOT here at spawn time.
+      //
+      //    Background: an earlier design installed a Claude SDK PreToolUse
+      //    hook here that closed over the per-process permission-overlay
+      //    registry. That mechanism was verified broken: function callbacks
+      //    inside arrays don't survive JSON.stringify across the
+      //    macro-agent → claude-agent-acp stdio JSON-RPC boundary, so the
+      //    hook arrived as `null` at the SDK and silently no-op'd.
+      //
+      //    The current design uses ACP's `permission_request` session
+      //    update path instead. When an agent is spawned with
+      //    `askForAllTools: true` + `permissionMode: 'interactive'`, the
+      //    SDK consults `canUseTool` on every tool call, claude-agent-acp
+      //    converts that into a `client.requestPermission` call, and
+      //    acp-factory emits it as a `permission_request` session update.
+      //    The prompt iterator below intercepts those updates, evaluates
+      //    against the overlay, and responds via `respondPermission`.
+      //    See `docs/PERMISSION_OVERLAY_ACP_DESIGN.md` for the full design.
+
       const agentMeta = Object.keys(claudeCodeOptions).length > 0
         ? { claudeCode: { options: claudeCodeOptions } }
         : undefined;
@@ -1584,7 +1673,71 @@ export function createAgentManagerV2(
 
     activeSession.isPrompting = true;
     try {
-      yield* activeSession.session.prompt(message);
+      // Permission overlay enforcement — for agents in dispatch context
+      // (mail-inbound + ACP reuse targets), the dispatch consumer sets a
+      // per-agent overlay before driving prompt(). When set, `permission_request`
+      // session updates are intercepted here, evaluated against the overlay,
+      // and answered via `respondToPermission`. The update is NOT yielded
+      // to the consumer in that case — dispatch enforcement is internal.
+      //
+      // When no overlay is set (the common case — chat agents, sub-agents
+      // spawned by parents, etc.), permission_request updates are yielded
+      // through unchanged so chat surfaces' UI permission dialogs (the
+      // swarmcraft PermissionDialog rendered via the openhive-acp-service
+      // WS subscription) keep working.
+      //
+      // See `docs/PERMISSION_OVERLAY_ACP_DESIGN.md` for the rationale and
+      // a diagram of the four-process flow.
+      for await (const update of activeSession.session.prompt(message)) {
+        const u = update as {
+          sessionUpdate?: string;
+          requestId?: string;
+          toolCall?: { title?: string; kind?: string; rawInput?: unknown };
+          options?: Array<{ kind?: string; optionId?: string }>;
+        };
+        if (u?.sessionUpdate === "permission_request") {
+          const overlay = getPermissionOverlay(agentId);
+          // No overlay → pass through to the consumer (chat UI, etc.).
+          if (!overlay) {
+            yield update;
+            continue;
+          }
+          let optionId: string | undefined;
+          try {
+            const toolName = deriveToolName(u.toolCall);
+            const toolInput = u.toolCall?.rawInput ?? {};
+            const decision = evaluatePermission(toolName, toolInput, overlay)
+              .decision;
+            const wantedKind =
+              decision === "deny" ? "reject_once" : "allow_once";
+            const opt =
+              u.options?.find((o) => o.kind === wantedKind) ??
+              u.options?.find(
+                (o) =>
+                  o.kind === (decision === "deny" ? "reject_always" : "allow_always"),
+              );
+            optionId = opt?.optionId;
+          } catch {
+            // Fail closed: on registry/evaluator error, deny.
+            optionId = u.options?.find((o) => o.kind === "reject_once")?.optionId;
+          }
+          if (u.requestId && optionId) {
+            try {
+              (activeSession.session as any).respondToPermission?.(
+                u.requestId,
+                optionId,
+              );
+            } catch (err) {
+              console.warn(
+                `[perm-overlay] respondToPermission failed agent=${agentId} req=${u.requestId}: ${(err as Error).message}`,
+              );
+            }
+          }
+          // Don't yield permission_request to the consumer — dispatch-internal.
+          continue;
+        }
+        yield update;
+      }
     } finally {
       activeSession.isPrompting = false;
       agentStore.updateAgent(agentId, {

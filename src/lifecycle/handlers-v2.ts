@@ -17,6 +17,7 @@ import type { InboxAdapter } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-store.js";
+import { getPermissionOverlay } from "../dispatch/permission-overlay.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -217,11 +218,19 @@ async function handleWorkerDone(
     warnings.push("Failed to emit WORKER_DONE");
   }
 
-  // Step 3b: For parentless agents (mail-inbound dispatch workers), persist the
-  // summary in agent metadata so the dispatch reply bridge can forward it as a
-  // hub mail turn after the stopped lifecycle event fires. emitSignal() is a
-  // no-op when parentId is null, so this is the only path for the summary.
-  if (!context.parentId && args.summary && deps.agentStore) {
+  // Step 3b: Persist `_lastSummary` to agent metadata when:
+  //   - Agent is parentless (mail-inbound fresh-spawn dispatch workers —
+  //     emitSignal is a no-op for parentless, so metadata is the only
+  //     reply-path channel), OR
+  //   - Agent is processing a dispatch (Phase 1 permission overlay set
+  //     for this agent → in-flight). Gives the mail-inbound-reuse-consumer
+  //     a metadata-side fallback for the reply summary that's
+  //     independent of whether the prompt iterator's update stream
+  //     races with ACP connection close. Applies to both parentless
+  //     AND parented in-flight agents (parented dispatch targets are
+  //     the typical mail+reuse setup).
+  const inDispatch = !!getPermissionOverlay(context.agentId);
+  if ((inDispatch || !context.parentId) && args.summary && deps.agentStore) {
     try {
       const existing = deps.agentStore.getAgent(context.agentId);
       deps.agentStore.updateAgent(context.agentId, {

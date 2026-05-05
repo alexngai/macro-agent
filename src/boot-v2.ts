@@ -265,6 +265,22 @@ export interface BootV2Config {
       task?: string;
     };
     /**
+     * Optional parented worker spawn after the bootstrap coordinator
+     * comes up. Used by live tests (e.g., `live-mail-reuse-dispatch`)
+     * to provide a parented dispatch target that survives mail+reuse
+     * `done()` cleanly (the worker terminates as designed; the parent
+     * coord receives the `WORKER_DONE` signal — no orphan).
+     *
+     * Default `role`: `'reuse-target'`. Choose a role that does NOT
+     * collide with the sidecar's projected `'worker'` role in the
+     * hub-side roster — otherwise prefer-route may tie-break to the
+     * sidecar instead of this worker.
+     */
+    worker?: boolean | {
+      role?: string;
+      task?: string;
+    };
+    /**
      * Rehydration policy for agents that existed before this boot. Controls
      * what the boot script does with agents that outlived their previous
      * host process (agent-store is durable; a restart finds agents still
@@ -382,6 +398,19 @@ export async function bootV2(
       bootstrap: {
         ...(config.bootstrap ?? {}),
         coordinator: envCwd ? { cwd: envCwd } : true,
+      },
+    };
+  }
+  if (
+    process.env.MACRO_BOOTSTRAP_WORKER === "true" &&
+    !config.bootstrap?.worker
+  ) {
+    const envWorkerRole = process.env.MACRO_BOOTSTRAP_WORKER_ROLE;
+    config = {
+      ...config,
+      bootstrap: {
+        ...(config.bootstrap ?? {}),
+        worker: envWorkerRole ? { role: envWorkerRole } : true,
       },
     };
   }
@@ -1083,6 +1112,58 @@ export async function bootV2(
       console.log(
         `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
       );
+
+      // Optional: bootstrap an additional worker for live tests
+      // exercising mail+reuse semantics. Spawned with parent=null
+      // because:
+      //   - The role-capability check only fires for parented spawns
+      //     (agent-manager-v2 line 559-572); bypassing it lets us use
+      //     a custom role (e.g., 'reuse-target') that doesn't collide
+      //     with the sidecar's projected 'worker' in the hub-side
+      //     dispatch roster.
+      //   - The worker's done() lifecycle is the same as the bootstrap
+      //     coord's: terminate cleanly. Phase 2C's `_lastSummary`
+      //     fallback (handlers-v2 + mail-inbound-reuse-consumer)
+      //     ensures the dispatch reply path recovers the summary from
+      //     metadata even if the prompt iterator's update stream races
+      //     the ACP connection close on terminate.
+      if (config.bootstrap?.worker) {
+        const workerOpts = config.bootstrap.worker === true
+          ? {}
+          : config.bootstrap.worker;
+        const workerRole = workerOpts.role ?? "reuse-target";
+        try {
+          const workerSpawned = await agentManager.spawn({
+            role: workerRole,
+            parent: null,
+            cwd: bootstrapCwd,
+            task: workerOpts.task ?? "Await dispatch",
+            // Funnel every tool call through the host so the prompt-iterator
+            // handler can apply per-dispatch overlay deny rules at runtime
+            // (Phase 3). Two layers must both be set:
+            //   - askForAllTools=true → settings.permissions.ask=['*'] so
+            //     the Claude SDK actually consults canUseTool for every
+            //     tool (without this, default mode auto-approves "safe"
+            //     tools like Read).
+            //   - permissionMode='interactive' → acp-factory emits the
+            //     resulting requestPermission as a `permission_request`
+            //     session update instead of auto-approving it (which is
+            //     macro-agent's default 'auto-approve' behavior).
+            // Bootstrap dispatch targets are autonomous + latency-tolerant
+            // so the per-call host roundtrip is acceptable.
+            askForAllTools: true,
+            permissionMode: "interactive",
+          });
+          console.log(
+            `[boot-v2] Bootstrap dispatch-target spawned: ${(workerSpawned as any).name ?? workerSpawned.id} ` +
+              `(role=${workerRole}, parent=null)`,
+          );
+        } catch (err) {
+          console.warn(
+            `[boot-v2] Bootstrap worker spawn failed: ${(err as Error).message}`,
+          );
+        }
+      }
     };
 
     rehydrateOrSpawn().catch((err: Error) => {

@@ -120,6 +120,16 @@ export interface SpawnAgentOptions {
   fullAutonomous?: boolean;
 
   /**
+   * When true, set `settings.permissions.ask: ['*']` so the SDK consults
+   * `canUseTool` for every tool call, emitting `permission_request` session
+   * updates the host's prompt iterator can intercept. Used for dispatch-
+   * target agents (mail+reuse, ACP+reuse) where the dispatch consumer
+   * applies per-call deny rules via the permission overlay registry.
+   * Default: false (chat agents and parented children stay on static rules).
+   */
+  askForAllTools?: boolean;
+
+  /**
    * Stream ID to join (for workers and integrators).
    * Required for workers and integrators when using workspace isolation.
    */

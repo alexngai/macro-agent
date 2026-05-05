@@ -106,3 +106,33 @@ function hasAnyRule(p: WireLoadout["permissions"]): boolean {
     0
   );
 }
+
+/**
+ * Collapse a permissions block's `ask` rules based on the autonomous
+ * setting, returning a fully-resolved {allow, deny} pair suitable for
+ * a permission-overlay registry entry (no `ask` left).
+ *
+ *   fullAutonomous: true  → ask collapses to allow (autonomous worker
+ *                            proceeds without human round-trip)
+ *   fullAutonomous: false → ask collapses to deny  (safe default;
+ *                            autonomous workers shouldn't make
+ *                            judgment calls)
+ *
+ * Mirrors the inline logic in `agent-manager-v2.ts`'s
+ * `claudeCodeOptions.settings.permissions` build path so the runtime
+ * overlay applies the same `ask`-resolution semantics as the
+ * spawn-time settings.
+ *
+ * Returns `undefined` when the input has no rules at all (caller can
+ * skip overlay registration entirely).
+ */
+export function collapsePermissionsForAutonomous(
+  perms: WireLoadout["permissions"] | undefined,
+  fullAutonomous: boolean,
+): { allow: string[]; deny: string[] } | undefined {
+  if (!perms || !hasAnyRule(perms)) return undefined;
+  const { allow = [], deny = [], ask = [] } = perms;
+  return fullAutonomous
+    ? { allow: [...allow, ...ask], deny: [...deny] }
+    : { allow: [...allow], deny: [...deny, ...ask] };
+}

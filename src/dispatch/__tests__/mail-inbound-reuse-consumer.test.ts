@@ -10,6 +10,11 @@
 
 import { describe, it, expect, beforeEach, vi, type MockedFunction } from "vitest";
 import {
+  getPermissionOverlay,
+  _resetForTest as _resetPermissionOverlayForTest,
+  _sizeForTest as _permissionOverlaySize,
+} from "../permission-overlay.js";
+import {
   createMailInboundReuseConsumer,
 } from "../mail-inbound-reuse-consumer.js";
 import type {
@@ -127,6 +132,7 @@ function workEnvelope(
   taskId: string,
   targetAgentId: string,
   conversationId?: string,
+  loadout?: { permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } },
 ): InboxMessageEvent {
   return {
     agentId: targetAgentId,
@@ -134,7 +140,12 @@ function workEnvelope(
       id: `msg-${taskId}`,
       content: {
         schema: "x-dispatch/work",
-        data: { taskId, prompt: "do the thing", role: "worker" },
+        data: {
+          taskId,
+          prompt: "do the thing",
+          role: "worker",
+          ...(loadout ? { loadout } : {}),
+        },
         ...(conversationId ? { _conversationId: conversationId } : {}),
       },
     },
@@ -168,6 +179,7 @@ describe("createMailInboundReuseConsumer", () => {
 
   beforeEach(() => {
     inboxEvents = makeInboxEvents();
+    _resetPermissionOverlayForTest();
   });
 
   it("ignores envelopes addressed to the sidecar (those are owned by mail-inbound-consumer)", async () => {
@@ -413,6 +425,151 @@ describe("createMailInboundReuseConsumer", () => {
       TARGET_AGENT_ID,
       expect.stringContaining("failed"),
     );
+    consumer.stop();
+  });
+
+  it("applies a permission overlay when the envelope's loadout carries deny rules", async () => {
+    let overlayDuringPrompt: unknown = null;
+    // Capture the overlay at the moment prompt() is called.
+    const promptUpdates = [
+      doneUpdate({ status: "completed", summary: "ok" }),
+    ];
+    const promptFn = vi.fn() as unknown as MockedFunction<AgentManager["prompt"]>;
+    promptFn.mockImplementation(((id: string) => {
+      // Read overlay synchronously at the call site.
+      overlayDuringPrompt = getPermissionOverlay(id);
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const u of promptUpdates) yield u;
+        },
+      } as unknown as AsyncIterable<any>;
+    }) as any);
+    const manager: Partial<AgentManager> = { prompt: promptFn };
+
+    const sidecar = makeSidecar();
+    const consumer = createMailInboundReuseConsumer({
+      dispatcherAgentId: SIDECAR_ID,
+      inboxEvents,
+      agentManager: manager as AgentManager,
+      agentStore: makeAgentStore() as AgentStore,
+      getSidecar: () => sidecar,
+      log: () => {},
+    });
+
+    const loadout = {
+      permissions: {
+        deny: ["Bash(echo perm-deny-test:*)"],
+      },
+    };
+    inboxEvents.fire(workEnvelope("t-overlay", TARGET_AGENT_ID, "conv-overlay", loadout));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // During prompt: overlay was set with the loadout's deny rule.
+    expect(overlayDuringPrompt).toEqual({
+      allow: [],
+      deny: ["Bash(echo perm-deny-test:*)"],
+    });
+
+    // After driveDispatch's finally fires, overlay is cleared.
+    expect(getPermissionOverlay(TARGET_AGENT_ID)).toBeUndefined();
+    expect(_permissionOverlaySize()).toBe(0);
+    consumer.stop();
+  });
+
+  it("collapses ask rules to allow under fullAutonomous=true (mail-inbound default)", async () => {
+    let overlayDuringPrompt: unknown = null;
+    const promptFn = vi.fn() as unknown as MockedFunction<AgentManager["prompt"]>;
+    promptFn.mockImplementation(((id: string) => {
+      overlayDuringPrompt = getPermissionOverlay(id);
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield doneUpdate({ status: "completed", summary: "ok" });
+        },
+      } as unknown as AsyncIterable<any>;
+    }) as any);
+    const manager: Partial<AgentManager> = { prompt: promptFn };
+
+    const consumer = createMailInboundReuseConsumer({
+      dispatcherAgentId: SIDECAR_ID,
+      inboxEvents,
+      agentManager: manager as AgentManager,
+      agentStore: makeAgentStore() as AgentStore,
+      getSidecar: () => makeSidecar(),
+      log: () => {},
+    });
+
+    const loadout = {
+      permissions: {
+        allow: ["Read(**)"],
+        ask: ["Write(.env)"],
+      },
+    };
+    inboxEvents.fire(workEnvelope("t-collapse", TARGET_AGENT_ID, "conv-c", loadout));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // ask rules collapsed to allow because mail-inbound workers are autonomous.
+    expect(overlayDuringPrompt).toEqual({
+      allow: ["Read(**)", "Write(.env)"],
+      deny: [],
+    });
+    consumer.stop();
+  });
+
+  it("does NOT set an overlay when the envelope has no loadout permissions", async () => {
+    let overlayDuringPrompt: unknown = "uninspected";
+    const promptFn = vi.fn() as unknown as MockedFunction<AgentManager["prompt"]>;
+    promptFn.mockImplementation(((id: string) => {
+      overlayDuringPrompt = getPermissionOverlay(id);
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield doneUpdate({ status: "completed", summary: "ok" });
+        },
+      } as unknown as AsyncIterable<any>;
+    }) as any);
+    const manager: Partial<AgentManager> = { prompt: promptFn };
+
+    const consumer = createMailInboundReuseConsumer({
+      dispatcherAgentId: SIDECAR_ID,
+      inboxEvents,
+      agentManager: manager as AgentManager,
+      agentStore: makeAgentStore() as AgentStore,
+      getSidecar: () => makeSidecar(),
+      log: () => {},
+    });
+
+    inboxEvents.fire(workEnvelope("t-noloadout", TARGET_AGENT_ID, "conv-n"));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(overlayDuringPrompt).toBeUndefined();
+    consumer.stop();
+  });
+
+  it("clears the overlay even when prompt() throws (defense-in-depth)", async () => {
+    const manager = makeAgentManager({
+      promptError: new Error("transport gone"),
+    });
+    const consumer = createMailInboundReuseConsumer({
+      dispatcherAgentId: SIDECAR_ID,
+      inboxEvents,
+      agentManager: manager.manager as AgentManager,
+      agentStore: makeAgentStore() as AgentStore,
+      getSidecar: () => makeSidecar(),
+      log: () => {},
+    });
+
+    const loadout = {
+      permissions: { deny: ["Bash(*)"] },
+    };
+    inboxEvents.fire(workEnvelope("t-throw", TARGET_AGENT_ID, "conv-throw", loadout));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Prompt threw → overlay cleared, no leak.
+    expect(getPermissionOverlay(TARGET_AGENT_ID)).toBeUndefined();
+    expect(_permissionOverlaySize()).toBe(0);
     consumer.stop();
   });
 });

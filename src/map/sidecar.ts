@@ -54,6 +54,7 @@ export function createMAPSidecar(
   let mailBridgeCleanup: (() => void) | null = null;
   let dispatchSpawnHandlerCleanup: (() => void) | null = null;
   let dispatchMessageHandlerCleanup: (() => void) | null = null;
+  let dispatchPermissionsHandlerCleanup: (() => void) | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -101,6 +102,10 @@ export function createMAPSidecar(
     if (dispatchSpawnHandlerCleanup) {
       try { dispatchSpawnHandlerCleanup(); } catch { /* non-critical */ }
       dispatchSpawnHandlerCleanup = null;
+    }
+    if (dispatchPermissionsHandlerCleanup) {
+      try { dispatchPermissionsHandlerCleanup(); } catch { /* non-critical */ }
+      dispatchPermissionsHandlerCleanup = null;
     }
     if (trajectoryReporter) {
       trajectoryReporter.stop();
@@ -405,6 +410,99 @@ export function createMAPSidecar(
       }
     };
 
+    // 4c'. x-dispatch/permissions.{set,clear} handlers — notification-pair
+    // pattern, mirrors spawn-agent's shape. Used by hubs (e.g. OpenHive's
+    // ACP+reuse dispatch path) to apply per-dispatch loadout deny/allow
+    // rules to a long-lived agent's session at runtime via the
+    // permission-overlay registry. The prompt iterator in
+    // `agent-manager-v2.ts` enforces the overlay against
+    // `permission_request` ACP session updates. Pairs with the mail+reuse
+    // path's overlay set/clear in `mail-inbound-reuse-consumer.ts` —
+    // same registry, different transport.
+    const {
+      handlePermissionsSet,
+      handlePermissionsClear,
+      X_DISPATCH_PERMISSIONS_METHODS,
+    } = await import("../dispatch/permissions-handler.js");
+
+    // Response shape per swarm-dispatch's notification-rpc registry:
+    //   { correlation_id, result }  → resolve(result)
+    //   { correlation_id, error: { code?, message? } } → reject
+    // The handler's `{ ok, error?: string }` is wrapped accordingly.
+    const sendPermissionsResponse = async (
+      method: string,
+      correlationId: string | undefined,
+      result: { ok: true } | { ok: false; error: string },
+    ): Promise<void> => {
+      const body: Record<string, unknown> = {};
+      if (correlationId) body.correlation_id = correlationId;
+      if (result.ok) {
+        body.result = result;
+      } else {
+        body.error = { message: result.error };
+      }
+      try {
+        await connection.sendNotification(method, body);
+      } catch (err) {
+        console.warn(
+          `[${method}] response send failed: ${(err as Error).message}`,
+        );
+      }
+    };
+
+    const permissionsSetHandler = async (params: unknown): Promise<void> => {
+      const correlationId =
+        (params as { correlation_id?: string })?.correlation_id;
+      const result = handlePermissionsSet(
+        params as Parameters<typeof handlePermissionsSet>[0],
+        (msg) => console.log(msg),
+      );
+      await sendPermissionsResponse(
+        X_DISPATCH_PERMISSIONS_METHODS.SET_RESPONSE,
+        correlationId,
+        result,
+      );
+    };
+
+    const permissionsClearHandler = async (params: unknown): Promise<void> => {
+      const correlationId =
+        (params as { correlation_id?: string })?.correlation_id;
+      const result = handlePermissionsClear(
+        params as Parameters<typeof handlePermissionsClear>[0],
+        (msg) => console.log(msg),
+      );
+      await sendPermissionsResponse(
+        X_DISPATCH_PERMISSIONS_METHODS.CLEAR_RESPONSE,
+        correlationId,
+        result,
+      );
+    };
+
+    connection.onNotification(
+      X_DISPATCH_PERMISSIONS_METHODS.SET_REQUEST,
+      permissionsSetHandler,
+    );
+    connection.onNotification(
+      X_DISPATCH_PERMISSIONS_METHODS.CLEAR_REQUEST,
+      permissionsClearHandler,
+    );
+    dispatchPermissionsHandlerCleanup = () => {
+      try {
+        if (typeof connection.offNotification === "function") {
+          connection.offNotification(
+            X_DISPATCH_PERMISSIONS_METHODS.SET_REQUEST,
+            permissionsSetHandler,
+          );
+          connection.offNotification(
+            X_DISPATCH_PERMISSIONS_METHODS.CLEAR_REQUEST,
+            permissionsClearHandler,
+          );
+        }
+      } catch {
+        /* connection already torn down */
+      }
+    };
+
     // 4d. map/dispatch/message handler — receives hub-routed envelopes
     // addressed to a specific agent on this swarm via MAP scope. The hub
     // takes this path (not mail/turn) when the target agent declares
@@ -442,7 +540,18 @@ export function createMAPSidecar(
       // Translate envelope { type, body } → { schema, data } shape that the
       // mail-inbound-reuse-consumer expects (mirrors mail-bridge's
       // translation for `mail/turn.received`).
+      //
+      // Hub-side mail-transport injects `body._conversationId` when sending
+      // via MAP scope (sendViaMapScope) — extract it here and surface it
+      // on the top-level content (alongside `data`) so the
+      // mail-inbound-reuse-consumer's reply path can `postMailTurn` to
+      // the right conversation. Without this, the consumer drops the
+      // reply with "No conversationId".
       const env = envelope as { type?: string; body?: Record<string, unknown> };
+      const conversationId =
+        env.body && typeof env.body._conversationId === "string"
+          ? (env.body._conversationId as string)
+          : undefined;
       const content: Record<string, unknown> =
         env.type && env.body
           ? { schema: env.type, data: env.body }
@@ -450,6 +559,7 @@ export function createMAPSidecar(
       const contentWithMarker: Record<string, unknown> = {
         type: "data",
         ...content,
+        ...(conversationId ? { _conversationId: conversationId } : {}),
       };
       try {
         await inboxAdapter.send(
