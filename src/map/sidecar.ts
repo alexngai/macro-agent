@@ -323,67 +323,81 @@ export function createMAPSidecar(
       log: (msg) => console.log(msg),
     });
 
-    // 4c. dispatch/spawn-agent handler — notification-pair pattern.
+    // 4c. x-dispatch/spawn-agent handler — notification-pair pattern.
     //
     // The MAP SDK's AgentConnection doesn't expose setRequestHandler, so
-    // the hub→swarm `dispatch/spawn-agent` "request" is sent as a
-    // `dispatch/spawn-agent.request` notification with a correlation_id.
-    // We process and reply with a `dispatch/spawn-agent.response`
+    // the hub→swarm spawn-agent "request" is sent as a notification
+    // with a correlation_id. We process and reply with a `.response`
     // notification carrying the same correlation_id (or an error).
     //
-    // The hub side correlates and resolves the matching pending Promise
-    // via `src/map/notification-rpc.ts` in openhive-2.
+    // Dual-listen: subscribe to BOTH the canonical
+    // `x-dispatch/spawn-agent.request` (Tier 2+, owned by swarm-dispatch)
+    // AND the legacy `dispatch/spawn-agent.request` for one release
+    // window. Reply on the matching channel — the hub's response
+    // dispatcher accepts both.
     const { handleDispatchSpawnAgent } = await import(
       "../dispatch/spawn-agent-handler.js"
     );
-    const spawnAgentRequestHandler = async (params: unknown): Promise<void> => {
-      const p = params as
-        | (Record<string, unknown> & { correlation_id?: string })
-        | undefined;
-      const correlationId = p?.correlation_id;
-      if (!correlationId) {
-        console.warn(
-          "[sidecar] dispatch/spawn-agent.request missing correlation_id; ignoring",
-        );
-        return;
-      }
-      try {
-        const result = await handleDispatchSpawnAgent(
-          p as unknown as Parameters<typeof handleDispatchSpawnAgent>[0],
-          {
-            agentManager,
-            // Wait barrier: lifecycle-bridge resolves once
-            // `map/agents/register` completes, so the orchestrator's
-            // subsequent `findAcpAgentInfo` lookup doesn't race.
-            waitForAcpRegistration: awaitAcpRegistration,
-            log: (msg) => console.log(msg),
+    const {
+      handleSpawnAgentRequest,
+      X_DISPATCH_METHODS: SPAWN_METHODS,
+      LEGACY_DISPATCH_SPAWN_AGENT_REQUEST,
+      LEGACY_DISPATCH_SPAWN_AGENT_RESPONSE,
+    } = await import("swarm-dispatch/client");
+
+    const makeSpawnHandler = (
+      responseMethod: string,
+    ): ((params: unknown) => Promise<void>) =>
+      async (params) => {
+        await handleSpawnAgentRequest({
+          params,
+          runtime: {
+            async spawn(req) {
+              return handleDispatchSpawnAgent(
+                req as unknown as Parameters<typeof handleDispatchSpawnAgent>[0],
+                {
+                  agentManager,
+                  // Wait barrier: lifecycle-bridge resolves once
+                  // `map/agents/register` completes, so the orchestrator's
+                  // subsequent `findAcpAgentInfo` lookup doesn't race.
+                  waitForAcpRegistration: awaitAcpRegistration,
+                  log: (msg) => console.log(msg),
+                },
+              );
+            },
           },
-        );
-        await connection.sendNotification("dispatch/spawn-agent.response", {
-          correlation_id: correlationId,
-          result,
+          sendResponse: async (responseParams) => {
+            await connection.sendNotification(responseMethod, responseParams);
+          },
+          log: (msg) => console.log(msg),
         });
-      } catch (err) {
-        await connection
-          .sendNotification("dispatch/spawn-agent.response", {
-            correlation_id: correlationId,
-            error: { message: (err as Error).message ?? String(err) },
-          })
-          .catch(() => {
-            /* response failed; hub will time out */
-          });
-      }
-    };
+      };
+
+    const canonicalSpawnHandler = makeSpawnHandler(
+      SPAWN_METHODS.SPAWN_AGENT_RESPONSE,
+    );
+    const legacySpawnHandler = makeSpawnHandler(
+      LEGACY_DISPATCH_SPAWN_AGENT_RESPONSE,
+    );
+
     connection.onNotification(
-      "dispatch/spawn-agent.request",
-      spawnAgentRequestHandler,
+      SPAWN_METHODS.SPAWN_AGENT_REQUEST,
+      canonicalSpawnHandler,
+    );
+    connection.onNotification(
+      LEGACY_DISPATCH_SPAWN_AGENT_REQUEST,
+      legacySpawnHandler,
     );
     dispatchSpawnHandlerCleanup = () => {
       try {
         if (typeof connection.offNotification === "function") {
           connection.offNotification(
-            "dispatch/spawn-agent.request",
-            spawnAgentRequestHandler,
+            SPAWN_METHODS.SPAWN_AGENT_REQUEST,
+            canonicalSpawnHandler,
+          );
+          connection.offNotification(
+            LEGACY_DISPATCH_SPAWN_AGENT_REQUEST,
+            legacySpawnHandler,
           );
         }
       } catch {
@@ -451,12 +465,33 @@ export function createMAPSidecar(
         );
       }
     };
-    connection.onNotification("map/dispatch/message", dispatchMessageHandler);
+    // Dual-listen: subscribe to BOTH the canonical `x-dispatch/message`
+    // (the new method name owned by swarm-dispatch's protocol-constants
+    // module) AND the legacy `map/dispatch/message` alias for one
+    // release window. Older hub builds send under the legacy name; new
+    // builds send under the canonical name. Once the dual-listen window
+    // closes, drop the legacy registration.
+    const {
+      X_DISPATCH_METHODS,
+      LEGACY_MAP_DISPATCH_MESSAGE_METHOD,
+    } = await import("swarm-dispatch/client");
+    connection.onNotification(
+      X_DISPATCH_METHODS.MESSAGE,
+      dispatchMessageHandler,
+    );
+    connection.onNotification(
+      LEGACY_MAP_DISPATCH_MESSAGE_METHOD,
+      dispatchMessageHandler,
+    );
     dispatchMessageHandlerCleanup = () => {
       try {
         if (typeof connection.offNotification === "function") {
           connection.offNotification(
-            "map/dispatch/message",
+            X_DISPATCH_METHODS.MESSAGE,
+            dispatchMessageHandler,
+          );
+          connection.offNotification(
+            LEGACY_MAP_DISPATCH_MESSAGE_METHOD,
             dispatchMessageHandler,
           );
         }

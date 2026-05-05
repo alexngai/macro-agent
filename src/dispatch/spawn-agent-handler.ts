@@ -1,5 +1,5 @@
 /**
- * `dispatch/spawn-agent` MAP request handler — runtime-agnostic wire shape,
+ * `x-dispatch/spawn-agent` MAP request handler — runtime-agnostic wire shape,
  * macro-agent-specific implementation.
  *
  * Called by OpenHive's orchestrator when ACP-routing a dispatch with
@@ -8,23 +8,30 @@
  * config. The handler returns the spawned agent's id; the orchestrator
  * then attaches an ACP stream via the existing `findAcpAgentInfo` path.
  *
- * Symmetric with the mail path: both routes use `loadoutToSpawnOptions`
- * to translate the wire-level loadout into macro-agent's spawn options.
- *
- * Wire shape (per docs/LOADOUTS_DESIGN.md → "ACP wire"):
+ * Wire shape — canonical (swarm-dispatch's `RemoteSpawnRequest`):
  *
  *   request:
  *     {
- *       role: string,                       // e.g. "coordinator"
- *       cwd: string,                         // worker working directory
- *       capabilities_required?: string[],   // e.g. ["acp"] (advisory)
- *       lifecycle?: "fresh" | "reuse",      // currently always "fresh" here
- *       loadout?: WireLoadout,              // MaterializedLoadout subset
- *       fullAutonomous?: boolean            // ask-rule resolution; default true
+ *       role: string,
+ *       capabilities_required: string[],     // e.g. ["acp"]
+ *       lifecycle: "fresh" | "reuse",
+ *       cwd?: string,
+ *       fullAutonomous?: boolean,
+ *       consumer_extensions?: {
+ *         openhive?: { loadout?: WireLoadout },   // OpenHive payload
+ *       }
  *     }
  *
  *   response:
  *     { agentId: string }
+ *
+ * Legacy shape support: pre-Tier-2 callers passed `loadout` at the top
+ * level (not under consumer_extensions). The handler accepts both for
+ * one release window — `consumer_extensions.openhive.loadout` is read
+ * first; falls back to top-level `loadout`.
+ *
+ * Symmetric with the mail path: both routes use `loadoutToSpawnOptions`
+ * to translate the wire-level loadout into macro-agent's spawn options.
  */
 
 import type { AgentManager } from "../agent/agent-manager.js";
@@ -32,10 +39,21 @@ import { loadoutToSpawnOptions, type WireLoadout } from "./loadout-translation.j
 
 export interface SpawnAgentRequest {
   role: string;
-  cwd: string;
+  /** Optional cwd; defaults to the swarm's process.cwd() via agentManager. */
+  cwd?: string;
   capabilities_required?: string[];
   lifecycle?: "fresh" | "reuse";
+  /**
+   * @deprecated — pre-Tier-2 top-level loadout slot. Newer callers ship
+   * the loadout under `consumer_extensions.openhive.loadout`. Both
+   * shapes are accepted for one release window.
+   */
   loadout?: WireLoadout;
+  /** Canonical consumer-extension namespace (Tier 2+). */
+  consumer_extensions?: {
+    openhive?: { loadout?: WireLoadout };
+    [otherConsumer: string]: unknown;
+  };
   fullAutonomous?: boolean;
   /** Optional initial task description; defaults to a placeholder so the
    *  agent's session has *something* to render until the orchestrator's
@@ -77,24 +95,31 @@ export async function handleDispatchSpawnAgent(
   const { agentManager, waitForAcpRegistration, log = console.log } = deps;
 
   if (!params.role) {
-    throw new Error("dispatch/spawn-agent: missing 'role'");
+    throw new Error("x-dispatch/spawn-agent: missing 'role'");
   }
   if (params.lifecycle && params.lifecycle !== "fresh") {
     throw new Error(
-      `dispatch/spawn-agent: lifecycle='${params.lifecycle}' not supported by this handler — ` +
+      `x-dispatch/spawn-agent: lifecycle='${params.lifecycle}' not supported by this handler — ` +
         `'reuse' is handled hub-side via findAcpAgentInfo, not via this method`,
     );
   }
   // cwd is optional — agentManager.spawn defaults to its own defaultCwd
   // (typically process.cwd() of the macro-agent process) when omitted.
 
+  // Loadout location: prefer the canonical consumer_extensions.openhive
+  // slot (Tier 2+); fall back to the top-level field (pre-Tier-2). Older
+  // hubs ship the loadout at the top level; newer hubs ship under
+  // consumer_extensions. Both work during the dual-listen window.
+  const loadout: WireLoadout | undefined =
+    params.consumer_extensions?.openhive?.loadout ?? params.loadout;
+
   const fullAutonomous = params.fullAutonomous ?? true;
-  const spawnLoadoutOpts = loadoutToSpawnOptions(params.loadout, {
+  const spawnLoadoutOpts = loadoutToSpawnOptions(loadout, {
     fullAutonomous,
   });
 
   log(
-    `[dispatch/spawn-agent] Spawning fresh ${params.role} cwd=${params.cwd} ` +
+    `[x-dispatch/spawn-agent] Spawning fresh ${params.role} cwd=${params.cwd} ` +
       `permissions=${
         spawnLoadoutOpts.permissions ? JSON.stringify(spawnLoadoutOpts.permissions) : "(none)"
       } fullAutonomous=${fullAutonomous}`,
@@ -123,13 +148,13 @@ export async function handleDispatchSpawnAgent(
     ).catch(() => false);
     if (!ok) {
       log(
-        `[dispatch/spawn-agent] Warning: ACP registration not confirmed for ` +
+        `[x-dispatch/spawn-agent] Warning: ACP registration not confirmed for ` +
           `agent ${spawned.id} within ${DEFAULT_REGISTRATION_TIMEOUT_MS}ms; ` +
           `orchestrator may need to retry.`,
       );
     }
   }
 
-  log(`[dispatch/spawn-agent] Spawn complete agentId=${spawned.id}`);
+  log(`[x-dispatch/spawn-agent] Spawn complete agentId=${spawned.id}`);
   return { agentId: spawned.id };
 }
