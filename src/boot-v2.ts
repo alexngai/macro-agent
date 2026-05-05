@@ -263,6 +263,23 @@ export interface BootV2Config {
       agentType?: string;
       customPrompt?: string;
       task?: string;
+      /**
+       * When true, spawn the bootstrap coordinator with
+       * `askForAllTools: true` and `permissionMode: 'interactive'` so the
+       * Claude SDK consults `canUseTool` for every tool call and
+       * acp-factory emits the resulting requests as `permission_request`
+       * session updates. This is the prerequisite for ACP+reuse dispatch
+       * to actually enforce per-dispatch loadout deny rules via the
+       * runtime overlay registry — the prompt iterator can only deny
+       * tools the SDK asks about.
+       *
+       * Trade-off: every tool call roundtrips through the host (~1-5ms
+       * latency penalty per call). Acceptable for autonomous dispatch
+       * targets; would be heavy for high-frequency interactive chat.
+       *
+       * Defaults to false (preserves the existing chat-friendly mode).
+       */
+      dispatchTarget?: boolean;
     };
     /**
      * Optional parented worker spawn after the bootstrap coordinator
@@ -393,11 +410,19 @@ export async function bootV2(
     !config.bootstrap?.coordinator
   ) {
     const envCwd = process.env.MACRO_BOOTSTRAP_CWD;
+    const dispatchTarget =
+      process.env.MACRO_BOOTSTRAP_COORDINATOR_DISPATCH_TARGET === "true";
+    const coordObj: Record<string, unknown> = {};
+    if (envCwd) coordObj.cwd = envCwd;
+    if (dispatchTarget) coordObj.dispatchTarget = true;
     config = {
       ...config,
       bootstrap: {
         ...(config.bootstrap ?? {}),
-        coordinator: envCwd ? { cwd: envCwd } : true,
+        coordinator:
+          Object.keys(coordObj).length > 0
+            ? (coordObj as never)
+            : true,
       },
     };
   }
@@ -1100,14 +1125,22 @@ export async function bootV2(
         return;
       }
       // No priors matched the policy → fresh spawn (first boot, or 'none').
+      // dispatchTarget mode: bake askForAllTools + permissionMode='interactive'
+      // into the spawn so the SDK funnels every tool call through canUseTool
+      // and acp-factory emits permission_request session updates the prompt
+      // iterator's overlay-enforcement path can consume.
+      const isDispatchTarget = opts.dispatchTarget === true;
       const spawned = await agentManager.spawn({
         role: "coordinator",
         parent: null,
         cwd: bootstrapCwd,
         task: opts.task ?? "Default coordinator (auto-spawn on boot)",
-        permissionMode: opts.permissionMode,
+        permissionMode: isDispatchTarget
+          ? "interactive"
+          : opts.permissionMode,
         agentType: opts.agentType,
         customPrompt: opts.customPrompt,
+        ...(isDispatchTarget ? { askForAllTools: true } : {}),
       });
       console.log(
         `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
