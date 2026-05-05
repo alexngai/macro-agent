@@ -203,7 +203,29 @@ export function createMailInboundConsumer(
 
     const conversationId = content._conversationId;
     const prompt = data.prompt ?? data.content ?? "";
-    const role = data.role ?? "worker";
+
+    // Validate the envelope's role against the local role registry. Unknown
+    // role names (e.g. team-role-ref roles like 'executor' surfaced by hubs
+    // that don't share macro-agent's role taxonomy) silently fall back to
+    // GenericRole inside `resolveRole`, which has `lifecycle.type='persistent'`
+    // and no system-prompt instruction to call `done()`. That breaks the
+    // mail-reply path because the worker stops without writing
+    // `_lastSummary`, so we end up logging "Worker stopped but _lastSummary
+    // is empty — no reply turn posted" and the hub never sees the answer.
+    //
+    // Use 'worker' as the fallback (ephemeral lifecycle + LIFECYCLE.DONE
+    // capability + system prompt that mandates `done()`) so unknown roles
+    // get a sensible default that completes the reply round-trip.
+    const requestedRole = data.role;
+    const roleRegistry = agentManager.getRoleRegistry?.();
+    const knownRole =
+      requestedRole && roleRegistry?.getRole(requestedRole) !== undefined;
+    const role = knownRole ? requestedRole! : "worker";
+    if (requestedRole && !knownRole) {
+      log(
+        `[mail-inbound] Unknown role '${requestedRole}' for taskId=${taskId} — falling back to 'worker'`,
+      );
+    }
 
     // Loadout-derived structured fields ride in the envelope. We prefer the
     // canonical top-level `data.loadout` slot (Step 3 of the ACP+lifecycle
