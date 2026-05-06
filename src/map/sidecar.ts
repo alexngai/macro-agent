@@ -23,6 +23,13 @@ import type {
   TaskBridge,
 } from "./types.js";
 import type { AgentLifecycleCallback } from "../agent/types.js";
+import {
+  REPO_PROTOCOL_VERSION,
+  RepoClient,
+  RepoManager,
+  type RepoClientTransport,
+  type WorkspaceCapability,
+} from "agent-workspace/kinds/repo";
 
 /**
  * Create a MAP sidecar that connects macro-agent to an OpenHive MAP hub.
@@ -51,7 +58,23 @@ export function createMAPSidecar(
   let taskBridge: TaskBridge | null = null;
   let coordinationCleanup: (() => void) | null = null;
   let cascadeBridgeCleanup: (() => void) | null = null;
+  let workspaceManager: RepoManager | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Resolve the workspace capability from env vars. Setting OPENHIVE_WORKSPACE_DECLARE=off
+  // disables both explicit declare AND trajectory-handler bootstrap on the hub side.
+  const workspaceCapability: WorkspaceCapability = {
+    protocolVersion: REPO_PROTOCOL_VERSION,
+    declare: {
+      enabled: process.env.OPENHIVE_WORKSPACE_DECLARE !== "off",
+      defaultVisibility:
+        (process.env.OPENHIVE_WORKSPACE_VISIBILITY as
+          | "private"
+          | "hub_local"
+          | "federated") ?? "hub_local",
+    },
+    list: { enabled: true },
+  };
 
   /**
    * Build the MAP connection URL with auth token.
@@ -101,6 +124,7 @@ export function createMAPSidecar(
     }
     lifecycleCallback = null;
     taskBridge = null;
+    workspaceManager = null;
   }
 
   /**
@@ -127,6 +151,7 @@ export function createMAPSidecar(
             canUpdate: true,
             canList: true,
           },
+          workspace: workspaceCapability,
         },
         metadata: {
           systemId: config.systemId ?? "macro-agent",
@@ -307,6 +332,54 @@ export function createMAPSidecar(
         cascadeBridge.dispose();
         actionCleanup();
       };
+    }
+
+    // 6. Workspace (kinds/repo) — declare attached repos to the hub.
+    //    Discovers repos from WORKSPACE_* env vars (set by openhive's swarm-spawn
+    //    flow when spawning with a `repo_id`) plus OPENHIVE_WORKSPACE_REPOS for
+    //    multi-repo declarations. Skipped entirely when capability.declare is off.
+    if (workspaceCapability.declare.enabled) {
+      try {
+        // OpenHive's MAP server registers x-workspace/repo.* as request handlers
+        // (additionalHandlers), not notification handlers — so route notify
+        // through callExtension and ignore the (void) response.
+        const transport: RepoClientTransport = {
+          notify: async (method, params) => {
+            await connection.callExtension(method, params);
+          },
+          request: (method, params) => connection.callExtension(method, params),
+        };
+        const manager = new RepoManager();
+        const single =
+          process.env.WORKSPACE_REPO_URL && process.env.WORKSPACE_LOCAL_PATH
+            ? [{
+                remoteUrl: process.env.WORKSPACE_REPO_URL,
+                localPath: process.env.WORKSPACE_LOCAL_PATH,
+              }]
+            : [];
+        const multi = process.env.OPENHIVE_WORKSPACE_REPOS
+          ? (JSON.parse(process.env.OPENHIVE_WORKSPACE_REPOS) as Array<{
+              remoteUrl: string;
+              localPath: string;
+            }>)
+          : [];
+        for (const cfg of [...single, ...multi]) {
+          await manager.attach(cfg);
+        }
+        if (manager.list().length > 0) {
+          const client = new RepoClient(transport);
+          await client.declare(RepoClient.snapshot(manager));
+          workspaceManager = manager;
+          console.log(
+            `[map-sidecar] Declared ${manager.list().length} workspace(s) to hub`,
+          );
+        }
+      } catch (err) {
+        // Non-fatal — sidecar continues without workspace declarations
+        console.warn(
+          `[map-sidecar] Workspace declare failed: ${(err as Error).message}`,
+        );
+      }
     }
   }
 
