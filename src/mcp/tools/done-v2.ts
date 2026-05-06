@@ -178,6 +178,7 @@ export function createDoneHandlerV2(
       inboxAdapter,
       tasksAdapter,
       agentManager,
+      agentStore,
       taskMode: deps.taskMode,
       mergeQueue: deps.mergeQueue,
     };

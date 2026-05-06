@@ -16,6 +16,8 @@
 import type { InboxAdapter } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { AgentManager } from "../agent/agent-manager.js";
+import type { AgentStore } from "../agent/agent-store.js";
+import { getPermissionOverlay } from "../dispatch/permission-overlay.js";
 import type {
   LifecycleContext,
   DoneArgs,
@@ -47,6 +49,12 @@ export interface HandlerDepsV2 {
    * Without it, commits use raw git (legacy / null-workspace path).
    */
   workspaceManager?: WorkspaceManager;
+  /**
+   * Optional agent store. When provided, the done() summary is persisted in
+   * agent metadata for parentless agents (mail-inbound dispatch workers) so
+   * the dispatch reply bridge can forward it as a hub mail turn.
+   */
+  agentStore?: AgentStore;
 }
 
 // =============================================================================
@@ -208,6 +216,32 @@ async function handleWorkerDone(
     signalsEmitted.push("WORKER_DONE");
   } catch {
     warnings.push("Failed to emit WORKER_DONE");
+  }
+
+  // Step 3b: Persist `_lastSummary` to agent metadata when:
+  //   - Agent is parentless (mail-inbound fresh-spawn dispatch workers —
+  //     emitSignal is a no-op for parentless, so metadata is the only
+  //     reply-path channel), OR
+  //   - Agent is processing a dispatch (Phase 1 permission overlay set
+  //     for this agent → in-flight). Gives the mail-inbound-reuse-consumer
+  //     a metadata-side fallback for the reply summary that's
+  //     independent of whether the prompt iterator's update stream
+  //     races with ACP connection close. Applies to both parentless
+  //     AND parented in-flight agents (parented dispatch targets are
+  //     the typical mail+reuse setup).
+  const inDispatch = !!getPermissionOverlay(context.agentId);
+  if ((inDispatch || !context.parentId) && args.summary && deps.agentStore) {
+    try {
+      const existing = deps.agentStore.getAgent(context.agentId);
+      deps.agentStore.updateAgent(context.agentId, {
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          _lastSummary: args.summary,
+        },
+      });
+    } catch {
+      // best effort — don't block termination
+    }
   }
 
   // NOTE: Task transition is NOT done here — AgentManagerV2.terminate() handles

@@ -263,6 +263,39 @@ export interface BootV2Config {
       agentType?: string;
       customPrompt?: string;
       task?: string;
+      /**
+       * When true, spawn the bootstrap coordinator with
+       * `askForAllTools: true` and `permissionMode: 'interactive'` so the
+       * Claude SDK consults `canUseTool` for every tool call and
+       * acp-factory emits the resulting requests as `permission_request`
+       * session updates. This is the prerequisite for ACP+reuse dispatch
+       * to actually enforce per-dispatch loadout deny rules via the
+       * runtime overlay registry — the prompt iterator can only deny
+       * tools the SDK asks about.
+       *
+       * Trade-off: every tool call roundtrips through the host (~1-5ms
+       * latency penalty per call). Acceptable for autonomous dispatch
+       * targets; would be heavy for high-frequency interactive chat.
+       *
+       * Defaults to false (preserves the existing chat-friendly mode).
+       */
+      dispatchTarget?: boolean;
+    };
+    /**
+     * Optional parented worker spawn after the bootstrap coordinator
+     * comes up. Used by live tests (e.g., `live-mail-reuse-dispatch`)
+     * to provide a parented dispatch target that survives mail+reuse
+     * `done()` cleanly (the worker terminates as designed; the parent
+     * coord receives the `WORKER_DONE` signal — no orphan).
+     *
+     * Default `role`: `'reuse-target'`. Choose a role that does NOT
+     * collide with the sidecar's projected `'worker'` role in the
+     * hub-side roster — otherwise prefer-route may tie-break to the
+     * sidecar instead of this worker.
+     */
+    worker?: boolean | {
+      role?: string;
+      task?: string;
     };
     /**
      * Rehydration policy for agents that existed before this boot. Controls
@@ -377,11 +410,32 @@ export async function bootV2(
     !config.bootstrap?.coordinator
   ) {
     const envCwd = process.env.MACRO_BOOTSTRAP_CWD;
+    const dispatchTarget =
+      process.env.MACRO_BOOTSTRAP_COORDINATOR_DISPATCH_TARGET === "true";
+    const coordObj: Record<string, unknown> = {};
+    if (envCwd) coordObj.cwd = envCwd;
+    if (dispatchTarget) coordObj.dispatchTarget = true;
     config = {
       ...config,
       bootstrap: {
         ...(config.bootstrap ?? {}),
-        coordinator: envCwd ? { cwd: envCwd } : true,
+        coordinator:
+          Object.keys(coordObj).length > 0
+            ? (coordObj as never)
+            : true,
+      },
+    };
+  }
+  if (
+    process.env.MACRO_BOOTSTRAP_WORKER === "true" &&
+    !config.bootstrap?.worker
+  ) {
+    const envWorkerRole = process.env.MACRO_BOOTSTRAP_WORKER_ROLE;
+    config = {
+      ...config,
+      bootstrap: {
+        ...(config.bootstrap ?? {}),
+        worker: envWorkerRole ? { role: envWorkerRole } : true,
       },
     };
   }
@@ -496,14 +550,73 @@ export async function bootV2(
 
   // 7a. Task Dispatch (opt-in autonomous task dispatch mode)
   let taskDispatcher: import("swarm-dispatch").TaskDispatcher | null = null;
+  // Hoisted so the MAP sidecar (step 13) can forward it to the mail bridge.
+  let dispatcherAgentId: string | undefined;
+  // Mail-inbound consumer — always wired (does not require dispatch.enabled).
+  let mailInboundConsumer: import("./dispatch/mail-inbound-consumer.js").MailInboundConsumer | null = null;
+  // Mail-inbound REUSE consumer — handles `x-dispatch/work` envelopes
+  // addressed to non-sidecar agents (long-lived workers/coordinators) and
+  // drives them through the dispatch turn using their existing session.
+  // Always wired so reuse routing works even without the outbound
+  // orchestrator. Filters non-overlapping with mailInboundConsumer.
+  let mailInboundReuseConsumer:
+    | import("./dispatch/mail-inbound-reuse-consumer.js").MailInboundReuseConsumer
+    | null = null;
+
+  {
+    // Stable dispatcher ID used as the inbox recipient for bridged envelopes.
+    // Matches the id the mail-bridge registers and delivers to. The outbound
+    // orchestrator (below, opt-in) reuses the same id so both code paths share
+    // one inbox recipient — no double-processing because the consumer only
+    // fires spawn() while the orchestrator fires spawn() only when polling
+    // opentasks (different trigger paths).
+    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
+    const inboundClaimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
+    const inboundDispatcherId = `dispatcher:${inboundClaimantId}`;
+    dispatcherAgentId = inboundDispatcherId;
+
+    // Register the inbox recipient so mail-bridge's registerAgent call is a
+    // no-op (it uses an upsert) and the inbox accepts deliveries immediately.
+    await inboxAdapter.registerAgent(inboundDispatcherId, {
+      role: "dispatcher",
+      scope: "default",
+    });
+
+    const rawInbox = inboxAdapter.getInbox();
+    const { createMailInboundConsumer } = await import(
+      "./dispatch/mail-inbound-consumer.js"
+    );
+    mailInboundConsumer = createMailInboundConsumer({
+      dispatcherAgentId: inboundDispatcherId,
+      inboxEvents: rawInbox.events as any,
+      agentManager,
+      agentStore,
+      getSidecar: () => (systemRef as any).mapSidecar ?? null,
+      log: (msg) => console.log(msg),
+    });
+
+    // Reuse consumer for envelopes addressed to long-lived workers/
+    // coordinators. Non-overlapping filter (event.agentId !== sidecarId).
+    const { createMailInboundReuseConsumer } = await import(
+      "./dispatch/mail-inbound-reuse-consumer.js"
+    );
+    mailInboundReuseConsumer = createMailInboundReuseConsumer({
+      dispatcherAgentId: inboundDispatcherId,
+      inboxEvents: rawInbox.events as any,
+      agentManager,
+      agentStore,
+      getSidecar: () => (systemRef as any).mapSidecar ?? null,
+      log: (msg) => console.log(msg),
+    });
+  }
 
   if (config.dispatch?.enabled && tasksAdapter) {
     const { createOrchestrator, createOpenTasksSource, createAgentInboxPort } =
       await import("swarm-dispatch");
-    const { getStableInstanceId } = await import("./cli/stable-instance-id.js");
 
-    const claimantId = `${os.hostname()}:${process.pid}:${getStableInstanceId(cwd)}`;
-    const dispatchAgentId = `dispatcher:${claimantId}`;
+    // dispatcherAgentId is already set by the unconditional mail-inbound block above.
+    // Use it directly so both paths share the same inbox recipient.
+    const dispatchAgentId = dispatcherAgentId!;
 
     // Adapt opentasks client → DispatchTaskSource
     const opentasksClient = (tasksAdapter as any).client;
@@ -569,6 +682,7 @@ export async function bootV2(
               type?: string;
               schema?: string;
               data?: any;
+              _conversationId?: string;
             };
             if (content?.schema !== "x-dispatch/work") return null;
             const data = content.data;
@@ -586,18 +700,19 @@ export async function bootV2(
                 metadata: {
                   ...data.metadata,
                   role: data.role,
+                  // Thread conversation_id through so the reply bridge can post
+                  // the worker's output back to the hub's mail conversation.
+                  ...(content._conversationId
+                    ? { _mailConversationId: content._conversationId }
+                    : {}),
                 },
               },
             };
           },
         },
       );
-
-      // Register the dispatcher as an agent in the inbox so it can receive messages
-      await inboxAdapter.registerAgent(dispatchAgentId, {
-        role: "dispatcher",
-        scope: "default",
-      });
+      // Note: registerAgent for dispatchAgentId was already called in the
+      // unconditional mail-inbound block above — no need to repeat here.
     }
 
     // Phase 2: Wire AgentRoster via inbox agent listing for route-first dispatch
@@ -631,7 +746,7 @@ export async function bootV2(
       (hasRouting ? ("prefer-route" as const) : ("spawn-only" as const));
 
     taskDispatcher = createOrchestrator(source, runtime, {
-      claimantId,
+      claimantId: dispatchAgentId,
       pollIntervalMs: config.dispatch.pollIntervalMs ?? 15_000,
       defaultRole: config.dispatch.defaultRole ?? "worker",
       concurrency: { global: config.dispatch.maxConcurrent ?? 3 },
@@ -841,6 +956,7 @@ export async function bootV2(
             ? (id: string) => mapServerInstance!.getLocalMapId(id)
             : undefined,
           gitCascadeAdapter,
+          dispatcherAgentId,
         },
         {
           server: config.map.server,
@@ -1009,18 +1125,78 @@ export async function bootV2(
         return;
       }
       // No priors matched the policy → fresh spawn (first boot, or 'none').
+      // dispatchTarget mode: bake askForAllTools + permissionMode='interactive'
+      // into the spawn so the SDK funnels every tool call through canUseTool
+      // and acp-factory emits permission_request session updates the prompt
+      // iterator's overlay-enforcement path can consume.
+      const isDispatchTarget = opts.dispatchTarget === true;
       const spawned = await agentManager.spawn({
         role: "coordinator",
         parent: null,
         cwd: bootstrapCwd,
         task: opts.task ?? "Default coordinator (auto-spawn on boot)",
-        permissionMode: opts.permissionMode,
+        permissionMode: isDispatchTarget
+          ? "interactive"
+          : opts.permissionMode,
         agentType: opts.agentType,
         customPrompt: opts.customPrompt,
+        ...(isDispatchTarget ? { askForAllTools: true } : {}),
       });
       console.log(
         `[boot-v2] Bootstrap coordinator spawned: ${(spawned as any).name ?? spawned.id} at ${bootstrapCwd}`,
       );
+
+      // Optional: bootstrap an additional worker for live tests
+      // exercising mail+reuse semantics. Spawned with parent=null
+      // because:
+      //   - The role-capability check only fires for parented spawns
+      //     (agent-manager-v2 line 559-572); bypassing it lets us use
+      //     a custom role (e.g., 'reuse-target') that doesn't collide
+      //     with the sidecar's projected 'worker' in the hub-side
+      //     dispatch roster.
+      //   - The worker's done() lifecycle is the same as the bootstrap
+      //     coord's: terminate cleanly. Phase 2C's `_lastSummary`
+      //     fallback (handlers-v2 + mail-inbound-reuse-consumer)
+      //     ensures the dispatch reply path recovers the summary from
+      //     metadata even if the prompt iterator's update stream races
+      //     the ACP connection close on terminate.
+      if (config.bootstrap?.worker) {
+        const workerOpts = config.bootstrap.worker === true
+          ? {}
+          : config.bootstrap.worker;
+        const workerRole = workerOpts.role ?? "reuse-target";
+        try {
+          const workerSpawned = await agentManager.spawn({
+            role: workerRole,
+            parent: null,
+            cwd: bootstrapCwd,
+            task: workerOpts.task ?? "Await dispatch",
+            // Funnel every tool call through the host so the prompt-iterator
+            // handler can apply per-dispatch overlay deny rules at runtime
+            // (Phase 3). Two layers must both be set:
+            //   - askForAllTools=true → settings.permissions.ask=['*'] so
+            //     the Claude SDK actually consults canUseTool for every
+            //     tool (without this, default mode auto-approves "safe"
+            //     tools like Read).
+            //   - permissionMode='interactive' → acp-factory emits the
+            //     resulting requestPermission as a `permission_request`
+            //     session update instead of auto-approving it (which is
+            //     macro-agent's default 'auto-approve' behavior).
+            // Bootstrap dispatch targets are autonomous + latency-tolerant
+            // so the per-call host roundtrip is acceptable.
+            askForAllTools: true,
+            permissionMode: "interactive",
+          });
+          console.log(
+            `[boot-v2] Bootstrap dispatch-target spawned: ${(workerSpawned as any).name ?? workerSpawned.id} ` +
+              `(role=${workerRole}, parent=null)`,
+          );
+        } catch (err) {
+          console.warn(
+            `[boot-v2] Bootstrap worker spawn failed: ${(err as Error).message}`,
+          );
+        }
+      }
     };
 
     rehydrateOrSpawn().catch((err: Error) => {
@@ -1050,6 +1226,8 @@ export async function bootV2(
 
     async shutdown(): Promise<void> {
       clearInterval(healthCheckTimer);
+      if (mailInboundConsumer) mailInboundConsumer.stop();
+      if (mailInboundReuseConsumer) mailInboundReuseConsumer.stop();
       if (taskDispatcher) await taskDispatcher.stop();
       if (mapSidecar) await mapSidecar.stop();
       if (mapServerInstance) await mapServerInstance.stop();
