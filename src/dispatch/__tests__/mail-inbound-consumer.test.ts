@@ -586,4 +586,215 @@ describe("createMailInboundConsumer", () => {
     expect(consumer.stats().seenTaskIds).toBe(1);
     expect(consumer.stats().droppedMalformed).toBe(2);
   });
+
+  // ── Pre-spawn repo mount ──────────────────────────────────────────
+
+  describe("pre-spawn repo mount", () => {
+    function workEnvelopeWithRepo(
+      taskId: string,
+      prompt: string,
+      repoMeta: Record<string, unknown>,
+      conversationId?: string,
+    ): InboxMessageEvent {
+      return {
+        agentId: DISPATCHER_ID,
+        message: {
+          id: `msg-${taskId}`,
+          content: {
+            schema: "x-dispatch/work",
+            data: {
+              taskId,
+              prompt,
+              role: "worker",
+              metadata: repoMeta,
+            },
+            ...(conversationId ? { _conversationId: conversationId } : {}),
+          },
+        },
+      };
+    }
+
+    function makeRepoManager(existingRepos: Array<{ canonicalUrl: string; localPath: string }> = []) {
+      const attached: Array<{ remoteUrl: string; localPath: string }> = [];
+      return {
+        manager: {
+          list: () =>
+            [
+              ...existingRepos.map((r) => ({
+                identity: { canonicalUrl: r.canonicalUrl },
+                localPath: r.localPath,
+              })),
+              ...attached.map((r) => ({
+                identity: { canonicalUrl: r.remoteUrl },
+                localPath: r.localPath,
+              })),
+            ],
+          attach: vi.fn(async (config: { remoteUrl: string; localPath: string }) => {
+            attached.push(config);
+            return { localPath: config.localPath };
+          }),
+        },
+        attached,
+      };
+    }
+
+    it("passes cwd from already-attached repo to spawn", async () => {
+      const repo = makeRepoManager([
+        { canonicalUrl: "https://github.com/org/repo.git", localPath: "/repos/repo" },
+      ]);
+      const logs: string[] = [];
+
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        getRepoManager: () => repo.manager,
+        log: (m) => logs.push(m),
+      });
+
+      inboxEvents.fire(
+        workEnvelopeWithRepo("task-repo-1", "work on repo", {
+          repo_id: "repo_abc",
+          canonical_url: "https://github.com/org/repo.git",
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      expect(am.spawnFn).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: "/repos/repo" }),
+      );
+      expect(logs.some((l) => l.includes("already attached"))).toBe(true);
+    });
+
+    it("spawns without cwd when clone_policy is not 'allowed' and repo not attached", async () => {
+      const repo = makeRepoManager([]);
+      const logs: string[] = [];
+
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        getRepoManager: () => repo.manager,
+        log: (m) => logs.push(m),
+      });
+
+      inboxEvents.fire(
+        workEnvelopeWithRepo("task-repo-2", "work", {
+          repo_id: "repo_xyz",
+          canonical_url: "https://github.com/org/other.git",
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      // No cwd passed — clone_policy defaults to 'none'
+      const spawnArgs = am.spawnFn.mock.calls[0]![0] as Record<string, unknown>;
+      expect(spawnArgs.cwd).toBeUndefined();
+      expect(logs.some((l) => l.includes("skipping mount"))).toBe(true);
+    });
+
+    it("spawns without cwd when no repo metadata in envelope", async () => {
+      const repo = makeRepoManager([]);
+
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        getRepoManager: () => repo.manager,
+      });
+
+      // Standard envelope without repo metadata
+      inboxEvents.fire(workEnvelope("task-no-repo", "plain work"));
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const spawnArgs = am.spawnFn.mock.calls[0]![0] as Record<string, unknown>;
+      expect(spawnArgs.cwd).toBeUndefined();
+    });
+
+    it("spawns without cwd when getRepoManager is not provided", async () => {
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        // no getRepoManager
+      });
+
+      inboxEvents.fire(
+        workEnvelopeWithRepo("task-no-mgr", "work", {
+          repo_id: "repo_abc",
+          canonical_url: "https://github.com/org/repo.git",
+          clone_policy: "allowed",
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const spawnArgs = am.spawnFn.mock.calls[0]![0] as Record<string, unknown>;
+      expect(spawnArgs.cwd).toBeUndefined();
+    });
+
+    it("spawns without cwd when canonical_url is missing from repo metadata", async () => {
+      const repo = makeRepoManager([]);
+
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        getRepoManager: () => repo.manager,
+      });
+
+      inboxEvents.fire(
+        workEnvelopeWithRepo("task-no-url", "work", {
+          repo_id: "repo_abc",
+          // no canonical_url
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(am.spawnFn).toHaveBeenCalledOnce();
+      const spawnArgs = am.spawnFn.mock.calls[0]![0] as Record<string, unknown>;
+      expect(spawnArgs.cwd).toBeUndefined();
+    });
+
+    it("logs repo_id in the received message log line", async () => {
+      const logs: string[] = [];
+
+      createMailInboundConsumer({
+        dispatcherAgentId: DISPATCHER_ID,
+        inboxEvents,
+        agentManager: am.manager as AgentManager,
+        agentStore: store as AgentStore,
+        getSidecar: () => sidecar,
+        log: (m) => logs.push(m),
+      });
+
+      inboxEvents.fire(
+        workEnvelopeWithRepo("task-log", "work", {
+          repo_id: "repo_visible",
+          canonical_url: "https://github.com/org/visible.git",
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(logs.some((l) => l.includes("repo=repo_visible"))).toBe(true);
+    });
+  });
 });

@@ -61,6 +61,38 @@ export interface MailInboundSidecar {
   ): Promise<void>;
 }
 
+/** Repo metadata surfaced by the hub's enrichWithRepo → mail port injection. */
+export interface DispatchRepoMetadata {
+  repo_id?: string;
+  canonical_url?: string;
+  branch?: string;
+  commit_sha?: string;
+  clone_policy?: string;
+  clone_path?: string;
+}
+
+/**
+ * Narrow interface for the sidecar's RepoManager — keeps the consumer
+ * testable without importing the full agent-workspace concrete type.
+ */
+export interface RepoManagerLike {
+  list(): Array<{ identity: { canonicalUrl: string }; localPath: string }>;
+  attach(config: {
+    remoteUrl: string;
+    localPath: string;
+    currentBranch?: string;
+  }): Promise<{ localPath: string }>;
+}
+
+/**
+ * Narrow interface for the sidecar's RepoClient transport — used to
+ * declare newly-attached repos to the hub after clone.
+ */
+export interface RepoClientTransportLike {
+  notify(method: string, params: unknown): Promise<void>;
+  request(method: string, params: unknown): Promise<unknown>;
+}
+
 export interface MailInboundConsumerOptions {
   /**
    * The inbox agent ID that mail-bridge delivers envelopes to.
@@ -84,6 +116,19 @@ export interface MailInboundConsumerOptions {
    * so it works even though the sidecar is created after the consumer.
    */
   getSidecar: () => MailInboundSidecar | null | undefined;
+
+  /**
+   * Optional repo manager for pre-spawn mount. When provided, the consumer
+   * can clone/attach repos before spawning workers and set the worker's cwd
+   * to the repo path. Populated lazily from the sidecar's workspace manager.
+   */
+  getRepoManager?: () => RepoManagerLike | null | undefined;
+
+  /**
+   * Optional repo client transport for declaring newly-cloned repos to the
+   * hub after a pre-spawn clone. Uses the sidecar's MAP connection transport.
+   */
+  getRepoTransport?: () => RepoClientTransportLike | null | undefined;
 
   /** Optional logger (default: console.log). */
   log?: (msg: string) => void;
@@ -121,6 +166,8 @@ export function createMailInboundConsumer(
     agentManager,
     agentStore,
     getSidecar,
+    getRepoManager,
+    getRepoTransport,
     log = (msg: string) => console.log(msg),
   } = opts;
 
@@ -157,6 +204,102 @@ export function createMailInboundConsumer(
     `[mail-inbound] Consumer ready — listening for x-dispatch/work envelopes ` +
       `(recipient=${dispatcherAgentId})`,
   );
+
+  // ── Pre-spawn repo mount ─────────────────────────────────────
+  // Resolves the worker's cwd from the dispatch envelope's repo metadata.
+  // When clone_policy is 'allowed' and the repo isn't already attached,
+  // clones to clone_path (or a default under cwd) then attaches+declares.
+  // Best-effort: failures log a warning and return undefined (worker
+  // spawns without a repo-specific cwd).
+  async function resolveRepoCwd(
+    repoMeta: DispatchRepoMetadata,
+    taskId: string,
+  ): Promise<string | undefined> {
+    const manager = getRepoManager?.();
+    if (!manager) return undefined;
+
+    const canonicalUrl = repoMeta.canonical_url;
+    if (!canonicalUrl) return undefined;
+
+    // Check if the repo is already attached (by canonical URL match).
+    const existing = manager.list().find(
+      (h) => h.identity.canonicalUrl === canonicalUrl,
+    );
+    if (existing) {
+      log(`[mail-inbound] Repo already attached at ${existing.localPath} for taskId=${taskId}`);
+      return existing.localPath;
+    }
+
+    // Not attached — clone only if explicitly allowed.
+    if (repoMeta.clone_policy !== 'allowed') {
+      log(
+        `[mail-inbound] Repo ${canonicalUrl} not attached and clone_policy=${repoMeta.clone_policy ?? 'none'} — ` +
+          `skipping mount for taskId=${taskId}`,
+      );
+      return undefined;
+    }
+
+    const clonePath = repoMeta.clone_path ?? `/tmp/openhive-repos/${repoMeta.repo_id}`;
+    try {
+      const { execSync } = await import("node:child_process");
+
+      // Clone if the directory doesn't exist yet.
+      const fs = await import("node:fs");
+      if (!fs.existsSync(clonePath)) {
+        log(`[mail-inbound] Cloning ${canonicalUrl} → ${clonePath} for taskId=${taskId}`);
+        execSync(`git clone --depth 1 ${canonicalUrl} ${clonePath}`, {
+          stdio: "pipe",
+          timeout: 120_000,
+        });
+      }
+
+      // Checkout target branch if specified.
+      if (repoMeta.branch) {
+        try {
+          execSync(`git -C ${clonePath} fetch origin ${repoMeta.branch} --depth 1`, {
+            stdio: "pipe",
+            timeout: 60_000,
+          });
+          execSync(`git -C ${clonePath} checkout ${repoMeta.branch}`, {
+            stdio: "pipe",
+            timeout: 30_000,
+          });
+        } catch {
+          log(`[mail-inbound] Branch checkout failed for ${repoMeta.branch} — continuing on default branch`);
+        }
+      }
+
+      // Attach to the repo manager so future dispatches find it.
+      const handle = await manager.attach({
+        remoteUrl: canonicalUrl,
+        localPath: clonePath,
+        currentBranch: repoMeta.branch,
+      });
+
+      // Declare the new workspace to the hub (best-effort).
+      const transport = getRepoTransport?.();
+      if (transport) {
+        try {
+          const bindings = manager.list().map((h) => ({
+            canonical_url: h.identity.canonicalUrl,
+            local_path: h.localPath,
+          }));
+          await transport.notify("x-workspace/repo.declare", { bindings });
+        } catch {
+          // Non-fatal — the hub may not support workspace declarations.
+        }
+      }
+
+      log(`[mail-inbound] Mounted repo at ${handle.localPath} for taskId=${taskId}`);
+      return handle.localPath;
+    } catch (err) {
+      log(
+        `[mail-inbound] Pre-spawn repo mount failed for taskId=${taskId}: ` +
+          `${(err as Error).message ?? String(err)}`,
+      );
+      return undefined;
+    }
+  }
 
   // ── Inbox message listener ───────────────────────────────────
   const onMessage = (event: InboxMessageEvent): void => {
@@ -258,17 +401,36 @@ export function createMailInboundConsumer(
       fullAutonomous: true,
     });
 
+    // Extract repo metadata from the envelope for pre-spawn mount.
+    const repoMeta: DispatchRepoMetadata = {
+      repo_id: data.metadata?.repo_id as string | undefined,
+      canonical_url: data.metadata?.canonical_url as string | undefined,
+      branch: data.metadata?.branch as string | undefined,
+      commit_sha: data.metadata?.commit_sha as string | undefined,
+      clone_policy: data.metadata?.clone_policy as string | undefined,
+      clone_path: data.metadata?.clone_path as string | undefined,
+    };
+
     log(
       `[mail-inbound] Received x-dispatch/work taskId=${taskId} ` +
         `conv=${conversationId ?? "(none)"} role=${role}` +
+        (repoMeta.repo_id ? ` repo=${repoMeta.repo_id}` : "") +
         (spawnLoadoutOpts.permissions
           ? ` permissions=${JSON.stringify(spawnLoadoutOpts.permissions)}`
           : ""),
     );
 
     // Spawn is async — fire and forget. Errors are logged, not thrown.
-    agentManager
-      .spawn({
+    // Pre-spawn mount resolves the worker's cwd from the repo metadata
+    // before spawning. Best-effort: mount failures proceed without a
+    // repo-specific cwd.
+    (async () => {
+      let repoCwd: string | undefined;
+      if (repoMeta.repo_id) {
+        repoCwd = await resolveRepoCwd(repoMeta, taskId);
+      }
+
+      const spawned = await agentManager.spawn({
         task: prompt,
         task_id: taskId,
         role,
@@ -278,40 +440,41 @@ export function createMailInboundConsumer(
         // (claude-code-swarm, oh-my-claudecode, …) don't auto-load and hang
         // session/new on environments where the host services aren't reachable.
         isolatedSettings: true,
+        ...(repoCwd ? { cwd: repoCwd } : {}),
         ...spawnLoadoutOpts,
-      })
-      .then(async (spawned) => {
-        log(
-          `[mail-inbound] Spawned worker agentId=${spawned.id} for taskId=${taskId}`,
-        );
-        if (conversationId) {
-          agentConversationMap.set(spawned.id, conversationId);
-        }
-
-        // Spawn only creates an idle ACP session — the task lives in the
-        // system prompt as instructions. To get the model to actually do
-        // the work, send the prompt as a user message via promptUntilDone.
-        // This drives the worker to completion (done() called) so the
-        // lifecycle stopped listener below fires and posts the reply
-        // back to the hub. Fire-and-forget; errors are logged.
-        try {
-          await agentManager.promptUntilDone(spawned.id, prompt, {
-            maxFollowUps: 0,
-          });
-        } catch (err) {
-          log(
-            `[mail-inbound] promptUntilDone failed for agentId=${spawned.id}: ` +
-              `${(err as Error).message ?? String(err)}`,
-          );
-        }
-      })
-      .catch((err: unknown) => {
-        log(
-          `[mail-inbound] Spawn failed for taskId=${taskId}: ${
-            (err as Error).message ?? String(err)
-          }`,
-        );
       });
+
+      log(
+        `[mail-inbound] Spawned worker agentId=${spawned.id} for taskId=${taskId}` +
+          (repoCwd ? ` cwd=${repoCwd}` : ""),
+      );
+      if (conversationId) {
+        agentConversationMap.set(spawned.id, conversationId);
+      }
+
+      // Spawn only creates an idle ACP session — the task lives in the
+      // system prompt as instructions. To get the model to actually do
+      // the work, send the prompt as a user message via promptUntilDone.
+      // This drives the worker to completion (done() called) so the
+      // lifecycle stopped listener below fires and posts the reply
+      // back to the hub. Fire-and-forget; errors are logged.
+      try {
+        await agentManager.promptUntilDone(spawned.id, prompt, {
+          maxFollowUps: 0,
+        });
+      } catch (err) {
+        log(
+          `[mail-inbound] promptUntilDone failed for agentId=${spawned.id}: ` +
+            `${(err as Error).message ?? String(err)}`,
+        );
+      }
+    })().catch((err: unknown) => {
+      log(
+        `[mail-inbound] Spawn failed for taskId=${taskId}: ${
+          (err as Error).message ?? String(err)
+        }`,
+      );
+    });
   };
 
   inboxEvents.on("inbox.message", onMessage);

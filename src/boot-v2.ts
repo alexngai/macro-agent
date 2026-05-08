@@ -592,6 +592,8 @@ export async function bootV2(
       agentManager,
       agentStore,
       getSidecar: () => (systemRef as any).mapSidecar ?? null,
+      getRepoManager: () => (systemRef as any).mapSidecar?.getWorkspaceManager?.() ?? null,
+      getRepoTransport: () => (systemRef as any).mapSidecar?.getRepoTransport?.() ?? null,
       log: (msg) => console.log(msg),
     });
 

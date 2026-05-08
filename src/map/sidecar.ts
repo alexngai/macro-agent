@@ -63,6 +63,7 @@ export function createMAPSidecar(
   let dispatchMessageHandlerCleanup: (() => void) | null = null;
   let dispatchPermissionsHandlerCleanup: (() => void) | null = null;
   let workspaceManager: RepoManager | null = null;
+  let workspaceTransport: RepoClientTransport | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Resolve the workspace capability from env vars. Setting OPENHIVE_WORKSPACE_DECLARE=off
@@ -145,6 +146,7 @@ export function createMAPSidecar(
     lifecycleCallback = null;
     taskBridge = null;
     workspaceManager = null;
+    workspaceTransport = null;
   }
 
   /**
@@ -659,7 +661,7 @@ export function createMAPSidecar(
         // OpenHive's MAP server registers x-workspace/repo.* as request handlers
         // (additionalHandlers), not notification handlers — so route notify
         // through callExtension and ignore the (void) response.
-        const transport: RepoClientTransport = {
+        const repoTransport: RepoClientTransport = {
           notify: async (method, params) => {
             await connection.callExtension(method, params);
           },
@@ -683,9 +685,10 @@ export function createMAPSidecar(
           await manager.attach(cfg);
         }
         if (manager.list().length > 0) {
-          const client = new RepoClient(transport);
+          const client = new RepoClient(repoTransport);
           await client.declare(RepoClient.snapshot(manager));
           workspaceManager = manager;
+          workspaceTransport = repoTransport;
           console.log(
             `[map-sidecar] Declared ${manager.list().length} workspace(s) to hub`,
           );
@@ -780,6 +783,14 @@ export function createMAPSidecar(
             `${(err as Error).message ?? String(err)}`,
         );
       }
+    },
+
+    getWorkspaceManager() {
+      return workspaceManager;
+    },
+
+    getRepoTransport() {
+      return workspaceTransport;
     },
   };
 }

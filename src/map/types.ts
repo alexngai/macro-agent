@@ -127,6 +127,19 @@ export interface MAPSidecar {
     participantId: string,
     content: string,
   ): Promise<void>;
+
+  /**
+   * Access the sidecar's workspace RepoManager (if workspace declarations
+   * are enabled and the sidecar is connected). Used by mail-inbound-consumer
+   * for pre-spawn repo mount.
+   */
+  getWorkspaceManager?(): unknown;
+
+  /**
+   * Access the sidecar's repo client transport for declaring newly-attached
+   * repos to the hub. Used by mail-inbound-consumer after pre-spawn clone.
+   */
+  getRepoTransport?(): { notify(method: string, params: unknown): Promise<void>; request(method: string, params: unknown): Promise<unknown> } | null;
 }
 
 // =============================================================================
