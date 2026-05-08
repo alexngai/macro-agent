@@ -363,4 +363,68 @@ describe("LifecycleBridge", () => {
       expect.objectContaining({ name: "agent-99" }),
     );
   });
+
+  // ── awaitRegistration() ─────────────────────────────────────────────
+
+  describe("awaitRegistration", () => {
+    it("returns true once map/agents/register completes (mapId populated)", async () => {
+      // Hub returns a MAP-assigned ULID for the registered agent.
+      conn.callExtension.mockResolvedValueOnce({ agent: { id: "map-ulid-A" } });
+
+      const { callback, awaitRegistration } = createLifecycleBridge(
+        conn,
+        {} as AgentStore,
+        scope,
+      );
+
+      callback({
+        type: "spawned",
+        agent: mockAgent({ id: "agent-A", role: "coordinator" }),
+      });
+
+      // The async register IIFE inside the bridge does waitForLocalMapId(~500ms)
+      // then resolves callExtension. Wait long enough for that to settle.
+      const ok = await awaitRegistration("agent-A", 2_000);
+      expect(ok).toBe(true);
+    });
+
+    it("returns false if timeout elapses before registration completes", async () => {
+      // Stall the registration call so mapId is never populated within the window.
+      let resolveExt: (value: unknown) => void = () => {};
+      conn.callExtension.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveExt = resolve;
+          }),
+      );
+
+      const { callback, awaitRegistration } = createLifecycleBridge(
+        conn,
+        {} as AgentStore,
+        scope,
+      );
+
+      callback({
+        type: "spawned",
+        agent: mockAgent({ id: "agent-B", role: "coordinator" }),
+      });
+
+      const ok = await awaitRegistration("agent-B", 200);
+      expect(ok).toBe(false);
+
+      // Cleanup the dangling promise so vitest doesn't warn about leaks.
+      resolveExt({ agent: { id: "map-ulid-late" } });
+    });
+
+    it("returns false for an agentId that was never spawned", async () => {
+      const { awaitRegistration } = createLifecycleBridge(
+        conn,
+        {} as AgentStore,
+        scope,
+      );
+
+      const ok = await awaitRegistration("never-spawned-agent", 150);
+      expect(ok).toBe(false);
+    });
+  });
 });

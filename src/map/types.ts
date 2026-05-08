@@ -83,6 +83,15 @@ export interface MAPSidecarDeps {
    * without hub observability).
    */
   gitCascadeAdapter?: import("../workspace/git-cascade-adapter.js").GitCascadeAdapter;
+
+  /**
+   * The swarm-dispatch dispatcher agent ID (e.g. "dispatcher:<claimantId>").
+   * When provided, the mail bridge delivers hub-forwarded mail turns directly
+   * to this inbox recipient so createAgentInboxPort.onIncoming fires
+   * correctly. Without it, bridged turns land in BRIDGE_RECIPIENT_ID and the
+   * MessagePort never sees them.
+   */
+  dispatcherAgentId?: string;
 }
 
 // =============================================================================
@@ -106,6 +115,31 @@ export interface MAPSidecar {
 
   /** Emit a custom event to the MAP hub scope (best-effort, no-op if disconnected) */
   emitEvent?(event: Record<string, unknown>): Promise<void>;
+
+  /**
+   * Post a mail turn back to the hub via the `mail/turn` MAP notification.
+   * Used by the dispatch reply bridge to forward worker output into the hub's
+   * mail conversation after a mail-inbound task completes.
+   * No-op if disconnected.
+   */
+  postMailTurn?(
+    conversationId: string,
+    participantId: string,
+    content: string,
+  ): Promise<void>;
+
+  /**
+   * Access the sidecar's workspace RepoManager (if workspace declarations
+   * are enabled and the sidecar is connected). Used by mail-inbound-consumer
+   * for pre-spawn repo mount.
+   */
+  getWorkspaceManager?(): unknown;
+
+  /**
+   * Access the sidecar's repo client transport for declaring newly-attached
+   * repos to the hub. Used by mail-inbound-consumer after pre-spawn clone.
+   */
+  getRepoTransport?(): { notify(method: string, params: unknown): Promise<void>; request(method: string, params: unknown): Promise<unknown> } | null;
 }
 
 // =============================================================================

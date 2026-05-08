@@ -37,7 +37,28 @@ export function createLifecycleBridge(
   scope: string,
   taskBridge?: TaskBridge,
   getLocalMapId?: (localAgentId: string) => string | undefined,
-): { callback: AgentLifecycleCallback; cleanup: () => Promise<void> } {
+): {
+  callback: AgentLifecycleCallback;
+  cleanup: () => Promise<void>;
+  /**
+   * Resolve true once the named agent has completed `map/agents/register`
+   * with the hub (its entry.mapId is populated). Used by the dispatch
+   * spawn-agent handler to barrier-wait for hub-side registration before
+   * returning, so the orchestrator's subsequent `findAcpAgentInfo` lookup
+   * doesn't race the registration.
+   *
+   * Returns false if the timeout elapses before registration completes.
+   */
+  awaitRegistration: (agentId: string, timeoutMs?: number) => Promise<boolean>;
+  /**
+   * Reverse-lookup: hub-assigned MAP ULID → local agent id. Used by the
+   * `map/dispatch/message` handler in the sidecar to translate envelope
+   * recipients (which the hub addresses by MAP ULID) into local agent ids
+   * (which the inbox addresses messages by). Returns undefined when no
+   * registered agent matches.
+   */
+  findLocalAgentByMapId: (mapId: string) => string | undefined;
+} {
   const registered = new Map<string, RegisteredAgent>();
 
   /**
@@ -186,5 +207,30 @@ export function createLifecycleBridge(
     registered.clear();
   };
 
-  return { callback, cleanup };
+  /**
+   * Block until the named agent's hub-side registration completes (entry
+   * has been assigned a mapId by the `map/agents/register` response) or
+   * the timeout elapses. Polls the local `registered` map.
+   */
+  const awaitRegistration = async (
+    agentId: string,
+    timeoutMs = 5000,
+  ): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const entry = registered.get(agentId);
+      if (entry?.mapId) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return Boolean(registered.get(agentId)?.mapId);
+  };
+
+  const findLocalAgentByMapId = (mapId: string): string | undefined => {
+    for (const [localId, entry] of registered) {
+      if (entry.mapId === mapId) return localId;
+    }
+    return undefined;
+  };
+
+  return { callback, cleanup, awaitRegistration, findLocalAgentByMapId };
 }

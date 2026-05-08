@@ -65,10 +65,60 @@ import { AgentTokenManager } from "../auth/token.js";
 import type { InboxAdapter } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { AgentManager, SpawnInterceptor } from "./agent-manager.js";
+import { getPermissionOverlay } from "../dispatch/permission-overlay.js";
+import { evaluatePermission } from "../dispatch/permission-evaluator.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Helper
 // ─────────────────────────────────────────────────────────────────
+
+/**
+ * Derive the canonical Claude Code tool name from a `permission_request`
+ * `toolCall` object.
+ *
+ * Why this is needed: claude-agent-acp's `toolInfoFromToolUse` mangles
+ * built-in tool names into display titles (e.g., `Read /tmp/x` instead of
+ * `Read`). MCP tools use their fully-qualified `mcp__server__tool` name as
+ * the title. The `kind` field (Claude SDK's tool category) is the
+ * cleanest signal for built-ins, with the input shape disambiguating
+ * within a category (e.g., `edit` covers Write/Edit/MultiEdit — we look
+ * at `old_string`/`edits` to pick which).
+ *
+ * Pure: no side effects; safe to call from the prompt iterator.
+ */
+function deriveToolName(toolCall: {
+  title?: string;
+  kind?: string;
+  rawInput?: unknown;
+} | undefined): string {
+  const title = toolCall?.title ?? "";
+  const kind = toolCall?.kind ?? "";
+  // MCP tools — title is the canonical name.
+  if (title.startsWith("mcp__")) return title.split(/\s/)[0] ?? "";
+  const input =
+    toolCall?.rawInput && typeof toolCall.rawInput === "object"
+      ? (toolCall.rawInput as Record<string, unknown>)
+      : {};
+  switch (kind) {
+    case "read":
+      return "Read";
+    case "execute":
+      return "Bash";
+    case "edit":
+      if ("edits" in input) return "MultiEdit";
+      if ("old_string" in input) return "Edit";
+      return "Write";
+    case "search":
+      return "path" in input ? "Grep" : "Glob";
+    case "think":
+      return "Task";
+    case "switch_mode":
+      return "ExitPlanMode";
+  }
+  // Fallback: first whitespace-delimited token of the title (Read/Write/
+  // Edit cases not caught above; built-ins newer than this matrix).
+  return title.split(/\s/)[0] ?? "";
+}
 
 function getSpawnCapability(childRole: string): Capability {
   const baseRole = childRole.split(".")[0];
@@ -625,7 +675,12 @@ export function createAgentManagerV2(
       created_at: now,
       started_at: now,
       config: agentConfig as Record<string, unknown>,
-      metadata: options.taskRef ? { task_ref: options.taskRef } : {},
+      metadata: {
+        ...(options.taskRef ? { task_ref: options.taskRef } : {}),
+        // Persist isolatedSettings so resume() applies the same agentMeta
+        // policy without needing the original SpawnAgentOptions.
+        ...(options.isolatedSettings ? { isolatedSettings: true } : {}),
+      },
     };
     agentStore.putAgent(agentRecord);
 
@@ -715,6 +770,57 @@ export function createAgentManagerV2(
         })) ?? []),
       ];
 
+      // Always-on subsystem MCP servers (the "trinity"). The macro-agent
+      // architecture docs describe agent-inbox + opentasks as separate MCP
+      // servers available to spawned workers, but until this entry block
+      // existed they were only reachable when host-level Claude plugins
+      // happened to have wired them. That left mail-inbound workers
+      // (`parent: null` + `isolatedSettings: true`) without inbox/tasks
+      // tools — see openhive-2 docs/LOADOUTS_DESIGN.md "Loadout-provided
+      // MCP servers" live finding 2026-05-03.
+      //
+      // Registering them here makes them per-spawn defaults independent
+      // of host configuration. Caller-supplied `agentConfig.mcpServers`
+      // remains additive (Option C / "hybrid"): the trinity is always
+      // there, callers can layer more on top.
+
+      // agent-inbox — exposes send_message, check_inbox, read_thread,
+      // list_agents via the InboxMcpProxy stdio bridge.
+      if (inboxAdapter.socketPath) {
+        const inboxProxyEntry = new URL(
+          "../../dist/cli/inbox-mcp-proxy.js",
+          import.meta.url,
+        ).pathname;
+        mcpServers.push({
+          name: "agent-inbox",
+          command: "node",
+          args: [inboxProxyEntry],
+          env: [
+            { name: "INBOX_SOCKET_PATH", value: inboxAdapter.socketPath },
+            { name: "MACRO_AGENT_ID", value: agentId },
+          ],
+        } as any);
+      }
+
+      // opentasks — exposes task, link, annotate, query via the
+      // `opentasks mcp` CLI subcommand. The package's dist/mcp/stdio.js
+      // is an exports-only module (no auto-start); the CLI's `mcp`
+      // subcommand is what actually wires StdioServerTransport. Conditional
+      // on tasksAdapter.connected — when the daemon isn't running, skip
+      // rather than mount a server that would fail at every tool call.
+      if (tasksAdapter.connected) {
+        const opentasksCliEntry = new URL(
+          "opentasks/dist/cli.js",
+          import.meta.url,
+        ).pathname;
+        mcpServers.push({
+          name: "opentasks",
+          command: "node",
+          args: [opentasksCliEntry, "mcp"],
+          env: [],
+        } as any);
+      }
+
       // Register minimem MCP server (agent-type independent — works for any MCP-capable agent)
       if (minimemConfig?.enabled) {
         mcpServers.push({
@@ -730,23 +836,98 @@ export function createAgentManagerV2(
         } as any);
       }
 
-      // Build agentMeta
-      let agentMeta: Record<string, any> | undefined;
-
-      if (permissionMode === "interactive" && askForAllTools) {
-        agentMeta = {
-          claudeCode: {
-            options: {
-              settingSources: [],
-              settings: {
-                permissions: {
-                  ask: ["*", "Write(**)", "Edit(**)", "MultiEdit(**)", "Bash(*)"],
-                },
-              },
-            },
+      // Build agentMeta. Two layers:
+      //
+      //  1. `settingSources: []` — when the caller requests isolated
+      //     settings (mail-inbound dispatch workers via
+      //     SpawnAgentOptions.isolatedSettings), strip user/project/local
+      //     setting sources so the worker doesn't load the host's
+      //     claude-code-swarm / oh-my-claudecode / etc plugin MCP servers
+      //     — those plugins assume host-shaped environment (sockets,
+      //     daemons) and hang at session/new MCP-init when missing.
+      //     Interactive `multiagent` callers leave this false so their
+      //     installed plugins load normally.
+      //
+      //  2. `settings.permissions` — when the caller passes
+      //     SpawnAgentOptions.permissions (e.g., from a materialized
+      //     loadout), wire the rules inline via the Claude Agent SDK's
+      //     session-level settings pass-through. Verified live: `deny`
+      //     wins even over `permissionMode: "auto-approve"`. Inline
+      //     wiring avoids file collisions when concurrent workers share
+      //     a CWD (no `.claude/settings.json` written to disk).
+      //
+      //     SDK contract pinned by the boundary test in
+      //     `src/agent/__tests__/agent-manager-v2.permissions.test.ts` —
+      //     it captures the literal `agentMeta` argument passed to
+      //     `handle.createSession` and asserts both `settingSources: []`
+      //     AND `settings.permissions` are present together (the
+      //     interaction between filesystem-stripping and inline
+      //     reconciliation that the SDK's docs don't fully spell out).
+      //     If a future SDK version changes how `settings` reconciles
+      //     with empty `settingSources`, that test will catch it.
+      //
+      //     `ask` rules collapse based on `fullAutonomous`:
+      //       - fullAutonomous: true  → ask → allow (autonomous worker
+      //         opts to proceed when there's no human to answer)
+      //       - fullAutonomous: false → ask → deny (safe default;
+      //         autonomous workers shouldn't make judgment calls)
+      const claudeCodeOptions: Record<string, any> = {};
+      if (options.isolatedSettings || permissionMode === "interactive") {
+        claudeCodeOptions.settingSources = [];
+      }
+      if (options.permissions) {
+        const { allow = [], deny = [], ask = [] } = options.permissions;
+        const finalAllow = options.fullAutonomous ? [...allow, ...ask] : [...allow];
+        const finalDeny = options.fullAutonomous ? [...deny] : [...deny, ...ask];
+        claudeCodeOptions.settings = {
+          permissions: {
+            ...(finalAllow.length ? { allow: finalAllow } : {}),
+            ...(finalDeny.length ? { deny: finalDeny } : {}),
           },
         };
       }
+      // P3 spike: when an agent should funnel every tool call through the host
+      // (so the prompt-iterator handler can apply runtime overlays), set
+      // `ask: ['*']` on settings.permissions. The SDK then consults canUseTool
+      // for every tool, which emits `permission_request` session updates.
+      // Used for dispatch-target agents (mail+reuse, ACP+reuse) that need
+      // dynamic enforcement; chat agents and parented children stay on
+      // their session's static rules.
+      if (options.askForAllTools) {
+        const existingPerms =
+          claudeCodeOptions.settings?.permissions ?? {};
+        claudeCodeOptions.settings = {
+          ...claudeCodeOptions.settings,
+          permissions: {
+            ...existingPerms,
+            ask: ["*"],
+          },
+        };
+      }
+
+      // 3. Runtime permission overlay enforcement lives in the prompt
+      //    iterator (see `prompt()` below), NOT here at spawn time.
+      //
+      //    Background: an earlier design installed a Claude SDK PreToolUse
+      //    hook here that closed over the per-process permission-overlay
+      //    registry. That mechanism was verified broken: function callbacks
+      //    inside arrays don't survive JSON.stringify across the
+      //    macro-agent → claude-agent-acp stdio JSON-RPC boundary, so the
+      //    hook arrived as `null` at the SDK and silently no-op'd.
+      //
+      //    The current design uses ACP's `permission_request` session
+      //    update path instead. When an agent is spawned with
+      //    `askForAllTools: true` + `permissionMode: 'interactive'`, the
+      //    SDK consults `canUseTool` on every tool call, claude-agent-acp
+      //    converts that into a `client.requestPermission` call, and
+      //    acp-factory emits it as a `permission_request` session update.
+      //    The prompt iterator below intercepts those updates, evaluates
+      //    against the overlay, and responds via `respondPermission`.
+      //    See `docs/PERMISSION_OVERLAY_ACP_DESIGN.md` for the full design.
+
+      const agentMeta = Object.keys(claudeCodeOptions).length > 0
+        ? { claudeCode: { options: claudeCodeOptions } }
+        : undefined;
 
       // Build capabilities context + skill-tree loadout for system prompt
       // Matches cc-swarm's context injection pattern (role-aware, tool-specific)
@@ -1106,8 +1287,12 @@ export function createAgentManagerV2(
       },
     ];
 
+    // Strip user/project/local setting sources for isolated workers (the
+    // metadata flag is set at spawn time when SpawnAgentOptions.isolatedSettings
+    // was true) or interactive mode. See spawn() for the rationale.
+    const isIsolated = (record.metadata as Record<string, unknown> | undefined)?.isolatedSettings === true;
     const agentMeta =
-      permMode === "interactive"
+      isIsolated || permMode === "interactive"
         ? { claudeCode: { options: { settingSources: [] } } }
         : undefined;
 
@@ -1489,7 +1674,71 @@ export function createAgentManagerV2(
 
     activeSession.isPrompting = true;
     try {
-      yield* activeSession.session.prompt(message);
+      // Permission overlay enforcement — for agents in dispatch context
+      // (mail-inbound + ACP reuse targets), the dispatch consumer sets a
+      // per-agent overlay before driving prompt(). When set, `permission_request`
+      // session updates are intercepted here, evaluated against the overlay,
+      // and answered via `respondToPermission`. The update is NOT yielded
+      // to the consumer in that case — dispatch enforcement is internal.
+      //
+      // When no overlay is set (the common case — chat agents, sub-agents
+      // spawned by parents, etc.), permission_request updates are yielded
+      // through unchanged so chat surfaces' UI permission dialogs (the
+      // swarmcraft PermissionDialog rendered via the openhive-acp-service
+      // WS subscription) keep working.
+      //
+      // See `docs/PERMISSION_OVERLAY_ACP_DESIGN.md` for the rationale and
+      // a diagram of the four-process flow.
+      for await (const update of activeSession.session.prompt(message)) {
+        const u = update as {
+          sessionUpdate?: string;
+          requestId?: string;
+          toolCall?: { title?: string; kind?: string; rawInput?: unknown };
+          options?: Array<{ kind?: string; optionId?: string }>;
+        };
+        if (u?.sessionUpdate === "permission_request") {
+          const overlay = getPermissionOverlay(agentId);
+          // No overlay → pass through to the consumer (chat UI, etc.).
+          if (!overlay) {
+            yield update;
+            continue;
+          }
+          let optionId: string | undefined;
+          try {
+            const toolName = deriveToolName(u.toolCall);
+            const toolInput = u.toolCall?.rawInput ?? {};
+            const decision = evaluatePermission(toolName, toolInput, overlay)
+              .decision;
+            const wantedKind =
+              decision === "deny" ? "reject_once" : "allow_once";
+            const opt =
+              u.options?.find((o) => o.kind === wantedKind) ??
+              u.options?.find(
+                (o) =>
+                  o.kind === (decision === "deny" ? "reject_always" : "allow_always"),
+              );
+            optionId = opt?.optionId;
+          } catch {
+            // Fail closed: on registry/evaluator error, deny.
+            optionId = u.options?.find((o) => o.kind === "reject_once")?.optionId;
+          }
+          if (u.requestId && optionId) {
+            try {
+              (activeSession.session as any).respondToPermission?.(
+                u.requestId,
+                optionId,
+              );
+            } catch (err) {
+              console.warn(
+                `[perm-overlay] respondToPermission failed agent=${agentId} req=${u.requestId}: ${(err as Error).message}`,
+              );
+            }
+          }
+          // Don't yield permission_request to the consumer — dispatch-internal.
+          continue;
+        }
+        yield update;
+      }
     } finally {
       activeSession.isPrompting = false;
       agentStore.updateAgent(agentId, {
