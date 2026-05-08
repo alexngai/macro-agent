@@ -29,7 +29,7 @@ import {
   RepoManager,
   type RepoClientTransport,
   type WorkspaceCapability,
-} from "agent-workspace/kinds/repo";
+} from "./repo-workspace.js";
 
 /**
  * Create a MAP sidecar that connects macro-agent to an OpenHive MAP hub.
@@ -662,10 +662,11 @@ export function createMAPSidecar(
         // (additionalHandlers), not notification handlers — so route notify
         // through callExtension and ignore the (void) response.
         const repoTransport: RepoClientTransport = {
-          notify: async (method, params) => {
+          notify: async (method: string, params: unknown) => {
             await connection.callExtension(method, params);
           },
-          request: (method, params) => connection.callExtension(method, params),
+          request: (method: string, params: unknown) =>
+            connection.callExtension(method, params),
         };
         const manager = new RepoManager();
         const single =

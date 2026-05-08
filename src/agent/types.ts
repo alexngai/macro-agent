@@ -40,9 +40,6 @@ export interface SpawnAgentOptions {
   /** Permission mode for tool calls */
   permissionMode?: PermissionMode;
 
-  /** Ask the user before every tool call when permissionMode is interactive */
-  askForAllTools?: boolean;
-
   /** Whether parent should subscribe to this agent's subtree */
   subscribeParent?: boolean;
 
