@@ -527,6 +527,7 @@ export function createAgentManagerV2(
       parent,
       cwd = defaultCwd,
       permissionMode = defaultPermissionMode,
+      askForAllTools = false,
       subscribeParent = true,
       topics = [],
       config: agentConfig,
@@ -732,8 +733,19 @@ export function createAgentManagerV2(
       // Build agentMeta
       let agentMeta: Record<string, any> | undefined;
 
-      if (permissionMode === "interactive") {
-        agentMeta = { claudeCode: { options: { settingSources: [] } } };
+      if (permissionMode === "interactive" && askForAllTools) {
+        agentMeta = {
+          claudeCode: {
+            options: {
+              settingSources: [],
+              settings: {
+                permissions: {
+                  ask: ["*", "Write(**)", "Edit(**)", "MultiEdit(**)", "Bash(*)"],
+                },
+              },
+            },
+          },
+        };
       }
 
       // Build capabilities context + skill-tree loadout for system prompt

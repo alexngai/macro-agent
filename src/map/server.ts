@@ -108,6 +108,7 @@ export function createMAPServerInstance(
         cwd: params.cwd,
         role: params.role ?? "worker",
         permissionMode: params.permissionMode,
+        askForAllTools: params.askForAllTools,
         agentType: params.agentType,
         customPrompt: params.customPrompt,
         topics: params.topics,

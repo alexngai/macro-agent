@@ -205,18 +205,22 @@ export function createMacroAgent(
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const normalizedMethod = method.startsWith("macro/")
+      ? `_${method}`
+      : method;
+
     // Check if it's a stubbed peer method
     if (
-      (STUBBED_PEER_EXTENSIONS as readonly string[]).includes(method)
+      (STUBBED_PEER_EXTENSIONS as readonly string[]).includes(normalizedMethod)
     ) {
       throw new ACPError(
-        `Peer manager not available: ${method}`,
+        `Peer manager not available: ${normalizedMethod}`,
         "NO_PEER_MANAGER",
-        { method },
+        { method: normalizedMethod },
       );
     }
 
-    switch (method as SupportedExtension) {
+    switch (normalizedMethod as SupportedExtension) {
       case "_macro/spawnAgent": {
         const task = params.task as string;
         if (!task) throw RequestError.invalidParams(params, "task is required");
@@ -226,6 +230,7 @@ export function createMacroAgent(
           cwd: (params.cwd as string) ?? defaultCwd,
           role: params.role as string | undefined,
           permissionMode: params.permissionMode as "auto-approve" | undefined,
+          askForAllTools: params.askForAllTools as boolean | undefined,
         });
         return {
           agentId: spawned.id,
@@ -837,45 +842,18 @@ export function createMacroAgent(
           }
 
           // Handle permission requests from the underlying agent.
-          // When the agent is in interactive mode, it yields
-          // PermissionRequestUpdate objects instead of auto-approving.
-          // We forward these to the client via AgentSideConnection's
-          // requestPermission() method (JSON-RPC agent→client request).
+          // When the agent is in interactive mode, acp-factory yields
+          // PermissionRequestUpdate objects. Forward them as session updates
+          // instead of AgentSideConnection.requestPermission(): MAP-routed
+          // browser clients already consume session/update, and replies come
+          // back through _macro/respondToPermission or _macro/cancelPermission.
           if (isPermissionRequestUpdate(update)) {
-            try {
-              const permResponse = await connection.requestPermission({
-                sessionId: params.sessionId,
-                toolCall: {
-                  toolCallId: update.toolCall.toolCallId,
-                  title: update.toolCall.title,
-                  status: update.toolCall.status as any,
-                  rawInput: update.toolCall.rawInput,
-                },
-                options: update.options,
-              });
-              // Relay the permission response back to the agent.
-              // ACP response: { outcome: { outcome: "selected", optionId } | { outcome: "cancelled" } }
-              const outcome = permResponse?.outcome;
-              if (outcome) {
-                if (outcome.outcome === "selected" && "optionId" in outcome) {
-                  agentManager.respondToPermission(
-                    agentId,
-                    update.requestId,
-                    outcome.optionId,
-                  );
-                } else if (outcome.outcome === "cancelled") {
-                  agentManager.cancelPermission(agentId, update.requestId);
-                }
-              }
-            } catch {
-              // If the permission request fails (e.g., client disconnected),
-              // cancel it so the agent doesn't hang.
-              try {
-                agentManager.cancelPermission(agentId, update.requestId);
-              } catch {
-                // Best effort
-              }
-            }
+            const forwardedUpdate = { ...update, _agentId: agentId };
+            appendSessionUpdate(params.sessionId, forwardedUpdate as any);
+            await connection.sessionUpdate({
+              sessionId: params.sessionId,
+              update: forwardedUpdate as any,
+            });
             continue;
           }
 
