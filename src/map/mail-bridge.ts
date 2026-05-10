@@ -52,6 +52,9 @@ interface MailTurnReceivedParams {
   content?: unknown;
   thread_id?: string;
   created_at?: string;
+  /** Importance hint from the hub. When present, drives wake/interrupt
+   *  decisions via TriggerSystemV2's mapImportanceToWakeAction. */
+  importance?: string;
 }
 
 /**
@@ -169,6 +172,15 @@ export async function setupMailBridge(
       ...(turn.conversation_id ? { _conversationId: turn.conversation_id } : {}),
     };
 
+    // Derive importance from the hub's wire params. Default to "normal"
+    // when the hub doesn't tag the turn (backward compat).
+    const VALID_IMPORTANCE = ["low", "normal", "high", "urgent"];
+    const wireImportance =
+      typeof turn.importance === "string" &&
+      VALID_IMPORTANCE.includes(turn.importance)
+        ? (turn.importance as "low" | "normal" | "high" | "urgent")
+        : "normal";
+
     try {
       await inboxAdapter.send(
         turn.participant_id ?? "openhive-hub",
@@ -176,7 +188,7 @@ export async function setupMailBridge(
         contentWithConvId as never,
         {
           threadTag: turn.thread_id,
-          importance: "normal",
+          importance: wireImportance,
         },
       );
       log(

@@ -173,6 +173,94 @@ describe("setupMailBridge", () => {
     });
   });
 
+  describe("importance derivation", () => {
+    const DISPATCHER_ID = "dispatcher:host:1234:abc";
+
+    it("passes through importance from hub notification params", async () => {
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inbox as any,
+        dispatcherAgentId: DISPATCHER_ID,
+      });
+
+      await conn._fire({
+        conversation_id: "conv-imp-1",
+        turn_id: "turn-imp-1",
+        participant_id: "user:admin",
+        content_type: "application/json",
+        content: JSON.stringify({ schema: "x-dispatch/work", data: { taskId: "t-1" } }),
+        importance: "high",
+      });
+
+      expect(inbox.send).toHaveBeenCalledOnce();
+      const [, , , opts] = inbox.send.mock.calls[0];
+      expect(opts?.importance).toBe("high");
+    });
+
+    it("passes through 'urgent' importance for orchestrator recall", async () => {
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inbox as any,
+        dispatcherAgentId: DISPATCHER_ID,
+      });
+
+      await conn._fire({
+        conversation_id: "conv-imp-2",
+        turn_id: "turn-imp-2",
+        participant_id: "system:dispatch-orchestrator",
+        content_type: "application/json",
+        content: JSON.stringify({ schema: "x-dispatch/work", data: { taskId: "t-2" } }),
+        importance: "urgent",
+      });
+
+      expect(inbox.send).toHaveBeenCalledOnce();
+      const [, , , opts] = inbox.send.mock.calls[0];
+      expect(opts?.importance).toBe("urgent");
+    });
+
+    it("defaults to 'normal' when importance is missing", async () => {
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inbox as any,
+        dispatcherAgentId: DISPATCHER_ID,
+      });
+
+      await conn._fire({
+        conversation_id: "conv-imp-3",
+        turn_id: "turn-imp-3",
+        participant_id: "user:admin",
+        content_type: "application/json",
+        content: JSON.stringify({ schema: "x-dispatch/work", data: { taskId: "t-3" } }),
+        // no importance field
+      });
+
+      expect(inbox.send).toHaveBeenCalledOnce();
+      const [, , , opts] = inbox.send.mock.calls[0];
+      expect(opts?.importance).toBe("normal");
+    });
+
+    it("ignores invalid importance values and falls back to 'normal'", async () => {
+      await setupMailBridge({
+        connection: conn,
+        inboxAdapter: inbox as any,
+        dispatcherAgentId: DISPATCHER_ID,
+      });
+
+      await conn._fire({
+        conversation_id: "conv-imp-4",
+        turn_id: "turn-imp-4",
+        participant_id: "user:admin",
+        content_type: "application/json",
+        content: JSON.stringify({ schema: "x-dispatch/work", data: { taskId: "t-4" } }),
+        importance: "critical", // invalid value
+      });
+
+      expect(inbox.send).toHaveBeenCalledOnce();
+      const [, , , opts] = inbox.send.mock.calls[0];
+      expect(opts?.importance).toBe("normal");
+    });
+  });
+
   describe("without dispatcherAgentId (fallback mode)", () => {
     it("delivers to BRIDGE_RECIPIENT_ID", async () => {
       await setupMailBridge({
