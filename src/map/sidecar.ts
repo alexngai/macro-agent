@@ -173,6 +173,12 @@ export function createMAPSidecar(
             canUpdate: true,
             canList: true,
           },
+          // Diff serving is gated on whether a git-cascade adapter is wired
+          // — without it there are no worktrees to shell out against, so
+          // declaring canServeDiff would just produce timeouts on the hub.
+          ...(gitCascadeAdapter
+            ? { cascade: { canServeDiff: true } }
+            : {}),
           workspace: workspaceCapability,
         },
         metadata: {
@@ -646,9 +652,15 @@ export function createMAPSidecar(
       const { setupCascadeActionHandlers } = await import("./cascade-action-handler.js");
       const actionCleanup = setupCascadeActionHandlers(connection, gitCascadeAdapter);
 
+      // 5c. Inbound diff server — receives cascade/diff.request from hub
+      //     and replies with cascade/diff.response (+ chunks for large blobs).
+      const { setupCascadeDiffServer } = await import("./cascade-diff-server.js");
+      const diffCleanup = setupCascadeDiffServer(connection, gitCascadeAdapter);
+
       cascadeBridgeCleanup = () => {
         cascadeBridge.dispose();
         actionCleanup();
+        diffCleanup();
       };
     }
 
