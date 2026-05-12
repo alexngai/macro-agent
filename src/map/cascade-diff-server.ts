@@ -21,7 +21,7 @@
  */
 
 import { spawn } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { existsSync } from 'fs';
 import type { GitCascadeAdapter } from '../workspace/git-cascade-adapter.js';
 
@@ -325,18 +325,26 @@ function parseNameOnly(buf: Buffer): string[] {
 }
 
 /**
- * Pull file paths out of `diff --git a/X b/Y` headers. Cheap heuristic;
- * collisions with file names containing spaces are accepted as a known
- * limitation (git escapes those with `"` anyway).
+ * Pull file paths out of the per-file header pair `--- a/X` / `+++ b/Y`.
+ *
+ * The `diff --git a/X b/Y` line is ambiguous for filenames containing
+ * ` b/` (the regex can't tell where the a-side ends and the b-side
+ * begins, and git only quotes paths containing control chars / quotes /
+ * backslash, not plain spaces). The `--- ` and `+++ ` lines are
+ * unambiguous: each appears once per file, anchored at line start, with
+ * the full path running to end-of-line.
+ *
+ * Handles renames (different a/ and b/ paths → both surfaced as touched),
+ * new files (`--- /dev/null` → skipped, `+++ b/X` → X), and deletions
+ * (`--- a/X` → X, `+++ /dev/null` → skipped). Dedup via Set.
  */
 function extractFilesFromDiffHeaders(buf: Buffer): string[] {
   const seen = new Set<string>();
   const text = buf.toString('utf-8');
-  const regex = /^diff --git a\/(.+?) b\/(.+?)$/gm;
+  const regex = /^[-+]{3} (?:a|b)\/(.+)$/gm;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(text)) !== null) {
-    // Use the b/ side — that's the post-image path.
-    seen.add(m[2]);
+    seen.add(m[1]);
   }
   return Array.from(seen);
 }
@@ -352,7 +360,11 @@ async function streamLargeBlob(
   filesTouched: string[],
   truncated: boolean,
 ): Promise<void> {
-  const chunkStreamId = `cdiff-${requestId}-${Date.now()}`;
+  // `request_id` is already unique per-request from the hub, but we add
+  // a random nonce so two sidecars routing through the same hub can't
+  // collide on the hub-side `chunkStreamToRequest` map even in the
+  // unlikely case the same request_id arrives twice (e.g. on retries).
+  const chunkStreamId = `cdiff-${requestId}-${randomBytes(6).toString('hex')}`;
 
   await connection.sendNotification(RESPONSE_METHOD, {
     request_id: requestId,
