@@ -131,9 +131,7 @@ export class TeamManagerV2 {
    * @returns The team instance ID
    */
   async startTeam(name: string, basePath?: string): Promise<string> {
-    const { agentManager, inboxAdapter, tasksAdapter, workspaceManager } = this.services;
-
-    // Load template
+    const { agentManager } = this.services;
     const { loadTeam } = await import("./team-loader.js");
     const roleRegistry = agentManager.getRoleRegistry();
     const manifest: TeamManifest = await loadTeam(
@@ -141,7 +139,47 @@ export class TeamManagerV2 {
       roleRegistry,
       basePath ?? process.cwd()
     );
+    return this.startTeamWithManifest(name, manifest);
+  }
 
+  /**
+   * Start a team from an in-memory manifest snapshot — used by hosts
+   * that ship the team config inline at boot (OpenHive's spawn manager
+   * packing `bootstrap.openteams.team_content` into the bootstrap
+   * token, for example). Skips disk I/O entirely; otherwise identical
+   * to {@link startTeam}.
+   */
+  async startTeamFromContent(
+    name: string,
+    content: {
+      manifest: import("openteams").TeamManifest;
+      roles?: Record<string, import("../roles/types.js").RoleDefinition>;
+      loadouts?: Record<string, unknown>;
+      prompts?: Record<string, unknown>;
+    },
+  ): Promise<string> {
+    const { agentManager } = this.services;
+    const { loadTeamFromContent } = await import("./team-loader.js");
+    const roleRegistry = agentManager.getRoleRegistry();
+    const manifest: TeamManifest = await loadTeamFromContent(
+      name,
+      content,
+      roleRegistry,
+    );
+    return this.startTeamWithManifest(name, manifest);
+  }
+
+  /**
+   * Shared post-load flow: wire optional topology, build the runtime,
+   * bootstrap the team's root + companions, install scoped filters,
+   * and register the instance. Callable from any loader path
+   * (disk-based `startTeam` or wire-based `startTeamFromContent`).
+   */
+  private async startTeamWithManifest(
+    name: string,
+    manifest: TeamManifest,
+  ): Promise<string> {
+    const { agentManager, inboxAdapter, tasksAdapter, workspaceManager } = this.services;
     // V3: auto-wire TopologyPolicy when the team declares
     // `macro_agent.workspace`. Requires a WorkspaceManager to be present.
     if (workspaceManager) {

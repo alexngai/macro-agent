@@ -82,6 +82,96 @@ export async function loadTeam(
     throw mapToTeamLoadError(err, teamName, teamDir);
   }
 
+  return finalizeTemplate(template, teamName, roleRegistry);
+}
+
+/**
+ * Load a team template from in-memory content (no filesystem).
+ *
+ * Wire-delivery counterpart to {@link loadTeam}: instead of reading
+ * `team.yaml` + `roles/*.yaml` + `prompts/*` from disk, hydrate via
+ * `TemplateLoader.fromObject` from a structured snapshot. Used by hosts
+ * that ship the team config inline at boot — most prominently OpenHive's
+ * spawn manager packing `bootstrap.openteams.team_content` into the
+ * `OPENSWARM_BOOTSTRAP_TOKEN` env var.
+ *
+ * The result is structurally identical to `loadTeam`'s — same macro-
+ * agent enrichment, same validation, same downstream contract.
+ *
+ * @param teamName - Logical team name (used for error messages + the
+ *   returned manifest's `name` when the inlined manifest doesn't carry
+ *   one of its own).
+ * @param content - Inline team content. Same shape as openteams's
+ *   `TemplateLoader.fromObject` input.
+ * @param roleRegistry - Role registry for resolving extends chains.
+ */
+export async function loadTeamFromContent(
+  teamName: string,
+  content: {
+    manifest: OpenTeamsManifest;
+    roles?: Record<string, RoleDefinition>;
+    loadouts?: Record<string, unknown>;
+    prompts?: Record<string, unknown>;
+  },
+  roleRegistry: RoleRegistry,
+): Promise<TeamManifest> {
+  // openteams's `fromObject` was added after the v0.3.0 type bundle that
+  // macro-agent's package.json pins. At runtime the host's `node_modules`
+  // typically resolves openteams to a newer source (e.g. OpenHive uses the
+  // workspace symlink to references/openteams), so the call works — we
+  // just lose static typing here. Cast around the missing type until the
+  // pinned version is bumped.
+  // fromObject is synchronous in openteams source; we cast through unknown
+  // because the pinned openteams version's type bundle doesn't yet export
+  // the static. Runtime resolution via the host's workspace gives us the
+  // version that does have it.
+  const fromObject = (
+    TemplateLoader as unknown as {
+      fromObject?: (
+        c: unknown,
+        opts: unknown,
+      ) => Awaited<ReturnType<typeof TemplateLoader.loadAsync>>;
+    }
+  ).fromObject;
+  if (!fromObject) {
+    throw mapToTeamLoadError(
+      new Error(
+        'openteams TemplateLoader.fromObject is unavailable — runtime openteams must be ≥ the version that exports `fromObject`',
+      ),
+      teamName,
+      `<inline:${teamName}>`,
+    );
+  }
+  let template;
+  try {
+    template = fromObject(content as never, {
+      resolveExternalRole: (name: string) => mapRegistryRole(roleRegistry, name),
+      postProcessRole: (
+        role: ResolvedRole,
+        manifest: OpenTeamsManifest,
+      ) => enrichRoleWithSpawnRules(role, manifest),
+    });
+  } catch (err) {
+    throw mapToTeamLoadError(err, teamName, `<inline:${teamName}>`);
+  }
+  return finalizeTemplate(template, teamName, roleRegistry);
+}
+
+/**
+ * Shared post-load processing applied to whatever `TemplateLoader`
+ * (sync or async, disk or in-memory) produces. Builds the enrichment-
+ * enriched role map, assembles the multi-file prompt index, validates
+ * communication, and returns the macro-agent `TeamManifest` shape.
+ */
+function finalizeTemplate(
+  // Awaited form of `loadAsync` — same `ResolvedTemplate` shape that
+  // `fromObject` returns (we just can't name it via `typeof
+  // TemplateLoader.fromObject` until the pinned openteams version exports
+  // the static).
+  template: Awaited<ReturnType<typeof TemplateLoader.loadAsync>>,
+  teamName: string,
+  roleRegistry: RoleRegistry,
+): TeamManifest {
   const manifest = template.manifest;
   const communication = (manifest.communication ?? {}) as CommunicationConfig;
   const macroAgent = parseMacroAgentExtensions(

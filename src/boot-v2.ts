@@ -317,6 +317,28 @@ export interface BootV2Config {
      * restart restores the full macro-agent team, not just head managers.
      */
     rehydrate?: "none" | "coordinators" | "all";
+
+    /**
+     * Wire-delivered openteams binding from the host (e.g. OpenHive's
+     * spawn manager packing this into `OPENSWARM_BOOTSTRAP_TOKEN`).
+     * When `team_content` is present, bootV2 spawns the bootstrap
+     * agents via TeamRuntimeV2 from the inline manifest — no
+     * filesystem write, no MAP fetch. Path B of the OpenHive ↔
+     * macro-agent openteams integration.
+     */
+    openteams?: {
+      loadout_bundle_id?: string;
+      team_bundle_id?: string;
+      role?: string;
+      mcp_servers?: unknown[];
+      prompt_addendum?: string;
+      team_content?: {
+        manifest: import("openteams").TeamManifest;
+        roles?: Record<string, import("./roles/types.js").RoleDefinition>;
+        loadouts?: Record<string, unknown>;
+        prompts?: Record<string, unknown>;
+      };
+    };
   };
 }
 
@@ -405,6 +427,38 @@ export async function bootV2(
   // MACRO_BOOTSTRAP_CWD / MACRO_BOOTSTRAP_REHYDRATE into the structured
   // bootstrap field if not already set programmatically. Programmatic
   // config wins per field.
+  // OpenHive openteams binding bridge. The host (openswarm) only forwards
+  // a fixed-shape `bootConfig` to `bootV2` — it doesn't propagate the
+  // raw OPENSWARM_BOOTSTRAP_TOKEN.openteams block. Pull it out of the env
+  // ourselves so wire-delivered teams (Path B) work without requiring
+  // openswarm to learn a new field.
+  if (
+    process.env.OPENSWARM_BOOTSTRAP_TOKEN &&
+    !config.bootstrap?.openteams
+  ) {
+    try {
+      const raw = Buffer.from(
+        process.env.OPENSWARM_BOOTSTRAP_TOKEN,
+        "base64",
+      ).toString("utf-8");
+      const token = JSON.parse(raw) as { openteams?: unknown };
+      if (token.openteams && typeof token.openteams === "object") {
+        config = {
+          ...config,
+          bootstrap: {
+            ...(config.bootstrap ?? {}),
+            openteams: token.openteams as NonNullable<
+              BootV2Config["bootstrap"]
+            >["openteams"],
+          },
+        };
+      }
+    } catch {
+      // Token malformed or missing fields — non-fatal; the bootstrap
+      // coordinator just runs without the openteams binding.
+    }
+  }
+
   if (
     process.env.MACRO_BOOTSTRAP_COORDINATOR === "true" &&
     !config.bootstrap?.coordinator
@@ -1013,7 +1067,49 @@ export async function bootV2(
   // server restart — the prior conversations still exist on disk but get
   // buried under stale, state='stopped' records that the UI treats as
   // dead.
-  if (config.bootstrap?.coordinator) {
+  // OpenHive wire-delivered team (Path B). When the bootstrap token
+  // carries `openteams.team_content`, instantiate a TeamManagerV2 and
+  // start the team in-memory — no filesystem write, no MAP fetch. The
+  // team's own `topology.root` + companions become the bootstrap
+  // agents, so we short-circuit the generic `bootstrap.coordinator`
+  // path below (those are mutually exclusive: a team-aware swarm has
+  // its head decided by the team manifest, not by a generic
+  // coordinator spawn).
+  const openteamsContent = config.bootstrap?.openteams?.team_content as
+    | {
+        manifest: import("openteams").TeamManifest;
+        roles?: Record<string, import("./roles/types.js").RoleDefinition>;
+        loadouts?: Record<string, unknown>;
+        prompts?: Record<string, unknown>;
+      }
+    | undefined;
+  if (openteamsContent && config.bootstrap?.coordinator) {
+    try {
+      const { TeamManagerV2 } = await import("./teams/team-manager-v2.js");
+      const teamManager = new TeamManagerV2({
+        agentManager,
+        inboxAdapter,
+        tasksAdapter,
+        workspaceManager: config.workspaceManager,
+      });
+      teamManager.install();
+      const teamName =
+        (openteamsContent.manifest?.name as string | undefined) ?? "openhive-team";
+      const instanceId = await teamManager.startTeamFromContent(
+        teamName,
+        openteamsContent,
+      );
+      console.log(
+        `[boot-v2] Wire-delivered team started: ${teamName} (instance ${instanceId})`,
+      );
+    } catch (err) {
+      console.warn(
+        `[boot-v2] Wire-delivered team start failed; falling back to generic coordinator: ${
+          (err as Error).message
+        }`,
+      );
+    }
+  } else if (config.bootstrap?.coordinator) {
     const opts = config.bootstrap.coordinator === true
       ? {}
       : config.bootstrap.coordinator;
