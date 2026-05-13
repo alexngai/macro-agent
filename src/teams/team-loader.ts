@@ -115,41 +115,12 @@ export async function loadTeamFromContent(
   },
   roleRegistry: RoleRegistry,
 ): Promise<TeamManifest> {
-  // openteams's `fromObject` was added after the v0.3.0 type bundle that
-  // macro-agent's package.json pins. At runtime the host's `node_modules`
-  // typically resolves openteams to a newer source (e.g. OpenHive uses the
-  // workspace symlink to references/openteams), so the call works — we
-  // just lose static typing here. Cast around the missing type until the
-  // pinned version is bumped.
-  // fromObject is synchronous in openteams source; we cast through unknown
-  // because the pinned openteams version's type bundle doesn't yet export
-  // the static. Runtime resolution via the host's workspace gives us the
-  // version that does have it.
-  const fromObject = (
-    TemplateLoader as unknown as {
-      fromObject?: (
-        c: unknown,
-        opts: unknown,
-      ) => Awaited<ReturnType<typeof TemplateLoader.loadAsync>>;
-    }
-  ).fromObject;
-  if (!fromObject) {
-    throw mapToTeamLoadError(
-      new Error(
-        'openteams TemplateLoader.fromObject is unavailable — runtime openteams must be ≥ the version that exports `fromObject`',
-      ),
-      teamName,
-      `<inline:${teamName}>`,
-    );
-  }
   let template;
   try {
-    template = fromObject(content as never, {
-      resolveExternalRole: (name: string) => mapRegistryRole(roleRegistry, name),
-      postProcessRole: (
-        role: ResolvedRole,
-        manifest: OpenTeamsManifest,
-      ) => enrichRoleWithSpawnRules(role, manifest),
+    template = TemplateLoader.fromObject(content as never, {
+      resolveExternalRole: (name) => mapRegistryRole(roleRegistry, name),
+      postProcessRole: (role, manifest) =>
+        enrichRoleWithSpawnRules(role, manifest),
     });
   } catch (err) {
     throw mapToTeamLoadError(err, teamName, `<inline:${teamName}>`);
@@ -164,11 +135,7 @@ export async function loadTeamFromContent(
  * communication, and returns the macro-agent `TeamManifest` shape.
  */
 function finalizeTemplate(
-  // Awaited form of `loadAsync` — same `ResolvedTemplate` shape that
-  // `fromObject` returns (we just can't name it via `typeof
-  // TemplateLoader.fromObject` until the pinned openteams version exports
-  // the static).
-  template: Awaited<ReturnType<typeof TemplateLoader.loadAsync>>,
+  template: ReturnType<typeof TemplateLoader.fromObject>,
   teamName: string,
   roleRegistry: RoleRegistry,
 ): TeamManifest {
