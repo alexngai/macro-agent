@@ -1,0 +1,6 @@
+{
+  // Dependency-update policy is shared across the swarm/openhive ecosystem.
+  // See github.com/alexngai/swarm-renovate-config.
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>alexngai/swarm-renovate-config"]
+}
