@@ -65,11 +65,26 @@ describe('sidecar.ts cascade-diff install (structural smoke)', () => {
     expect(cleanupBlock).toContain('diffCleanup()');
   });
 
-  it('only declares cascade.canServeDiff capability when adapter is wired (S1.10)', () => {
+  it('only declares the cascade capability when adapter is wired (S1.10)', () => {
     // The capability declaration is a conditional spread keyed on
     // gitCascadeAdapter. Without an adapter, no `cascade:` block is sent.
     expect(sidecarSource).toMatch(
-      /\.\.\.\(gitCascadeAdapter\s*\?\s*\{\s*cascade:\s*\{\s*canServeDiff:\s*true\s*\}\s*\}\s*:\s*\{\}\)/,
+      /\.\.\.\(gitCascadeAdapter\s*\?\s*\{\s*cascade:\s*cascadeCapability\s*\}\s*:\s*\{\}\)/,
     );
+  });
+
+  it('declares the full cascade capability (canServeDiff + canAct + emitsConflicts)', () => {
+    // macro-agent is a full-control cascade runtime: it serves diffs,
+    // handles inbound x-cascade/request.* actions, and forwards conflict
+    // events. The CascadeCapability constant must reflect all three.
+    const capBlock = sidecarSource.match(
+      /const cascadeCapability:\s*CascadeCapability\s*=\s*{[\s\S]*?};/,
+    )?.[0];
+    expect(capBlock).toBeDefined();
+    expect(capBlock).toContain('canServeDiff: true');
+    expect(capBlock).toContain('canAct: true');
+    expect(capBlock).toContain('emitsConflicts: true');
+    // autoCloseOnMerge is an opt-in close policy with no wiring — not declared.
+    expect(capBlock).not.toContain('autoCloseOnMerge');
   });
 });
