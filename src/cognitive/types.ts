@@ -11,6 +11,7 @@
 
 import type { AgentId } from "../store/types/index.js";
 import type { TasksAdapter, InboxAdapter } from "../adapters/types.js";
+import type { MCPServerConfig } from "../agent/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Agent Session Types (matches cognitive-core/src/runtime/types.ts)
@@ -78,6 +79,29 @@ export interface CognitiveAgentSpawnConfig {
   cwd?: string;
   timeout?: number;
   onMessage?: (message: CognitiveAgentMessage) => void;
+  /**
+   * MCP servers to mount on the spawned agent (e.g. a per-task tau-env
+   * server). Forwarded verbatim into the macro `AgentManager.spawn`'s
+   * `config.mcpServers`. Optional / back-compat: non-MCP spawns are
+   * unaffected. Matches macro `AgentConfig.mcpServers` (the stdio/http union).
+   */
+  mcpServers?: MCPServerConfig[];
+  /**
+   * Optional completion predicate forwarded into `promptUntilDone`. When it
+   * returns true the agent loop completes externally (without the macro done()
+   * tool) — e.g. a benchmark env wrote its reward sink with done:true. Generic:
+   * the backend has no knowledge of what it reads. Back-compat: absent →
+   * unchanged.
+   */
+  completionSignal?: () => boolean | Promise<boolean>;
+  /**
+   * Optional per-attempt hook invoked BEFORE the agent is driven (and again
+   * before each refinement re-spawn, since refine() spreads this config). Used
+   * to reset per-attempt external state — e.g. delete a benchmark reward sink so
+   * each attempt only sees its OWN completion signal. Back-compat: absent →
+   * unchanged.
+   */
+  beforeSpawn?: () => void | Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────

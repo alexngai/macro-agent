@@ -48,7 +48,7 @@ import type {
   AgentLifecycleEvent,
   AgentConfig,
   ContinueAgentOptions,
-  MCPServerConfig,
+  MCPServerStdioConfig,
 } from "./types.js";
 import { AgentManagerError } from "./types.js";
 import type { RoleRegistry, Capability } from "../roles/types.js";
@@ -285,7 +285,7 @@ export function createAgentManagerV2(
     lineage?: string[];
     sessionId?: string;
     streamId?: string;
-  }): MCPServerConfig {
+  }): MCPServerStdioConfig {
     const env: Record<string, string> = {
       MACRO_AGENT_ID: opts.agentId,
       MACRO_PARENT_ID: opts.parentId,
@@ -759,15 +759,28 @@ export function createAgentManagerV2(
             value: v,
           })),
         },
-        ...(agentConfig?.mcpServers?.map((s) => ({
-          name: s.name,
-          command: s.command,
-          args: s.args ?? [],
-          env: Object.entries(s.env ?? {}).map(([k, v]) => ({
-            name: k,
-            value: v,
-          })),
-        })) ?? []),
+        ...(agentConfig?.mcpServers?.map((s) => {
+          if ("command" in s) {
+            return {
+              name: s.name,
+              command: s.command,
+              args: s.args ?? [],
+              env: Object.entries(s.env ?? {}).map(([k, v]) => ({
+                name: k,
+                value: v,
+              })),
+            };
+          }
+          return {
+            name: s.name,
+            type: s.type,
+            url: s.url,
+            headers: Object.entries(s.headers ?? {}).map(([k, v]) => ({
+              name: k,
+              value: v,
+            })),
+          };
+        }) ?? []),
       ];
 
       // Always-on subsystem MCP servers (the "trinity"). The macro-agent
@@ -1753,63 +1766,169 @@ export function createAgentManagerV2(
     options?: {
       maxFollowUps?: number;
       onUpdate?: (update: ExtendedSessionUpdate) => void;
+      /**
+       * Optional caller-supplied completion predicate. When it returns true the
+       * loop stops consuming, terminates the agent as "completed", and returns
+       * `completedExternally: true` — WITHOUT requiring the macro `done()` tool.
+       *
+       * Checked three ways (all fire terminate + return completedExternally):
+       *   (a) reactively after each streamed update (fast path),
+       *   (b) reactively after each attempt's stream ends (fast path),
+       *   (c) on a CONCURRENT ~2s timer while consuming the stream. (c) is the
+       *       critical path for the live τ rollout: the agent runs the whole
+       *       episode in ONE prompt() call, calls τ's finish, the env writes its
+       *       reward sink (done:true), and then the prompt() stream goes SILENT
+       *       and does NOT close — the async iterator just blocks. With only the
+       *       reactive checks (a)/(b) the predicate is never re-evaluated and
+       *       solve() hangs until the rollout backstop. The concurrent poller
+       *       observes done:true independent of update arrival, flips
+       *       completedExternally, and terminate()s the agent — which ends the
+       *       in-flight prompt() generator (via return or throw, both handled).
+       *
+       * Generic by design: this module has NO knowledge of what the predicate
+       * reads (e.g. an external reward sink). Back-compat: when absent, NO poller
+       * is started and behavior is unchanged — only `done()` detection drives
+       * completion.
+       *
+       * @param pollIntervalMs Override the concurrent poll cadence (default
+       *   2000ms). Primarily a test seam.
+       */
+      isComplete?: () => boolean | Promise<boolean>;
+      pollIntervalMs?: number;
     }
   ): Promise<{
     doneCalled: boolean;
     doneStatus?: string;
+    completedExternally: boolean;
     updates: ExtendedSessionUpdate[];
   }> {
     const maxFollowUps = options?.maxFollowUps ?? 2;
+    const pollIntervalMs = options?.pollIntervalMs ?? 2000;
     const allUpdates: ExtendedSessionUpdate[] = [];
     let doneCalled = false;
     let doneStatus: string | undefined;
+    let completedExternally = false;
 
     let currentMessage = message;
 
     for (let attempt = 0; attempt <= maxFollowUps; attempt++) {
-      for await (const update of prompt(agentId, currentMessage)) {
-        allUpdates.push(update);
-        options?.onUpdate?.(update);
+      // ── Concurrent completion poller ─────────────────────────────────────
+      // Only armed when the caller supplies a predicate (back-compat: no
+      // predicate → no poller, identical behavior). The live failure mode is a
+      // prompt() stream that has gone SILENT but not CLOSED after the episode
+      // externally completed; the reactive per-update check never fires again
+      // because no updates arrive. This timer re-evaluates isComplete()
+      // independent of update arrival. On true it flips completedExternally and
+      // terminate()s the agent, which ends the in-flight prompt() generator
+      // (return or throw) so the for-await below unblocks. The interval is
+      // always cleared in `finally` so no timer leaks across attempts.
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
+      let polling = false;
 
-        // Detect done() tool call from session updates.
-        // acp-factory uses { sessionUpdate: "tool_call", title: "mcp__macro-agent__done" }
-        const uAny = update as any;
-
-        // Check title field (primary detection)
-        if (
-          (uAny.sessionUpdate === "tool_call" || uAny.sessionUpdate === "tool_call_update") &&
-          typeof uAny.title === "string" &&
-          uAny.title.endsWith("__done")
-        ) {
-          doneCalled = true;
-          // Extract status from rawInput (may arrive across multiple updates —
-          // first update has rawInput={}, subsequent has full input)
-          try {
-            const raw = uAny.rawInput;
-            const input =
-              typeof raw === "string" ? JSON.parse(raw) :
-              typeof raw === "object" ? raw :
-              uAny.input;
-            if (input?.status) {
-              doneStatus = input.status;
+      const startPoller = () => {
+        if (!options?.isComplete) return;
+        pollTimer = setInterval(() => {
+          if (polling || completedExternally) return;
+          polling = true;
+          void (async () => {
+            try {
+              if (!completedExternally && options.isComplete && (await options.isComplete())) {
+                completedExternally = true;
+                // Tear down the agent/session. This is what causes the silent
+                // in-flight prompt() async generator to end (return) or throw;
+                // either way the for-await below exits and we break the outer
+                // loop. Best effort — agent may already be stopping.
+                try {
+                  await terminate(agentId, "completed" as any);
+                } catch {
+                  /* ignore */
+                }
+              }
+            } catch {
+              // Predicate errored — leave completion to the reactive checks.
+            } finally {
+              polling = false;
             }
-          } catch {
-            // Best effort — rawInput may not be parseable yet
+          })();
+        }, pollIntervalMs);
+      };
+
+      try {
+        startPoller();
+        for await (const update of prompt(agentId, currentMessage)) {
+          allUpdates.push(update);
+          options?.onUpdate?.(update);
+
+          // External completion predicate (e.g. an env reward sink wrote
+          // done:true). Reactive fast path: checked right after each update so a
+          // long re-prompt loop never starts once the episode has externally
+          // completed. The concurrent poller above covers the silent-stream case
+          // where no further updates arrive.
+          if (options?.isComplete && (await options.isComplete())) {
+            completedExternally = true;
+            break;
+          }
+          // Poller may have flipped the flag concurrently (and already
+          // terminated). Stop consuming immediately.
+          if (completedExternally) break;
+
+          // Detect done() tool call from session updates.
+          // acp-factory uses { sessionUpdate: "tool_call", title: "mcp__macro-agent__done" }
+          const uAny = update as any;
+
+          // Check title field (primary detection)
+          if (
+            (uAny.sessionUpdate === "tool_call" || uAny.sessionUpdate === "tool_call_update") &&
+            typeof uAny.title === "string" &&
+            uAny.title.endsWith("__done")
+          ) {
+            doneCalled = true;
+            // Extract status from rawInput (may arrive across multiple updates —
+            // first update has rawInput={}, subsequent has full input)
+            try {
+              const raw = uAny.rawInput;
+              const input =
+                typeof raw === "string" ? JSON.parse(raw) :
+                typeof raw === "object" ? raw :
+                uAny.input;
+              if (input?.status) {
+                doneStatus = input.status;
+              }
+            } catch {
+              // Best effort — rawInput may not be parseable yet
+            }
+          }
+
+          // Fallback: check older format
+          if (
+            uAny.type === "result" &&
+            uAny.subtype === "tool_result" &&
+            uAny.toolName === "done"
+          ) {
+            doneCalled = true;
+            doneStatus = uAny.result?.status;
           }
         }
-
-        // Fallback: check older format
-        if (
-          uAny.type === "result" &&
-          uAny.subtype === "tool_result" &&
-          uAny.toolName === "done"
-        ) {
-          doneCalled = true;
-          doneStatus = uAny.result?.status;
-        }
+      } catch (err) {
+        // A terminate()-induced stream teardown surfaces here as a throw from
+        // the async generator. When the poller already flipped
+        // completedExternally that's expected — swallow and treat as completion.
+        // Otherwise re-throw: it's a genuine stream error.
+        if (!completedExternally) throw err;
+      } finally {
+        // Always clear the concurrent poller so no timer leaks across attempts
+        // or after return.
+        if (pollTimer) clearInterval(pollTimer);
       }
 
-      if (doneCalled) break;
+      // Re-check after the stream ends in case completion landed exactly as the
+      // attempt's stream drained (the inner break / poller already set the flag
+      // when it fired mid-stream).
+      if (!completedExternally && options?.isComplete && (await options.isComplete())) {
+        completedExternally = true;
+      }
+
+      if (doneCalled || completedExternally) break;
 
       if (attempt < maxFollowUps) {
         currentMessage =
@@ -1817,9 +1936,11 @@ export function createAgentManagerV2(
       }
     }
 
-    // Auto-terminate when done() was called and the handler signaled shouldTerminate.
-    // This closes the lifecycle gap: without this, agents stay in "running" state
-    // after calling done() because nothing triggers terminate().
+    // Auto-terminate when the agent completed — either via the macro done() tool
+    // or via the caller's external completion predicate. This closes the
+    // lifecycle gap: without this, agents stay in "running" state because
+    // nothing triggers terminate(). The external path mirrors the done() path
+    // (terminate as "completed").
     if (doneCalled) {
       const reason = doneStatus === "completed" ? "completed" : (doneStatus ?? "failed");
       try {
@@ -1827,9 +1948,15 @@ export function createAgentManagerV2(
       } catch {
         // Best effort — agent may already be stopping
       }
+    } else if (completedExternally) {
+      try {
+        await terminate(agentId, "completed" as any);
+      } catch {
+        // Best effort — agent may already be stopping
+      }
     }
 
-    return { doneCalled, doneStatus, updates: allUpdates };
+    return { doneCalled, doneStatus, completedExternally, updates: allUpdates };
   }
 
   function getSession(agentId: AgentId): Session | null {

@@ -164,10 +164,27 @@ export interface AgentManager {
       maxFollowUps?: number;
       /** Callback for each update during prompting */
       onUpdate?: (update: ExtendedSessionUpdate) => void;
+      /**
+       * Optional caller-supplied completion predicate. When it returns true the
+       * loop stops early and terminates the agent as "completed" WITHOUT
+       * requiring the macro done() tool. Back-compat: absent → unchanged.
+       *
+       * Evaluated reactively per-update/per-attempt AND on a concurrent timer
+       * (see implementation) so a silent-but-open prompt() stream still
+       * completes. No predicate → no poller, unchanged behavior.
+       */
+      isComplete?: () => boolean | Promise<boolean>;
+      /**
+       * Override the concurrent isComplete() poll cadence in ms (default 2000).
+       * Only meaningful alongside `isComplete`; primarily a test seam.
+       */
+      pollIntervalMs?: number;
     },
   ): Promise<{
     doneCalled: boolean;
     doneStatus?: string;
+    /** True when the caller's isComplete() predicate ended the loop. */
+    completedExternally: boolean;
     updates: ExtendedSessionUpdate[];
   }>;
 
