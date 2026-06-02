@@ -6,16 +6,23 @@ import type { RoleRegistry, RoleDefinition } from "../../roles/types.js";
 
 // ── Mock Helpers ─────────────────────────────────────────────────
 
+// Stand-in for the built-in "generic" role the REAL DefaultRoleRegistry falls
+// back to. Used by resolveRole() below so the mock matches production
+// semantics (resolveRole NEVER throws on a miss).
+const GENERIC_FALLBACK = { name: "generic" } as unknown as RoleDefinition;
+
 function createMockRoleRegistry(): RoleRegistry {
   const roles = new Map<string, RoleDefinition>();
   return {
     registerRole: vi.fn((role: RoleDefinition) => {
       roles.set(role.name, role);
     }),
+    // MUST mirror the real DefaultRoleRegistry.resolveRole(): on an unknown
+    // role it does NOT throw — it logs and returns the GenericRole fallback.
+    // A throwing mock (the old behavior) masked the constructor bug where
+    // analyst registration was gated on resolveRole() throwing.
     resolveRole: vi.fn((name: string) => {
-      const role = roles.get(name);
-      if (!role) throw new Error(`Role not found: ${name}`);
-      return role;
+      return roles.get(name) ?? GENERIC_FALLBACK;
     }),
     getRole: vi.fn((name: string) => roles.get(name)),
     hasCapability: vi.fn(() => true),
@@ -92,10 +99,33 @@ describe("MacroAgentBackend", () => {
       );
     });
 
+    it("registers analyst against a real-semantics registry (resolveRole does NOT throw on miss)", () => {
+      // Regression guard for the live Arm-B bug: the constructor must NOT rely
+      // on resolveRole() throwing to detect a missing analyst role. With a
+      // non-throwing registry (production behavior), analyst must still be
+      // registered, and resolveRole("analyst") must then return analyst —
+      // NOT fall back to "generic" (which would give the spawned agent
+      // all built-in tools + own-workspace + persistent lifecycle, exactly
+      // the conditions that produced 0 env-tool calls and a 600s timeout).
+      const registry = createMockRoleRegistry();
+      const am = createMockAgentManager({
+        getRoleRegistry: vi.fn().mockReturnValue(registry),
+      });
+
+      new MacroAgentBackend(am);
+
+      expect(registry.registerRole).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "analyst" }),
+      );
+      // After construction, the role must resolve to analyst, not generic.
+      expect(registry.resolveRole("analyst").name).toBe("analyst");
+    });
+
     it("skips registration if analyst role already exists", () => {
       const registry = createMockRoleRegistry();
-      // Pre-register analyst
-      (registry.resolveRole as ReturnType<typeof vi.fn>).mockReturnValue({
+      // Pre-register analyst via getRole (the exact-match existence check the
+      // constructor now uses), mirroring the real registry's API.
+      (registry.getRole as ReturnType<typeof vi.fn>).mockReturnValue({
         name: "analyst",
       });
 
@@ -200,6 +230,129 @@ describe("MacroAgentBackend", () => {
         expect.objectContaining({
           customPrompt: "Extra context here",
         }),
+      );
+    });
+
+    it("forwards mcpServers into the raw macro spawn config (Arm B chain)", async () => {
+      const mcpServers = [
+        {
+          name: "tauenv",
+          command: "/venv/bin/python",
+          args: ["-m", "autonomation_tau_bench.mcp_env", "--split", "airline"],
+          env: { TAU_REWARD_FILE: "/tmp/reward.json" },
+        },
+      ];
+
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "handle the customer" },
+        mcpServers,
+      });
+
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ mcpServers }),
+        }),
+      );
+    });
+
+    it("forwards both env and mcpServers together into the raw spawn config", async () => {
+      const mcpServers = [
+        { name: "tauenv", command: "/venv/bin/python", args: ["-m", "x"] },
+      ];
+
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "test" },
+        env: { TAU_REWARD_FILE: "/tmp/r.json" },
+        mcpServers,
+      });
+
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: {
+            env: { TAU_REWARD_FILE: "/tmp/r.json" },
+            mcpServers,
+          },
+        }),
+      );
+    });
+
+    it("invokes beforeSpawn BEFORE driving the agent (per-attempt reset hook)", async () => {
+      // beforeSpawn must run before agentManager.spawn so the env subprocess /
+      // reward sink is reset for THIS attempt. We assert ordering by recording
+      // the call sequence.
+      const order: string[] = [];
+      const beforeSpawn = vi.fn(() => {
+        order.push("beforeSpawn");
+      });
+      const am = createMockAgentManager({
+        spawn: vi.fn().mockImplementation(async () => {
+          order.push("spawn");
+          return { id: "agent_test123", session_id: "session_test123" };
+        }),
+      });
+      const b = new MacroAgentBackend(am);
+
+      await b.spawn({
+        agentType: "claude-code",
+        task: { description: "tau episode" },
+        beforeSpawn,
+      });
+
+      expect(beforeSpawn).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(["beforeSpawn", "spawn"]);
+    });
+
+    it("passes completionSignal into promptUntilDone (S1 threading)", async () => {
+      const completionSignal = vi.fn(() => false);
+
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "tau episode" },
+        completionSignal,
+      });
+
+      await vi.waitFor(() => {
+        expect(agentManager.promptUntilDone).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.any(String),
+          expect.objectContaining({ isComplete: completionSignal }),
+        );
+      });
+    });
+
+    it("treats completedExternally as a success (session → completed) even without done()", async () => {
+      const am = createMockAgentManager({
+        promptUntilDone: vi.fn().mockResolvedValue({
+          doneCalled: false,
+          completedExternally: true,
+          updates: [],
+        }),
+      });
+      const b = new MacroAgentBackend(am);
+
+      const session = await b.spawn({
+        agentType: "claude-code",
+        task: { description: "tau episode" },
+        completionSignal: () => true,
+      });
+
+      await vi.waitFor(async () => {
+        const s = await b.getSession(session.id);
+        expect(s!.state).toBe("completed");
+        expect(s!.error).toBeUndefined();
+      });
+    });
+
+    it("passes config: undefined when neither env nor mcpServers set (M0 back-compat)", async () => {
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "test" },
+      });
+
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({ config: undefined }),
       );
     });
 
