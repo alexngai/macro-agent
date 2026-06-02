@@ -220,6 +220,12 @@ export function createAgentManagerV2(
   const activeSessions = new Map<AgentId, ActiveSession>();
   const agentWorkspaces = new Map<AgentId, Workspace>();
   const lifecycleListeners = new Set<AgentLifecycleCallback>();
+  // In-flight fire-and-forget terminate() promises (e.g. the promptUntilDone
+  // completion poller tears the agent down without awaiting it, to keep
+  // completion latency low). close() awaits these so shutdown cannot return
+  // while a group-kill is still racing — which would let process.exit orphan
+  // the subtree.
+  const pendingTerminations = new Set<Promise<unknown>>();
   let spawnInterceptor: SpawnInterceptor | null = null;
   let isShuttingDown = false;
   let mapServerUrl: string | undefined;
@@ -1825,6 +1831,19 @@ export function createAgentManagerV2(
       let pollTimer: ReturnType<typeof setInterval> | undefined;
       let polling = false;
 
+      // Resolves the instant completion is detected (external predicate OR the
+      // macro done() tool). The attempt is RACED against this signal so it
+      // returns WITHOUT waiting for the prompt() generator to drain or for
+      // terminate() to finish. The prior design relied on terminate() ending
+      // the silent in-flight stream to unblock the for-await; when that teardown
+      // stalled (e.g. a long, busy real episode whose subprocess is slow to die),
+      // promptUntilDone never returned and the macro session stayed "running"
+      // until the multi-hour hard-timer — the refinement "finalization hang".
+      let signalDone: () => void = () => {};
+      const doneSignal = new Promise<void>((resolve) => {
+        signalDone = resolve;
+      });
+
       const startPoller = () => {
         if (!options?.isComplete) return;
         pollTimer = setInterval(() => {
@@ -1834,14 +1853,16 @@ export function createAgentManagerV2(
             try {
               if (!completedExternally && options.isComplete && (await options.isComplete())) {
                 completedExternally = true;
-                // Tear down the agent/session. This is what causes the silent
-                // in-flight prompt() async generator to end (return) or throw;
-                // either way the for-await below exits and we break the outer
-                // loop. Best effort — agent may already be stopping.
-                try {
-                  await terminate(agentId, "completed" as any);
-                } catch {
-                  /* ignore */
+                signalDone();
+                // Tear down the agent/session in the BACKGROUND — never await it
+                // here, so a slow teardown cannot gate the return. Tracked in
+                // pendingTerminations so close() awaits it before shutdown
+                // returns (else a still-racing group-kill is abandoned by a
+                // subsequent process.exit, orphaning the subtree). Best effort.
+                {
+                  const t = terminate(agentId, "completed" as any).catch(() => {});
+                  pendingTerminations.add(t);
+                  void t.finally(() => pendingTerminations.delete(t));
                 }
               }
             } catch {
@@ -1853,23 +1874,19 @@ export function createAgentManagerV2(
         }, pollIntervalMs);
       };
 
-      try {
-        startPoller();
+      // Consume the stream as a background task so a silent-but-open generator
+      // can be raced against the completion signal below.
+      const consume = (async () => {
         for await (const update of prompt(agentId, currentMessage)) {
           allUpdates.push(update);
           options?.onUpdate?.(update);
 
-          // External completion predicate (e.g. an env reward sink wrote
-          // done:true). Reactive fast path: checked right after each update so a
-          // long re-prompt loop never starts once the episode has externally
-          // completed. The concurrent poller above covers the silent-stream case
-          // where no further updates arrive.
+          // External completion predicate (reactive fast path).
           if (options?.isComplete && (await options.isComplete())) {
             completedExternally = true;
+            signalDone();
             break;
           }
-          // Poller may have flipped the flag concurrently (and already
-          // terminated). Stop consuming immediately.
           if (completedExternally) break;
 
           // Detect done() tool call from session updates.
@@ -1897,6 +1914,7 @@ export function createAgentManagerV2(
             } catch {
               // Best effort — rawInput may not be parseable yet
             }
+            signalDone();
           }
 
           // Fallback: check older format
@@ -1907,17 +1925,25 @@ export function createAgentManagerV2(
           ) {
             doneCalled = true;
             doneStatus = uAny.result?.status;
+            signalDone();
           }
         }
+      })();
+      // Prevent an unhandled rejection if we return via doneSignal before the
+      // now-orphaned stream throws from a background teardown.
+      consume.catch(() => {});
+
+      try {
+        startPoller();
+        // Return as soon as EITHER the stream drains naturally OR completion is
+        // signalled — whichever comes first. This is the key change: completion
+        // no longer depends on the generator unblocking.
+        await Promise.race([consume, doneSignal]);
       } catch (err) {
-        // A terminate()-induced stream teardown surfaces here as a throw from
-        // the async generator. When the poller already flipped
-        // completedExternally that's expected — swallow and treat as completion.
-        // Otherwise re-throw: it's a genuine stream error.
-        if (!completedExternally) throw err;
+        // A genuine stream error (not a post-completion teardown) re-throws.
+        if (!completedExternally && !doneCalled) throw err;
       } finally {
-        // Always clear the concurrent poller so no timer leaks across attempts
-        // or after return.
+        // Always clear the concurrent poller so no timer leaks across attempts.
         if (pollTimer) clearInterval(pollTimer);
       }
 
@@ -2101,6 +2127,19 @@ export function createAgentManagerV2(
       });
     }
     activeSessions.clear();
+
+    // Await any in-flight fire-and-forget terminations (e.g. the completion
+    // poller's background teardown) so shutdown does not return while a
+    // group-kill is still racing — otherwise a follow-on process.exit abandons
+    // it and orphans the acp/claude/mcp_env subtree. Bounded by a backstop so a
+    // genuinely stuck close() cannot wedge shutdown.
+    if (pendingTerminations.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...pendingTerminations]),
+        new Promise((resolve) => setTimeout(resolve, 6000)),
+      ]);
+    }
+
     agentWorkspaces.clear();
     lifecycleListeners.clear();
 
