@@ -5,8 +5,8 @@
  *   1. `bootstrap.coordinator: true` (programmatic) auto-spawns a coordinator
  *      that's discoverable via the MAP protocol.
  *   2. `MACRO_BOOTSTRAP_COORDINATOR=true` env var triggers the same path —
- *      this is how `openswarm` / openhive get bootstrap without modifying
- *      openswarm's whitelisted bootConfig pass-through.
+ *      this is how Swarm Runner / OpenHive get bootstrap without modifying
+ *      Swarm Runner's whitelisted bootConfig pass-through.
  *   3. `_macro/spawnAgent` extension forwards the full SpawnAgentOptions
  *      surface (permissionMode, agentType, customPrompt, config, taskRef)
  *      so the agent record carries the requested settings.

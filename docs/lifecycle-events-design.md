@@ -4,7 +4,7 @@
 
 macro-agent V2 has internal lifecycle events (`AgentManager.onLifecycleEvent`) but these don't propagate to:
 1. **OpenHive hub** — needs to see agent spawn/stop for swarm monitoring
-2. **OpenSwarm TUI** — needs events for dashboard updates (agent list, status indicators)
+2. **Swarm Runner TUI** — needs events for dashboard updates (agent list, status indicators)
 3. **TUI store** — expects `macro.status.emitted` events for milestone tracking (currently dormant)
 
 ## Current State

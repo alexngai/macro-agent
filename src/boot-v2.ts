@@ -63,7 +63,7 @@ export interface BootV2Config {
    *   3. `inst_<sha256(cwd)[:12]>` (stable per-project fallback)
    *
    * Explicit `baseDir` overrides all of the above. Hosts that manage their
-   * own storage layout (openswarm spawns hosted swarms with a unique
+   * own storage layout (Swarm Runner spawns hosted swarms with a unique
    * per-spawn data dir) still win by setting `baseDir` directly.
    */
   instanceId?: string;
@@ -253,7 +253,7 @@ export interface BootV2Config {
    *
    * Also driven by env var `MACRO_BOOTSTRAP_COORDINATOR=true` (with
    * optional `MACRO_BOOTSTRAP_CWD=<path>`) when this field is unset —
-   * lets indirect callers (e.g. openswarm host) opt in without modifying
+   * lets indirect callers (e.g. Swarm Runner host) opt in without modifying
    * the bootConfig pass-through whitelist.
    */
   bootstrap?: {
@@ -320,7 +320,8 @@ export interface BootV2Config {
 
     /**
      * Wire-delivered openteams binding from the host (e.g. OpenHive's
-     * spawn manager packing this into `OPENSWARM_BOOTSTRAP_TOKEN`).
+     * spawn manager packing this into `SWARM_RUNNER_BOOTSTRAP_TOKEN`;
+     * legacy `OPENSWARM_BOOTSTRAP_TOKEN` is still accepted).
      * When `team_content` is present, bootV2 spawns the bootstrap
      * agents via TeamRuntimeV2 from the inline manifest — no
      * filesystem write, no MAP fetch. Path B of the OpenHive ↔
@@ -394,6 +395,34 @@ export interface MacroAgentSystemV2 {
 }
 
 // =============================================================================
+// Hosted Bootstrap Helpers
+// =============================================================================
+
+/** @internal */
+export function readHostedOpenteamsBindingFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): NonNullable<NonNullable<BootV2Config["bootstrap"]>["openteams"]> | undefined {
+  const rawBootstrapToken =
+    env.SWARM_RUNNER_BOOTSTRAP_TOKEN ?? env.OPENSWARM_BOOTSTRAP_TOKEN;
+  if (!rawBootstrapToken) return undefined;
+
+  try {
+    const raw = Buffer.from(rawBootstrapToken, "base64").toString("utf-8");
+    const token = JSON.parse(raw) as { openteams?: unknown };
+    if (token.openteams && typeof token.openteams === "object") {
+      return token.openteams as NonNullable<
+        NonNullable<BootV2Config["bootstrap"]>["openteams"]
+      >;
+    }
+  } catch {
+    // Token malformed or missing fields — non-fatal; the bootstrap
+    // coordinator just runs without the openteams binding.
+  }
+
+  return undefined;
+}
+
+// =============================================================================
 // Boot Function
 // =============================================================================
 
@@ -412,7 +441,7 @@ export async function bootV2(
   //      processes in different projects never collide on agents.db, inbox.db,
   //      or the control socket. Reruns in the same project reuse their store.
   //
-  // Hosts that manage their own storage layout (e.g. openswarm spawning
+  // Hosts that manage their own storage layout (e.g. Swarm Runner spawning
   // per-swarm instances under a unique data dir) still win by passing
   // `baseDir` directly. Legacy `~/.macro-agent/*.db` from pre-instancing
   // versions is left alone — new boots start fresh under their own subdir.
@@ -423,39 +452,26 @@ export async function bootV2(
   const baseDir = config.baseDir ?? path.join(os.homedir(), ".macro-agent", instanceId);
 
   // Env-var bridge for hosts that pass through bootConfig with a fixed
-  // whitelist (e.g. openswarm). Translates MACRO_BOOTSTRAP_COORDINATOR /
+  // whitelist (e.g. Swarm Runner). Translates MACRO_BOOTSTRAP_COORDINATOR /
   // MACRO_BOOTSTRAP_CWD / MACRO_BOOTSTRAP_REHYDRATE into the structured
   // bootstrap field if not already set programmatically. Programmatic
   // config wins per field.
-  // OpenHive openteams binding bridge. The host (openswarm) only forwards
+  // OpenHive openteams binding bridge. The host (Swarm Runner) only forwards
   // a fixed-shape `bootConfig` to `bootV2` — it doesn't propagate the
-  // raw OPENSWARM_BOOTSTRAP_TOKEN.openteams block. Pull it out of the env
+  // raw SWARM_RUNNER_BOOTSTRAP_TOKEN.openteams block. Pull it out of the env
   // ourselves so wire-delivered teams (Path B) work without requiring
-  // openswarm to learn a new field.
-  if (
-    process.env.OPENSWARM_BOOTSTRAP_TOKEN &&
-    !config.bootstrap?.openteams
-  ) {
-    try {
-      const raw = Buffer.from(
-        process.env.OPENSWARM_BOOTSTRAP_TOKEN,
-        "base64",
-      ).toString("utf-8");
-      const token = JSON.parse(raw) as { openteams?: unknown };
-      if (token.openteams && typeof token.openteams === "object") {
-        config = {
-          ...config,
-          bootstrap: {
-            ...(config.bootstrap ?? {}),
-            openteams: token.openteams as NonNullable<
-              BootV2Config["bootstrap"]
-            >["openteams"],
-          },
-        };
-      }
-    } catch {
-      // Token malformed or missing fields — non-fatal; the bootstrap
-      // coordinator just runs without the openteams binding.
+  // Swarm Runner to learn a new field. Legacy OPENSWARM_* is accepted as a
+  // fallback while existing deployments migrate.
+  if (!config.bootstrap?.openteams) {
+    const openteams = readHostedOpenteamsBindingFromEnv();
+    if (openteams) {
+      config = {
+        ...config,
+        bootstrap: {
+          ...(config.bootstrap ?? {}),
+          openteams,
+        },
+      };
     }
   }
 

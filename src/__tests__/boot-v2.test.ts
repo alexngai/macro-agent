@@ -8,7 +8,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
-import { bootV2, type MacroAgentSystemV2 } from "../boot-v2.js";
+import {
+  bootV2,
+  readHostedOpenteamsBindingFromEnv,
+  type MacroAgentSystemV2,
+} from "../boot-v2.js";
 
 // Mock acp-factory (no real agent processes in unit tests)
 vi.mock("acp-factory", () => ({
@@ -218,6 +222,54 @@ describe("Boot V2", () => {
       delete process.env.MACRO_BOOTSTRAP_COORDINATOR;
       delete process.env.MACRO_BOOTSTRAP_CWD;
       delete process.env.MACRO_BOOTSTRAP_REHYDRATE;
+      delete process.env.SWARM_RUNNER_BOOTSTRAP_TOKEN;
+      delete process.env.OPENSWARM_BOOTSTRAP_TOKEN;
+    });
+
+    function encodeBootstrapToken(value: unknown): string {
+      return Buffer.from(JSON.stringify(value)).toString("base64");
+    }
+
+    it("reads hosted openteams binding from SWARM_RUNNER_BOOTSTRAP_TOKEN first", () => {
+      const canonical = encodeBootstrapToken({
+        openteams: {
+          team_content: {
+            manifest: { name: "canonical-team" },
+          },
+        },
+      });
+      const legacy = encodeBootstrapToken({
+        openteams: {
+          team_content: {
+            manifest: { name: "legacy-team" },
+          },
+        },
+      });
+
+      const binding = readHostedOpenteamsBindingFromEnv({
+        SWARM_RUNNER_BOOTSTRAP_TOKEN: canonical,
+        OPENSWARM_BOOTSTRAP_TOKEN: legacy,
+      });
+
+      expect((binding?.team_content?.manifest as { name?: string } | undefined)?.name)
+        .toBe("canonical-team");
+    });
+
+    it("falls back to legacy OPENSWARM_BOOTSTRAP_TOKEN for hosted openteams binding", () => {
+      const legacy = encodeBootstrapToken({
+        openteams: {
+          team_content: {
+            manifest: { name: "legacy-team" },
+          },
+        },
+      });
+
+      const binding = readHostedOpenteamsBindingFromEnv({
+        OPENSWARM_BOOTSTRAP_TOKEN: legacy,
+      });
+
+      expect((binding?.team_content?.manifest as { name?: string } | undefined)?.name)
+        .toBe("legacy-team");
     });
 
     it("does not spawn when bootstrap is unset", async () => {

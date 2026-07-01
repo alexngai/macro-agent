@@ -93,7 +93,8 @@ export async function loadTeam(
  * `TemplateLoader.fromObject` from a structured snapshot. Used by hosts
  * that ship the team config inline at boot — most prominently OpenHive's
  * spawn manager packing `bootstrap.openteams.team_content` into the
- * `OPENSWARM_BOOTSTRAP_TOKEN` env var.
+ * `SWARM_RUNNER_BOOTSTRAP_TOKEN` env var. Legacy
+ * `OPENSWARM_BOOTSTRAP_TOKEN` remains a compatibility alias.
  *
  * The result is structurally identical to `loadTeam`'s — same macro-
  * agent enrichment, same validation, same downstream contract.

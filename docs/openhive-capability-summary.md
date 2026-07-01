@@ -28,7 +28,7 @@
    | REST API        |
    +-------+---------+
            |
-     OpenSwarm TUI
+     Swarm Runner TUI
      (MAP client, ACP-over-MAP)
 ```
 
@@ -174,11 +174,11 @@ interface TrajectoryCheckpointPayload {
 
 ---
 
-## 5. OpenSwarm Integration
+## 5. Swarm Runner Integration
 
-**Adapter**: `references/openswarm/src/hosting/adapters/macro-agent.ts` (`MacroAgentAdapter`)
+**Adapter**: `references/swarm-runner/src/hosting/adapters/macro-agent.ts` (`MacroAgentAdapter`)
 
-OpenSwarm can host macro-agent as a managed swarm. The adapter:
+Swarm Runner can host macro-agent as a managed swarm. The adapter:
 
 1. Calls `bootV2()` with config derived from `AdapterConfig`
 2. Enables ACP WebSocket server on `config.port`
@@ -190,9 +190,9 @@ OpenSwarm can host macro-agent as a managed swarm. The adapter:
 
 ### Bootstrap Token Auto-Wiring
 
-**File**: `references/openswarm/src/hosting/config.ts` (lines 222-239)
+**File**: `references/swarm-runner/src/hosting/config.ts` (lines 222-239)
 
-When OpenHive spawns a swarm, it provides a base64-encoded `OPENSWARM_BOOTSTRAP_TOKEN`. The config loader automatically populates MAP sidecar config:
+When OpenHive spawns a swarm, it provides a base64-encoded `SWARM_RUNNER_BOOTSTRAP_TOKEN`. The config loader automatically populates MAP sidecar config:
 
 ```typescript
 // From the token:
@@ -210,7 +210,7 @@ This means: when OpenHive spawns a macro-agent swarm, the swarm automatically co
 
 ### Default adapter
 
-OpenSwarm's `DEFAULT_CONFIG.adapter.id` is `"macro-agent"` — it is the default hosting adapter.
+Swarm Runner's `DEFAULT_CONFIG.adapter.id` is `"macro-agent"` — it is the default hosting adapter.
 
 ---
 
@@ -365,7 +365,7 @@ const system = await bootV2({
 });
 ```
 
-### OpenSwarm Adapter Config
+### Swarm Runner Adapter Config
 
 ```json
 {
@@ -385,7 +385,7 @@ Adapter-specific options (via `AdapterConfig.options`):
 
 ### Bootstrap Token (auto-wiring)
 
-Set `OPENSWARM_BOOTSTRAP_TOKEN` (base64 JSON):
+Set `SWARM_RUNNER_BOOTSTRAP_TOKEN` (base64 JSON):
 ```json
 {
   "version": 1,
