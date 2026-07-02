@@ -13,6 +13,13 @@
  *   2. The classifier recognizes `x-dispatch/work` schema and routes the
  *      prompt to a worker agent (existing or freshly spawned).
  *
+ * Turns that aren't structured `x-dispatch/work` envelopes (e.g.
+ * natural-language spec-discussion replies) are delivered into the inbox as
+ * plain-text messages instead of being dropped. The classifier won't match
+ * them (so no worker spawns), but the delivery still wakes the agent via
+ * TriggerSystemV2 (importance → wake action) so it reads the reply on its
+ * next turn.
+ *
  * Without this bridge, hub-side mail turns never reach macro-agent's
  * dispatcher. The MessagePort is wired to local inbox events only.
  */
@@ -135,14 +142,64 @@ export async function setupMailBridge(
     metadata: { source: "openhive-mail-forward" },
   });
 
+  // Importance derivation shared by the structured-work and plain-text
+  // delivery paths. Defaults to "normal" when the hub doesn't tag the turn.
+  const VALID_IMPORTANCE = ["low", "normal", "high", "urgent"];
+  const deriveImportance = (
+    value: string | undefined,
+  ): "low" | "normal" | "high" | "urgent" =>
+    typeof value === "string" && VALID_IMPORTANCE.includes(value)
+      ? (value as "low" | "normal" | "high" | "urgent")
+      : "normal";
+
   const handler = async (params: unknown): Promise<void> => {
     const turn = (params ?? {}) as MailTurnReceivedParams;
+    const wireImportance = deriveImportance(turn.importance);
     const raw = parseTurnContent(turn.content, turn.content_type);
+
+    // Plain-text (non-JSON) turn — e.g. a natural-language spec-discussion
+    // reply. Previously dropped; now delivered into the local inbox as a
+    // text message so the agent wakes (TriggerSystemV2 maps importance to a
+    // wake action) and reads it on its next turn. The dispatcher's
+    // MessagePort classifier won't match a text payload, so no worker is
+    // spawned — correct for a conversational message. The conversation id
+    // rides along (mirrors the structured path) so the agent's reply can be
+    // threaded back to the right hub conversation.
     if (!raw) {
-      log(
-        `[mail-bridge] Dropping non-JSON turn (conv=${turn.conversation_id ?? "?"} ` +
-          `participant=${turn.participant_id ?? "?"})`,
-      );
+      const text = typeof turn.content === "string" ? turn.content : "";
+      if (!text.trim()) {
+        log(
+          `[mail-bridge] Skipping empty/non-text turn (conv=${turn.conversation_id ?? "?"} ` +
+            `participant=${turn.participant_id ?? "?"})`,
+        );
+        return;
+      }
+      const textContent: Record<string, unknown> = {
+        type: "text",
+        text,
+        ...(turn.conversation_id
+          ? { _conversationId: turn.conversation_id }
+          : {}),
+      };
+      try {
+        await inboxAdapter.send(
+          turn.participant_id ?? "openhive-hub",
+          recipientId,
+          textContent as never,
+          {
+            threadTag: turn.thread_id,
+            importance: wireImportance,
+          },
+        );
+        log(
+          `[mail-bridge] Forwarded text turn ${turn.turn_id ?? "?"} into local inbox`,
+        );
+      } catch (err) {
+        log(
+          `[mail-bridge] Forward failed for text turn ${turn.turn_id ?? "?"}: ` +
+            `${(err as Error).message}`,
+        );
+      }
       return;
     }
 
@@ -171,15 +228,6 @@ export async function setupMailBridge(
       ...content,
       ...(turn.conversation_id ? { _conversationId: turn.conversation_id } : {}),
     };
-
-    // Derive importance from the hub's wire params. Default to "normal"
-    // when the hub doesn't tag the turn (backward compat).
-    const VALID_IMPORTANCE = ["low", "normal", "high", "urgent"];
-    const wireImportance =
-      typeof turn.importance === "string" &&
-      VALID_IMPORTANCE.includes(turn.importance)
-        ? (turn.importance as "low" | "normal" | "high" | "urgent")
-        : "normal";
 
     try {
       await inboxAdapter.send(

@@ -67,11 +67,12 @@ describe("setupMailBridge", () => {
     );
   });
 
-  it("drops non-JSON turns silently", async () => {
+  it("delivers plain-text turns into the inbox as a text message", async () => {
     const logs: string[] = [];
     await setupMailBridge({
       connection: conn,
       inboxAdapter: inbox as any,
+      dispatcherAgentId: "dispatcher:host:1234:abc",
       log: (m) => logs.push(m),
     });
 
@@ -81,10 +82,46 @@ describe("setupMailBridge", () => {
       participant_id: "some-agent",
       content_type: "text/plain",
       content: "hello world",
+      thread_id: "thread-xyz",
+      importance: "high",
+    });
+
+    expect(inbox.send).toHaveBeenCalledOnce();
+    const [from, to, content, opts] = inbox.send.mock.calls[0];
+    expect(from).toBe("some-agent");
+    expect(to).toBe("dispatcher:host:1234:abc");
+    // Delivered as a text message that normalizeContent passes through,
+    // carrying the conversation id for reply threading.
+    expect(content).toMatchObject({
+      type: "text",
+      text: "hello world",
+      _conversationId: "conv-1",
+    });
+    // Not shaped as a work envelope — the classifier must not match it.
+    expect(content).not.toHaveProperty("schema");
+    expect(opts?.threadTag).toBe("thread-xyz");
+    expect(opts?.importance).toBe("high");
+    expect(logs.some((l) => l.includes("Forwarded text turn"))).toBe(true);
+  });
+
+  it("skips empty / whitespace-only text turns", async () => {
+    const logs: string[] = [];
+    await setupMailBridge({
+      connection: conn,
+      inboxAdapter: inbox as any,
+      log: (m) => logs.push(m),
+    });
+
+    await conn._fire({
+      conversation_id: "conv-empty",
+      turn_id: "turn-empty",
+      participant_id: "some-agent",
+      content_type: "text/plain",
+      content: "   ",
     });
 
     expect(inbox.send).not.toHaveBeenCalled();
-    expect(logs.some((l) => l.includes("Dropping"))).toBe(true);
+    expect(logs.some((l) => l.includes("Skipping empty"))).toBe(true);
   });
 
   describe("with dispatcherAgentId", () => {
