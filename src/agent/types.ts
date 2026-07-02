@@ -202,13 +202,34 @@ export interface AgentConfig {
 }
 
 /**
- * MCP server configuration
+ * MCP server configuration.
+ *
+ * A discriminated union over transport. The legacy stdio shape (no `type`,
+ * or `type: "stdio"`) is preserved byte-for-byte; new `http`/`sse` variants
+ * carry a `url` + optional `headers` instead of a `command`. These map
+ * directly onto the ACP wire's `McpServerStdio` / `McpServerHttp` /
+ * `McpServerSse` shapes (see acp-factory `createSession({ mcpServers })`).
  */
-export interface MCPServerConfig {
+export type MCPServerConfig = MCPServerStdioConfig | MCPServerHttpConfig;
+
+/** Stdio transport (legacy default — preserved for M0 compatibility). */
+export interface MCPServerStdioConfig {
   name: string;
+  /** Optional transport discriminant; absent means stdio. */
+  type?: "stdio";
   command: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+/** HTTP (streamable-http) or SSE transport for a remote MCP server. */
+export interface MCPServerHttpConfig {
+  name: string;
+  type: "http" | "sse";
+  /** URL to the remote MCP server. */
+  url: string;
+  /** HTTP headers to set on requests to the server. */
+  headers?: Record<string, string>;
 }
 
 // ─────────────────────────────────────────────────────────────────

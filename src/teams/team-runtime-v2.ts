@@ -532,12 +532,35 @@ export class TeamRuntimeV2 {
           ...options.config,
           mcpServers: [
             ...(options.config?.mcpServers ?? []),
-            ...teamMcpServers.map((s) => ({
-              name: s.name,
-              command: s.command,
-              args: s.args,
-              env: s.env,
-            })),
+            ...teamMcpServers.map((s) => {
+              // openteams' static McpServerEntry is stdio-only, but a
+              // resolved loadout entry may carry a remote transport
+              // (type/url/headers — see openteams McpProviderSpec). Pass
+              // those through unchanged so http/sse loadout servers reach
+              // the spawn conversion; otherwise emit the stdio shape.
+              const remote = s as unknown as {
+                type?: "stdio" | "http" | "sse";
+                url?: string;
+                headers?: Record<string, string>;
+              };
+              if (
+                (remote.type === "http" || remote.type === "sse") &&
+                remote.url
+              ) {
+                return {
+                  name: s.name,
+                  type: remote.type,
+                  url: remote.url,
+                  headers: remote.headers,
+                };
+              }
+              return {
+                name: s.name,
+                command: s.command,
+                args: s.args,
+                env: s.env,
+              };
+            }),
           ],
           env: {
             ...options.config?.env,

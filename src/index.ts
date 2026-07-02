@@ -55,6 +55,8 @@ export {
   AgentManagerError,
   type AgentManagerErrorCode,
   type MCPServerConfig as AgentMCPServerConfig,
+  type MCPServerStdioConfig as AgentMCPServerStdioConfig,
+  type MCPServerHttpConfig as AgentMCPServerHttpConfig,
   type AgentConfig as SpawnAgentConfig,
 } from './agent/types.js';
 

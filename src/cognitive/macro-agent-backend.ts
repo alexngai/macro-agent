@@ -57,11 +57,14 @@ export class MacroAgentBackend {
     this.onSessionComplete = config?.onSessionComplete;
     this.inboxAdapter = config?.inboxAdapter;
 
-    // Register analyst role if not already present
+    // Register analyst role if not already present. Use getRole() (exact match,
+    // returns undefined on a miss) rather than resolveRole(): the real
+    // DefaultRoleRegistry.resolveRole() never throws on an unknown role — it
+    // logs "Role 'analyst' not found, falling back to 'generic'" and returns
+    // GenericRole — so a resolveRole()/try-catch guard would silently skip
+    // registration and every spawn would fall back to GenericRole.
     const registry = this.agentManager.getRoleRegistry();
-    try {
-      registry.resolveRole("analyst");
-    } catch {
+    if (!registry.getRole("analyst")) {
       registry.registerRole(AnalystRole);
     }
   }
@@ -189,6 +192,29 @@ export class MacroAgentBackend {
     config: CognitiveAgentSpawnConfig,
     taskId?: string,
   ): Promise<CognitiveAgentSession> {
+    // Per-attempt reset hook — runs BEFORE the agent is driven so each attempt
+    // (initial spawn AND each refinement re-spawn) starts from a clean external
+    // state (e.g. a deleted benchmark reward sink). Best-effort: a failing hook
+    // must not abort the spawn.
+    if (config.beforeSpawn) {
+      try {
+        await config.beforeSpawn();
+      } catch {
+        // Best effort — reset failure should not block the spawn.
+      }
+    }
+
+    // Forward env and MCP servers into the raw macro spawn's `config`. Build
+    // the AgentConfig only when at least one field is present so non-MCP,
+    // non-env spawns keep passing `config: undefined` (byte-identical to M0).
+    const rawConfig =
+      config.env || config.mcpServers
+        ? {
+            ...(config.env ? { env: config.env } : {}),
+            ...(config.mcpServers ? { mcpServers: config.mcpServers } : {}),
+          }
+        : undefined;
+
     const spawned = await this.agentManager.spawn({
       task: config.task.description,
       task_id: taskId,
@@ -197,7 +223,7 @@ export class MacroAgentBackend {
         ? this.config.coordinatorAgentId
         : null,
       cwd: config.cwd,
-      config: config.env ? { env: config.env } : undefined,
+      config: rawConfig,
       customPrompt: config.systemPromptAdditions,
     });
 
@@ -319,12 +345,18 @@ export class MacroAgentBackend {
             updateSessionFromEvent(session, update);
             config.onMessage?.(session.messages[session.messages.length - 1]!);
           },
+          // Forward the caller's completion predicate (e.g. a benchmark reward
+          // sink wrote done:true). When it fires, promptUntilDone returns
+          // completedExternally:true instead of exhausting maxFollowUps.
+          isComplete: config.completionSignal,
         },
       );
 
       if (session.state === "running") {
-        session.state = result.doneCalled ? "completed" : "failed";
-        if (!result.doneCalled) session.error = "Agent did not call done()";
+        // External completion (predicate) is a success path, same as done().
+        const completed = result.doneCalled || result.completedExternally;
+        session.state = completed ? "completed" : "failed";
+        if (!completed) session.error = "Agent did not call done()";
         session.endTime = new Date();
         session.result = result.doneStatus;
       }

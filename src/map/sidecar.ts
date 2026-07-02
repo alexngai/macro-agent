@@ -23,6 +23,7 @@ import type {
   TaskBridge,
 } from "./types.js";
 import type { AgentLifecycleCallback } from "../agent/types.js";
+import type { CascadeCapability } from "git-cascade/events";
 import {
   REPO_PROTOCOL_VERSION,
   RepoClient,
@@ -65,6 +66,22 @@ export function createMAPSidecar(
   let workspaceManager: RepoManager | null = null;
   let workspaceTransport: RepoClientTransport | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cascade capability — declared only when a git-cascade adapter is wired.
+  // Each flag reflects what macro-agent *actually wired up* (honest declaration):
+  //   - canServeDiff: the diff server is wired alongside the adapter
+  //     (setupCascadeDiffServer answers cascade/diff.request).
+  //   - canAct: the inbound action handler is wired
+  //     (setupCascadeActionHandlers handles x-cascade/request.*).
+  //   - emitsConflicts: the cascade-bridge forwards stream.conflicted /
+  //     stream.conflict_resolved events.
+  // autoCloseOnMerge is omitted — it is an opt-in close policy (default
+  // manual) and macro-agent has no config/wiring for it.
+  const cascadeCapability: CascadeCapability = {
+    canServeDiff: true,
+    canAct: true,
+    emitsConflicts: true,
+  };
 
   // Resolve the workspace capability from env vars. Setting OPENHIVE_WORKSPACE_DECLARE=off
   // disables both explicit declare AND trajectory-handler bootstrap on the hub side.
@@ -173,11 +190,11 @@ export function createMAPSidecar(
             canUpdate: true,
             canList: true,
           },
-          // Diff serving is gated on whether a git-cascade adapter is wired
-          // — without it there are no worktrees to shell out against, so
-          // declaring canServeDiff would just produce timeouts on the hub.
+          // Cascade capability is gated on whether a git-cascade adapter is
+          // wired — without it there are no worktrees to shell out against,
+          // so declaring it would just produce timeouts on the hub.
           ...(gitCascadeAdapter
-            ? { cascade: { canServeDiff: true } }
+            ? { cascade: cascadeCapability }
             : {}),
           workspace: workspaceCapability,
         },
