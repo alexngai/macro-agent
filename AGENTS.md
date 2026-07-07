@@ -17,19 +17,25 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 <!-- OPENSPEC:END -->
 
-<!-- SWARMKIT-WIKI:START -->
-## SwarmKit Ecosystem Knowledge Base
+# macro-agent
 
-This repository participates in the SwarmKit ecosystem. Before changing architecture, package boundaries, cross-repo integrations, protocols, task/dispatch behavior, memory/learning flows, workspace/git behavior, or agent orchestration semantics, query the shared knowledge base:
+Multi-agent orchestration system for spawning and managing hierarchical AI coding agents. Owns agent lifecycle, workspace isolation (git worktrees via `git-cascade`), team topology, and the role/trigger system; delegates messaging to `agent-inbox` and task management to `opentasks`.
 
-```sh
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs context --cwd "$PWD"
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs repo macro-agent
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs interactions macro-agent
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs search "<concept>"
+## Build & test
+
+```bash
+npm install
+npm run build        # tsc -> dist/
+npm test             # vitest (watch mode)
+npx vitest run        # unit tests, single run
+npm run test:e2e      # e2e tests (gated by RUN_E2E_TESTS/RUN_FULL_AGENT_TESTS)
 ```
 
-Canonical ecosystem memory lives at `/Users/alexngai/GitHub/swarmkit-wiki`.
+## Conventions
 
-When this repo changes knowledge that should persist across agents, update the relevant wiki article, semantic model, raw snapshot, graph artifact, or cross-repo interaction data in `swarmkit-wiki`. Do not treat this repo's local `.understand-anything/` cache as canonical; graph artifacts are centralized in `swarmkit-wiki/.understand-anything/graphs/`.
-<!-- SWARMKIT-WIKI:END -->
+- One module per file, exported via `index.ts`; tests colocated in `__tests__/`.
+- camelCase functions/vars, PascalCase types/classes, kebab-case filenames, SCREAMING_SNAKE constants.
+- Typed errors with codes; prefer graceful degradation (e.g. a missing `opentasks` daemon is non-fatal) over hard failures.
+- Team shapes are declarative YAML under `.multiagent/teams/<name>/team.yaml`, not hardcoded per-role logic.
+
+See `CLAUDE.md` for the full architecture guide.
