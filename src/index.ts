@@ -101,9 +101,21 @@ export {
   type WorkspaceManager,
   type Workspace,
 } from './workspace/types.js';
+export {
+  DefaultWorkspaceManager,
+  createWorkspaceManagerWithAdapter,
+} from './workspace/workspace-manager.js';
+export { createGitCascadeAdapter } from './workspace/git-cascade-adapter.js';
 
-// Teams - template seeding
+// Teams - template seeding + multi-team orchestrator
 export { seedDefaultTemplates } from './teams/seed-defaults.js';
+export { TeamManagerV2 } from './teams/team-manager-v2.js';
+
+// Cognitive backend (cognitive-core / OpenHive compute backend)
+export {
+  MacroAgentBackend,
+  createMacroAgentBackend,
+} from './cognitive/macro-agent-backend.js';
 
 // MAP (sidecar + server)
 export { createMAPSidecar, createMAPServerInstance } from './map/index.js';

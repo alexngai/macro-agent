@@ -486,4 +486,4 @@ curl -X POST http://localhost:3000/api/agents/{agentId}/inject \
 1. **Check logs** - Most issues leave traces in debug logs
 2. **Inspect event store** - Event log is source of truth
 3. **Run tests** - `npm test` catches regressions
-4. **File issue** - Report bugs at https://github.com/anthropics/macro-agent/issues
+4. **File issue** - Report bugs at https://github.com/alexngai/macro-agent/issues

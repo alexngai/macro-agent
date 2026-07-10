@@ -39,7 +39,7 @@ macro-agent handles **orchestration** (agent lifecycle, team topology, workspace
 npm install macro-agent
 ```
 
-Peer dependency: [git-cascade](https://github.com/alexngai/git-cascade) `>=0.0.3` for the workspace layer.
+The workspace layer is powered by [git-cascade](https://github.com/alexngai/git-cascade), installed automatically as a dependency.
 
 ---
 
@@ -822,7 +822,7 @@ The V3 redesign shipped as 10 phases plus 6 follow-up fixes. All are in `main`.
 
 ### ACP Protocol Server
 
-Bridges the [Agent Client Protocol](https://github.com/anthropics/acp) to macro-agent so external clients can connect:
+Bridges the [Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) to macro-agent so external clients can connect:
 
 ```typescript
 const system = await bootV2({ acp: { enabled: true, port: 8080 } });
@@ -858,7 +858,7 @@ const system = await bootV2({
 Serve as compute backend for [cognitive-core](https://github.com/alexngai/cognitive-core) / OpenHive:
 
 ```typescript
-import { MacroAgentBackend } from 'macro-agent/cognitive';
+import { MacroAgentBackend } from 'macro-agent';
 const backend = new MacroAgentBackend(system.agentManager, {
   tasksAdapter: system.tasksAdapter,
   inboxAdapter: system.inboxAdapter,
@@ -877,7 +877,7 @@ The swarm is pure compute — atlas, trajectory extraction, and team coordinatio
 | [opentasks](https://github.com/alexngai/opentasks) | Task graph, dependencies, claiming |
 | [acp-factory](https://github.com/alexngai/acp-factory) | Agent process management |
 | [openteams](https://github.com/alexngai/openteams) | Team template resolution |
-| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktrees, stream/fork/merge, Change-Id tracking, cascade rebase (≥0.0.3) |
+| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktrees, stream/fork/merge, Change-Id tracking, cascade rebase |
 | express | REST API server |
 | ws | ACP WebSocket transport |
 
