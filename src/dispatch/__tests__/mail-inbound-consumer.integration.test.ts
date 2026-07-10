@@ -406,17 +406,18 @@ describe("mail-bridge → mail-inbound-consumer integration", () => {
   );
 
   it(
-    "echo-loop containment: when the worker's reply turn is echoed back via mail/turn.received, the bridge drops it without spawning a second worker",
+    "echo-loop containment: an echoed plain-text reply is forwarded as text but does NOT spawn a second worker",
     async () => {
       // Reproduces the runaway-spawn scenario the hub-side echo would
-      // create absent the bridge's plain-text drop:
+      // create if plain-text replies were re-dispatched:
       //   1. Worker A processes dispatch, calls done() with summary.
       //   2. Consumer posts the summary back via mapSidecar.postMailTurn.
       //   3. Hub fires mail.turn.added → forwardTurnToSwarms re-fires the
       //      same conversation back to the swarm as mail/turn.received.
-      //   4. Bridge MUST classify the plain-text content as non-JSON and
-      //      drop it; the consumer MUST NOT see it as a new dispatch and
-      //      spawn worker B.
+      //   4. The bridge forwards the plain-text content into the local inbox
+      //      as a text message (so a conversational reply isn't lost), but the
+      //      consumer's classifier only matches `x-dispatch/work`, so it MUST
+      //      NOT treat the reply as a new dispatch and spawn worker B.
       const { inboxAdapter, inboxEvents, sendSpy } = buildFakeInboxAdapter("dispatcher-echo");
       const conn = buildFakeConnection();
       const am = buildFakeAgentManager("agent-echo");
@@ -462,12 +463,15 @@ describe("mail-bridge → mail-inbound-consumer integration", () => {
       });
       await new Promise((r) => setTimeout(r, 10));
 
-      // Bridge dropped the echo: inbox.send was NOT called for the reply.
-      // (sendSpy was called once for the original dispatch envelope, not
-      // again for the echoed text reply.)
-      expect(sendSpy).toHaveBeenCalledTimes(1);
+      // The echo was forwarded into the inbox as a plain-text message (send
+      // called a second time), NOT re-dispatched: the forwarded payload is a
+      // text message, not an `x-dispatch/work` envelope.
+      expect(sendSpy).toHaveBeenCalledTimes(2);
+      const echoContent = sendSpy.mock.calls[1][2] as Record<string, unknown>;
+      expect(echoContent.type).toBe("text");
+      expect(echoContent.schema).toBeUndefined();
 
-      // Consumer MUST NOT have spawned a second worker.
+      // The critical containment guarantee: no second worker was spawned.
       expect(am.spawnFn).toHaveBeenCalledTimes(1);
     },
   );
