@@ -491,9 +491,12 @@ export function createCronService(
     },
 
     getNextRunTime(): number | null {
-      // This is sync but uses cached state
-      // For async, we'd need to query the store
-      return null; // TODO: implement with store query
+      // Not currently computed: the next fire time depends on per-job schedule
+      // state held in the (async) store, and this accessor is synchronous.
+      // Returns null to indicate "unknown"; callers should not rely on it for
+      // scheduling decisions. Compute the next run from the job's cron
+      // expression directly if you need it.
+      return null;
     },
   };
 }

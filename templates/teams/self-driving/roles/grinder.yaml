@@ -1,0 +1,15 @@
+name: grinder
+extends: worker
+description: "Executes assigned coding tasks"
+prompt: prompts/grinder.md
+
+capabilities_add:
+  - task.claim
+  - git.push
+
+macro_agent:
+  lifecycle:
+    type: ephemeral
+    task_bound: false
+    max_duration_ms: 3600000
+    self_cleanup: true

@@ -1,0 +1,10 @@
+name: judge
+extends: monitor
+description: "Reviews and validates work quality"
+prompt: prompts/judge.md
+
+macro_agent:
+  workspace:
+    type: own
+    branch_pattern: "judge/{agent-id}"
+    cleanup_on_terminate: true
