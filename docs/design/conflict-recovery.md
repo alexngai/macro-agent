@@ -1,8 +1,8 @@
-# Conflict Recovery Design (Draft)
+# Conflict Recovery Design
 
-Parallel design to `docs/workspace-interfaces.md`. Defines how macro-agent handles merge/rebase/cascade conflicts produced by `WorkspaceManager` operations.
+Parallel design to `workspace-interfaces.md`. Defines how macro-agent handles merge/rebase/cascade conflicts produced by `WorkspaceManager` operations.
 
-**Status**: draft for iteration. Not yet implemented.
+**Status**: implemented. The recovery strategies (`defer`, `abandon`, `escalate`, `auto-resolve`, `spawn-resolver`) live in `src/workspace/recovery/`. This document is the design reference; the source is authoritative.
 
 **Relationship to other docs:**
 - `git-cascade-integration-gaps.md` — narrative, established that conflict recovery is its own concern (§9 Open).

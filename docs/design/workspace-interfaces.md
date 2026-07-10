@@ -1,8 +1,8 @@
-# Workspace Interfaces (Draft)
+# Workspace Interfaces
 
-Concrete TypeScript sketches for the redesigned workspace layer described in `docs/git-cascade-integration-gaps.md`. This file is the interface contract; the narrative doc is the rationale.
+Concrete TypeScript contracts for the V3 workspace layer described in `git-cascade-integration-gaps.md`. This file is the interface contract; the narrative doc is the rationale.
 
-**Status**: draft for iteration. Not yet implemented. Not yet ported to call sites.
+**Status**: implemented. These interfaces live in `src/workspace/` (`types-v3.ts`, `topology/`, `landing/`, `recovery/`) and are wired through `TeamManagerV2` / `YamlDrivenTopology`. This document is the design reference; the source is authoritative.
 
 Three things are defined here:
 

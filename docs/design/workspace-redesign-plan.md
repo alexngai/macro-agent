@@ -1,6 +1,6 @@
 # Workspace Redesign: Implementation Plan
 
-Turns the design in `docs/git-cascade-integration-gaps.md`, `docs/workspace-interfaces.md`, and `docs/conflict-recovery.md` into ordered, independently-reviewable work.
+Turns the design in `git-cascade-integration-gaps.md`, `workspace-interfaces.md`, and `conflict-recovery.md` into ordered, independently-reviewable work.
 
 **Status**: active. Phase 0 starting now.
 
@@ -184,7 +184,7 @@ Each phase is 1 PR unless noted.
 
 ## Phase 7 — ConflictRecoveryStrategy infrastructure
 
-**Scope**: implement `ConflictRecoveryStrategy` per `docs/conflict-recovery.md`. Register the 5 built-ins. Wire dispatch into `done()` flow.
+**Scope**: implement `ConflictRecoveryStrategy` per `conflict-recovery.md`. Register the 5 built-ins. Wire dispatch into `done()` flow.
 
 **Subtasks**:
 - Create `src/workspace/recovery/types.ts` with `ConflictRecoveryStrategy`, `ConflictContext`, `ConflictResolution`.
@@ -278,13 +278,13 @@ Tracking as a P0 dependency issue; needs to land before Phase 5.
 
 ## Open items to resolve during implementation
 
-From `docs/workspace-interfaces.md` §11:
+From `workspace-interfaces.md` §11:
 - [ ] **`checkout_stream` semantics** — decide in Phase 5 when we implement `fork_stream` MCP tool: relocate cwd vs re-allocate worktree. Likely: fresh worktree per stream, update `MACRO_STREAM_ID` in agent env on checkout.
 - [ ] **`attach-to-stream` worktree** — decide in Phase 3. Proposal: always fresh worktree on target branch.
 - [ ] **Conflict recovery retry ownership** — decide in Phase 7. Proposal: caller subscribes to `conflict.resolved` event; recovery strategy does not auto-retry.
 - [ ] **Cascade event triggering** — decide in Phase 3. Proposal: `YamlDrivenTopology.onTeamStart` subscribes to `x-cascade/stream.committed` per relevant stream; WakeManager coalesces.
 
-From `docs/conflict-recovery.md` §11:
+From `conflict-recovery.md` §11:
 - [ ] **Cross-team conflicts** — decide in Phase 7. Proposal: owning team's policy; default escalate for federation.
 - [ ] **Recovery observability** — decide in Phase 7. Proposal: optional `RECOVERY_PROGRESS` signal on team channel.
 
