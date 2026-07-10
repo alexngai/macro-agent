@@ -22,6 +22,11 @@ import type { InboxAdapter, TasksAdapter } from "../adapters/types.js";
 import type { MapServerConfig, MAPServerInstance } from "./types.js";
 import type { MacroAgentSystemV2 } from "../boot-v2.js";
 import type { ACPBridge } from "./acp-bridge.js";
+import {
+  assertBindAllowed,
+  isRequestAuthorized,
+  resolveServerToken,
+} from "../auth/server-auth.js";
 
 // =============================================================================
 // Dependencies (same shape as MacroAgentSystemV2, partial)
@@ -56,6 +61,7 @@ export function createMAPServerInstance(
   const host = config.host ?? "127.0.0.1";
   const wsPath = config.path ?? "/map";
   const serverName = config.name ?? "macro-agent";
+  const token = resolveServerToken(config.token);
 
   let mapServer: any = null;
   let httpServer: http.Server | null = null;
@@ -517,8 +523,19 @@ export function createMAPServerInstance(
         }
       });
 
-      // 5. Attach WebSocket server
-      wss = new WebSocketServer({ server: httpServer, path: wsPath });
+      // 5. Attach WebSocket server. Authenticate at the handshake; no-op when
+      // no token is configured (the bind guard keeps such servers loopback-only).
+      wss = new WebSocketServer({
+        server: httpServer,
+        path: wsPath,
+        verifyClient: (info, done) => {
+          if (isRequestAuthorized(token, info.req)) {
+            done(true);
+          } else {
+            done(false, 401, "Unauthorized");
+          }
+        },
+      });
 
       wss.on("connection", (ws: WebSocket) => {
         connectionCount++;
@@ -684,6 +701,7 @@ export function createMAPServerInstance(
       }
 
       // 8. Start listening
+      assertBindAllowed("map", host, token);
       await new Promise<void>((resolve) => {
         httpServer!.listen(port, host, () => {
           const addr = httpServer!.address() as { port: number };

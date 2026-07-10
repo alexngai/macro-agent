@@ -284,6 +284,12 @@ export interface MapServerConfig {
   path?: string;
   /** Server name for MAP protocol (default: "macro-agent") */
   name?: string;
+  /**
+   * Bearer token required to open a connection. Falls back to the
+   * `MACRO_SERVER_TOKEN` env var. When unset, the server refuses to bind to a
+   * non-loopback host (see auth/server-auth).
+   */
+  token?: string;
 }
 
 /** MAP server instance for accepting inbound MAP connections */

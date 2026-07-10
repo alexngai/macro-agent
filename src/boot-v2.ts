@@ -525,8 +525,10 @@ export async function bootV2(
     };
   }
 
-  // Ensure base directory exists
-  fs.mkdirSync(baseDir, { recursive: true });
+  // Ensure base directory exists. Create it owner-only (0o700): it holds the
+  // control socket, SQLite stores, and inbox socket, none of which should be
+  // reachable by other local users on a multi-user host.
+  fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
 
   // 1. Agent Store (minimal SQLite)
   const agentStorePath = path.join(baseDir, "agents.db");
@@ -920,6 +922,7 @@ export async function bootV2(
     apiServer = createApiServer(systemRef, {
       port: config.api.port,
       host: config.api.host,
+      token: config.serverToken,
     });
     await apiServer.start();
   }
@@ -933,6 +936,7 @@ export async function bootV2(
       port: config.acp.port,
       host: config.acp.host,
       path: config.acp.path,
+      token: config.serverToken,
     });
     await acpServer.start();
   }
@@ -956,6 +960,7 @@ export async function bootV2(
           host: config.mapServer.host,
           path: config.mapServer.path,
           name: config.mapServer.name,
+          token: config.serverToken,
         },
       );
       await mapServerInstance.start();

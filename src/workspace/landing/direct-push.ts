@@ -13,7 +13,7 @@
  * @module workspace/landing/direct-push
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import type {
   LandingStrategy,
   LandingContext,
@@ -21,26 +21,46 @@ import type {
 } from '../types-v3.js';
 import type { WorkspaceManager } from '../types.js';
 import type { GitCascadeAdapter } from '../git-cascade-adapter.js';
+import { assertSafeGitRef, GitInputError } from '../../util/git-safety.js';
 
 export class DirectPushStrategy implements LandingStrategy {
   readonly name = 'direct-push';
 
   async land(ctx: LandingContext): Promise<MergeResult> {
-    const targetBranch = (ctx.strategyConfig?.target_branch as string | undefined) ?? 'main';
-    const remote = (ctx.strategyConfig?.remote as string | undefined) ?? 'origin';
+    // `target_branch`/`remote` come from team YAML `landing_config`, which may
+    // be attacker-influenced (e.g. a shared team template). Validate them as
+    // plain refs and invoke git via execFileSync array args (no shell) so
+    // they can never be a command-injection sink.
+    let targetBranch: string;
+    let remote: string;
+    try {
+      targetBranch = assertSafeGitRef(
+        (ctx.strategyConfig?.target_branch as string | undefined) ?? 'main',
+        'target_branch',
+      );
+      remote = assertSafeGitRef(
+        (ctx.strategyConfig?.remote as string | undefined) ?? 'origin',
+        'remote',
+      );
+    } catch (err) {
+      if (err instanceof GitInputError) {
+        return { success: false, error: err.message };
+      }
+      throw err;
+    }
     const maxRetries = (ctx.strategyConfig?.max_retries as number | undefined) ?? 3;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        execSync(`git fetch ${remote} ${targetBranch}`, {
+        execFileSync('git', ['fetch', remote, targetBranch], {
           cwd: ctx.sourceWorktree,
           stdio: 'pipe',
         });
-        execSync(`git rebase ${remote}/${targetBranch}`, {
+        execFileSync('git', ['rebase', `${remote}/${targetBranch}`], {
           cwd: ctx.sourceWorktree,
           stdio: 'pipe',
         });
-        execSync(`git push ${remote} HEAD:${targetBranch}`, {
+        execFileSync('git', ['push', remote, `HEAD:${targetBranch}`], {
           cwd: ctx.sourceWorktree,
           stdio: 'pipe',
         });
@@ -49,7 +69,7 @@ export class DirectPushStrategy implements LandingStrategy {
         // (OpenHive cascade-bridge translates this to x-cascade/stream.pushed
         // since trunk pushes don't fire stream.merged).
         try {
-          const pushedCommit = execSync('git rev-parse HEAD', {
+          const pushedCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
             cwd: ctx.sourceWorktree,
             encoding: 'utf-8',
           }).trim();

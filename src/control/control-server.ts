@@ -54,6 +54,15 @@ export class ControlServer {
     return new Promise((resolve, reject) => {
       this.server!.on("error", reject);
       this.server!.listen(this.socketPath, () => {
+        // Restrict the control socket to the owning user. It is an
+        // unauthenticated RPC endpoint that can spawn/terminate agents, so on a
+        // multi-user host it must not be reachable by other local users.
+        try {
+          fs.chmodSync(this.socketPath, 0o600);
+        } catch {
+          // chmod is unsupported on some platforms (e.g. Windows named pipes);
+          // the socket still works, it just isn't permission-restricted there.
+        }
         resolve();
       });
     });

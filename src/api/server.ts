@@ -6,27 +6,22 @@
  * @module api/server
  */
 
-import express, { type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import type { Server } from "node:http";
 import type { MacroAgentSystemV2 } from "../boot-v2.js";
 import type { ApiServer, ApiServerConfig } from "./types.js";
+import {
+  assertBindAllowed,
+  isRequestAuthorized,
+  resolveServerToken,
+} from "../auth/server-auth.js";
+import { collectMetrics } from "../metrics/index.js";
 
 // =============================================================================
-// Helpers
+// Fallback metrics
 // =============================================================================
 
-/** Extract a single string from Express v5 param/query (string | string[]). */
-function str(value: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
-  return undefined;
-}
-
-// =============================================================================
-// Placeholder metrics (will be replaced when metrics module lands)
-// =============================================================================
-
-interface MetricsSnapshot {
+interface FallbackMetricsSnapshot {
   agents: {
     total: number;
     running: number;
@@ -43,10 +38,15 @@ interface MetricsSnapshot {
   collectedAt: string;
 }
 
-async function collectMetricsPlaceholder(
+/**
+ * Minimal metrics computed only from the agent store and task adapter. Used as
+ * a graceful fallback when the full metrics collector is unavailable (e.g. the
+ * control/trigger subsystems aren't wired in a given embedding).
+ */
+async function collectFallbackMetrics(
   system: MacroAgentSystemV2,
   startTime: number
-): Promise<MetricsSnapshot> {
+): Promise<FallbackMetricsSnapshot> {
   const agents = system.agentStore.listAgents();
   const running = agents.filter((a) => a.state === "running").length;
   const stopped = agents.filter((a) => a.state === "stopped").length;
@@ -66,16 +66,22 @@ async function collectMetricsPlaceholder(
   }
 
   return {
-    agents: {
-      total: agents.length,
-      running,
-      stopped,
-      failed,
-    },
+    agents: { total: agents.length, running, stopped, failed },
     tasks: taskMetrics,
     uptime: (Date.now() - startTime) / 1000,
     collectedAt: new Date().toISOString(),
   };
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/** Extract a single string from Express v5 param/query (string | string[]). */
+function str(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return undefined;
 }
 
 // =============================================================================
@@ -88,10 +94,24 @@ export function createApiServer(
 ): ApiServer {
   const port = config?.port ?? 3000;
   const host = config?.host ?? "127.0.0.1";
+  const token = resolveServerToken(config?.token);
   const startTime = Date.now();
 
   const app = express();
   app.use(express.json());
+
+  // ── Auth ────────────────────────────────────────────────────────
+  // When a token is configured, require it on every route except the health
+  // check. When it isn't, the bind guard in start() keeps the server
+  // loopback-only, so local development needs no token.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path === "/api/health") return next();
+    if (!isRequestAuthorized(token, req)) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    next();
+  });
 
   // ── Health ──────────────────────────────────────────────────────
 
@@ -269,15 +289,13 @@ export function createApiServer(
 
   app.get("/api/metrics", async (_req: Request, res: Response) => {
     try {
-      // Try real metrics module first, fall back to placeholder
-      let snapshot: MetricsSnapshot;
+      // Prefer the full collector; fall back to store-only metrics if the
+      // control/trigger subsystems aren't available in this embedding.
+      let snapshot: unknown;
       try {
-        // Dynamic import — module may not exist yet (built in parallel)
-        const metricsPath = "../metrics/metrics.js";
-        const metricsModule = await (import(metricsPath) as Promise<any>);
-        snapshot = await metricsModule.collectMetrics(system, startTime);
+        snapshot = await collectMetrics(system, startTime);
       } catch {
-        snapshot = await collectMetricsPlaceholder(system, startTime);
+        snapshot = await collectFallbackMetrics(system, startTime);
       }
       res.json(snapshot);
     } catch (err: any) {
@@ -358,9 +376,13 @@ export function createApiServer(
     app,
 
     async start(): Promise<void> {
+      assertBindAllowed("api", host, token);
       return new Promise((resolve) => {
         server = app.listen(port, host, () => {
-          console.log(`[api] Listening on ${host}:${port}`);
+          console.log(
+            `[api] Listening on ${host}:${port}` +
+              (token ? " (auth required)" : " (loopback, no auth)"),
+          );
           resolve();
         });
       });

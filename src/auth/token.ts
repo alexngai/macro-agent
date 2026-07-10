@@ -24,14 +24,15 @@ export function generateToken(bytes = 32): string {
 
 /**
  * Constant-time string comparison to prevent timing attacks.
+ *
+ * Both inputs are hashed to a fixed-length digest before comparison so the
+ * running time does not depend on the input lengths (a raw length check would
+ * leak the secret's length via timing).
  */
 export function secureCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  return crypto.timingSafeEqual(bufA, bufB);
+  const digestA = crypto.createHash("sha256").update(a).digest();
+  const digestB = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(digestA, digestB);
 }
 
 // =============================================================================

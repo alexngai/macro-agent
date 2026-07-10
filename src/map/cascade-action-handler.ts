@@ -12,7 +12,9 @@
  * @module map/cascade-action-handler
  */
 
+import { execFileSync } from 'node:child_process';
 import type { GitCascadeAdapter } from '../workspace/git-cascade-adapter.js';
+import { assertSafeGitRef, GitInputError } from '../util/git-safety.js';
 
 export interface CascadeActionConnection {
   onNotification(
@@ -145,13 +147,23 @@ export function setupCascadeActionHandlers(
     const worktreePath = findWorktreeForStream(p.stream_id);
     if (!worktreePath) return;
 
-    const remote = p.remote ?? 'origin';
+    // `remote` and `target_ref` are hub-controlled and were previously
+    // interpolated into a `git push` shell string — a command-injection sink.
+    // Validate them as plain refs and invoke git via execFileSync array args
+    // (no shell) so metacharacters cannot be interpreted.
+    let remote: string;
+    let targetRef: string;
     const streamBranch = `stream/${p.stream_id}`;
-    const targetRef = p.target_ref ?? streamBranch;
+    try {
+      remote = assertSafeGitRef(p.remote ?? 'origin', 'remote');
+      targetRef = assertSafeGitRef(p.target_ref ?? streamBranch, 'target_ref');
+    } catch (err) {
+      if (err instanceof GitInputError) return; // reject unsafe push silently
+      throw err;
+    }
 
     try {
-      const { execSync } = require('child_process');
-      execSync(`git push ${remote} ${streamBranch}:refs/heads/${targetRef}`, {
+      execFileSync('git', ['push', '--', remote, `${streamBranch}:refs/heads/${targetRef}`], {
         cwd: worktreePath,
         stdio: 'pipe',
         encoding: 'utf-8',
@@ -160,7 +172,7 @@ export function setupCascadeActionHandlers(
       adapter.notifyStreamPushed?.({
         streamId: p.stream_id,
         agentId: 'hub-request',
-        pushedCommit: execSync('git rev-parse HEAD', {
+        pushedCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
           cwd: worktreePath,
           encoding: 'utf-8',
         }).trim(),
