@@ -1,4 +1,45 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Local reference repos (kept on disk per the multi-repo workflow, not tracked)
+references/
+vendor/
+
+# Agent / orchestration runtime state
 .multiagent/
 .omc/
+.opentasks/
+.sudocode/
+.sessionlog/
+
+# Local Claude Code config (keep shared commands, drop personal settings/hooks)
+.claude/settings.json
+.claude/settings.local.json
+
+# Databases (SQLite stores)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
