@@ -74,15 +74,35 @@ export interface FederationPeer {
 // =============================================================================
 
 /**
+ * Extract the system id from a federated sender address (`agentId@systemId`).
+ * Returns `undefined` for a local sender (no `@systemId` suffix).
+ */
+function parseSenderSystem(senderId: string | undefined): string | undefined {
+  if (!senderId) return undefined;
+  const at = senderId.lastIndexOf("@");
+  if (at < 0) return undefined;
+  const system = senderId.slice(at + 1);
+  return system.length > 0 ? system : undefined;
+}
+
+/**
  * Handle incoming remote_spawn_request events from federated instances.
  *
  * When a remote instance sends a spawn request via inbox, this handler
  * spawns the agent locally and sends a confirmation back.
+ *
+ * Spawns are honored only for senders on an explicitly allowlisted remote
+ * system (`allowedSystems`). This fails closed: an empty/omitted allowlist
+ * rejects every request. It is deliberately stricter than agent-inbox's
+ * transport trust (which treats an empty allowlist as open federation) and
+ * also blocks a local agent from driving a spawn through this path, which
+ * would otherwise bypass the MCP capability gate.
  */
 export function createRemoteSpawnHandler(
   agentManager: AgentManager,
   inboxAdapter: InboxAdapter,
-  systemId: string
+  systemId: string,
+  allowedSystems?: string[]
 ) {
   return async (event: InboxDeliveryEvent) => {
     const { message } = event;
@@ -94,6 +114,22 @@ export function createRemoteSpawnHandler(
       content?.event !== "remote_spawn_request" ||
       event.agentId !== `system@${systemId}`
     ) {
+      return;
+    }
+
+    // Fail-closed sender validation (see the JSDoc above).
+    const senderSystem = parseSenderSystem(message.sender_id);
+    if (!senderSystem) {
+      console.warn(
+        `[federation] Rejected remote_spawn_request from non-federated sender '${message.sender_id}'`
+      );
+      return;
+    }
+    if (!allowedSystems || !allowedSystems.includes(senderSystem)) {
+      console.warn(
+        `[federation] Rejected remote_spawn_request from untrusted system '${senderSystem}' ` +
+          `(allowedSystems: ${allowedSystems && allowedSystems.length ? allowedSystems.join(", ") : "none"})`
+      );
       return;
     }
 
@@ -166,7 +202,8 @@ export function setupFederation(
   const handler = createRemoteSpawnHandler(
     agentManager,
     inboxAdapter,
-    config.systemId
+    config.systemId,
+    config.trust?.allowedSystems
   );
 
   inboxAdapter.onDelivery(handler);
