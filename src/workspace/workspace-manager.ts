@@ -28,8 +28,6 @@ import type {
   WorkspaceEvent,
   WorkspaceEventCallback,
 } from './types.js';
-import type { MergeQueueInterface } from './merge-queue/types.js';
-import { MergeQueue } from './merge-queue/merge-queue.js';
 import { execSync } from 'child_process';
 
 /**
@@ -66,7 +64,6 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   private readonly workspaces: Map<AgentId, Workspace> = new Map();
   private readonly agentToStream: Map<AgentId, StreamId> = new Map();
   private readonly eventListeners: Set<WorkspaceEventCallback> = new Set();
-  private mergeQueue: MergeQueue | null = null;
   private pool: WorktreePool | null = null;
 
   /**
@@ -587,25 +584,6 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
   // ─────────────────────────────────────────────────────────────────────────────
   // Merge Queue
   // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Get the merge queue for coordinating worker merges.
-   *
-   * The merge queue is lazily initialized on first access and uses
-   * the same database as the git-cascade adapter.
-   *
-   * @returns MergeQueue instance
-   */
-  getMergeQueue(): MergeQueueInterface {
-    if (!this.mergeQueue) {
-      this.mergeQueue = new MergeQueue({
-        db: this.adapter.db,
-        tablePrefix: 'macro_',  // Use different prefix from git-cascade tables
-        initSchema: true,
-      });
-    }
-    return this.mergeQueue;
-  }
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Worktree Pool
@@ -1464,11 +1442,6 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     this.eventListeners.clear();
     this.workspaces.clear();
     this.agentToStream.clear();
-    // Close merge queue if it was initialized
-    if (this.mergeQueue) {
-      this.mergeQueue.close();
-      this.mergeQueue = null;
-    }
     // Close pool if it was initialized
     if (this.pool) {
       this.pool.close().catch((error: unknown) => {
@@ -1489,11 +1462,6 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     this.eventListeners.clear();
     this.workspaces.clear();
     this.agentToStream.clear();
-    // Close merge queue if it was initialized
-    if (this.mergeQueue) {
-      this.mergeQueue.close();
-      this.mergeQueue = null;
-    }
     // Close pool if it was initialized
     if (this.pool) {
       await this.pool.close();

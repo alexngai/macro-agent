@@ -15,7 +15,6 @@
  * Scenarios verified:
  * - Boot with WorkspaceManager wired correctly
  * - Worker spawn creates worktree (capability-based)
- * - Worker terminate submits merge request to (legacy) MergeQueue
  * - Cascade terminate cleans up child worktrees
  * - Coordinator creates integration stream via `workspace.stream` capability
  *
@@ -229,60 +228,6 @@ describeFn("Workspace Lifecycle E2E", () => {
       expect(ws).not.toBeNull();
       expect(ws!.role).toBe("worker");
       expect(ws!.path).toBe(record!.workspace_path);
-    });
-  });
-
-  // ── Test 3: Worker terminate submits merge request ──────────
-
-  describe("MERGE: Worker terminate submits merge request", () => {
-    it("should submit a merge request when worker terminates with completed", async () => {
-      // Create stream
-      const coordId = "coord-merge-1";
-      const streamId = workspaceManager.createIntegrationStream(coordId, {
-        name: "merge-feature",
-      });
-
-      // Pre-create git-cascade task
-      const dpTaskId = workspaceManager.createTask(streamId, {
-        title: "Do work for merge",
-      });
-
-      // Spawn worker
-      const worker = await system.agentManager.spawn({
-        task: "Do work for merge",
-        role: "worker",
-        streamId,
-        gitCascadeTaskId: dpTaskId,
-        capabilities: ["workspace.worktree"],
-      });
-
-      const record = system.agentStore.getAgent(worker.id)!;
-      const worktreePath = record.workspace_path!;
-
-      // Simulate a commit in the worktree
-      fs.writeFileSync(
-        path.join(worktreePath, "change.txt"),
-        "some changes\n"
-      );
-      execSync("git add .", { cwd: worktreePath, stdio: "pipe" });
-      execSync('git commit -m "Worker changes"', {
-        cwd: worktreePath,
-        stdio: "pipe",
-      });
-
-      // Terminate with "completed"
-      await system.agentManager.terminate(worker.id, "completed");
-
-      // Check merge queue has an entry
-      const mergeQueue = workspaceManager.getMergeQueue();
-      const pending = mergeQueue.getPending(streamId);
-      expect(pending.length).toBeGreaterThanOrEqual(1);
-
-      const entry = pending.find(
-        (e) => e.workerAgentId === worker.id
-      );
-      expect(entry).toBeDefined();
-      expect(entry!.streamId).toBe(streamId);
     });
   });
 

@@ -42,9 +42,7 @@ export class QueueToBranchStrategy implements LandingStrategy {
 
     const priority = (ctx.strategyConfig?.priority as number | undefined) ?? 100;
 
-    // Access the adapter through the WorkspaceManager's getMergeQueue shim.
-    // Direct call via the git-cascade adapter is made through a method on the
-    // manager that we expose for strategies.
+    // Submit to git-cascade.s built-in merge queue via the underlying adapter.
     try {
       // Use the underlying adapter via the DefaultWorkspaceManager
       const adapter = (ws as unknown as { adapter?: unknown }).adapter;

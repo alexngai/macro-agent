@@ -1093,14 +1093,10 @@ export function createAgentManagerV2(
 
     // Land the worker's work if completed with a workspace.
     //
-    // V3 path (preferred): look up the role's YAML landing strategy via
-    // TopologyPolicy.getRoleConfig and dispatch through
-    // WorkspaceManager.land(). This fires cascade events (stream.merged or
-    // queue.added) so the hub sees the work. Landing = 'none' short-circuits.
-    //
-    // Legacy fallback: if no TopologyPolicy is wired or it can't resolve a
-    // landing for this role, submit to the legacy MergeQueue as before.
-    // Keeps pre-V3 programmatic callers + tests that bypass YAML working.
+    // Look up the role's YAML landing strategy via TopologyPolicy.getRoleConfig
+    // and dispatch through WorkspaceManager.land(). This fires cascade events
+    // (stream.merged or queue.added) so the hub sees the work. A role with no
+    // configured landing (or `landing: none`) short-circuits — nothing lands.
     if (
       workspaceManager &&
       agentWorkspaces.has(agentId) &&
@@ -1133,21 +1129,10 @@ export function createAgentManagerV2(
             // and strategy errors surface via WorkspaceEvent emission and
             // the strategy's own logs.
           }
-        } else {
-          try {
-            const mergeQueue = workspaceManager.getMergeQueue();
-            if (mergeQueue) {
-              mergeQueue.submit({
-                streamId: ws.streamId,
-                workerBranch: ws.branch,
-                taskId: record.task_id ?? agentId,
-                workerAgentId: agentId,
-              });
-            }
-          } catch {
-            // Non-fatal merge queue submission failure
-          }
         }
+        // No YAML landing configured for this role → nothing to land (matches
+        // `landing: none`). git-cascade's merge queue is driven by the
+        // `queue-to-branch` LandingStrategy, not a fallback here.
       }
     }
 

@@ -23,7 +23,6 @@ import type {
   McpServerEntry,
   PeerConnection,
 } from "./types.js";
-import type { IntegrationStrategy } from "../workspace/strategies/types.js";
 import type { InboxAdapter, SignalFilterFn, EmissionValidatorFn } from "../adapters/types.js";
 import type { TasksAdapter } from "../adapters/types.js";
 import type { WorkspaceManager } from "../workspace/types.js";
@@ -87,7 +86,6 @@ export class TeamRuntimeV2 {
   private companionAgentIds: string[] = [];
   private roleRegistry: RoleRegistry;
   private lifecycleUnsubscribe?: () => void;
-  private integrationStrategy?: IntegrationStrategy;
   private scalingTimer?: ReturnType<typeof setInterval>;
   private lastScaleUpTime = 0;
   private teamStreamId?: string;
@@ -170,40 +168,6 @@ export class TeamRuntimeV2 {
       }
       this.roleRegistry.registerRole(rd);
     }
-
-    // 2. Instantiate integration strategy
-    try {
-      const { defaultStrategyRegistry } = await import(
-        "../workspace/strategies/registry.js"
-      );
-      const strategyName =
-        this.resolved.macroAgent.integration?.strategy ?? "queue";
-      const strategyConfig =
-        (this.resolved.macroAgent.integration?.config as Record<string, unknown>) ?? {};
-      this.integrationStrategy = defaultStrategyRegistry.get(
-        strategyName,
-        strategyConfig
-      );
-      if (this.integrationStrategy.initialize) {
-        await this.integrationStrategy.initialize();
-      }
-
-      // Wire merge queue to queue strategy
-      if (
-        this.services.workspaceManager &&
-        strategyName === "queue" &&
-        "setMergeQueue" in this.integrationStrategy
-      ) {
-        const mergeQueue = this.services.workspaceManager.getMergeQueue();
-        (
-          this.integrationStrategy as {
-            setMergeQueue(q: typeof mergeQueue): void;
-          }
-        ).setMergeQueue(mergeQueue);
-      }
-    } catch {
-      // Strategy instantiation is best-effort
-    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -239,7 +203,7 @@ export class TeamRuntimeV2 {
     this.rootAgentId = root.id;
 
     // 1b. Set up workspace integration
-    this.setupWorkspaceIntegration(root.id as AgentId);
+    this.setupWorkspaceIntegration();
 
     // 2. Spawn companions
     const companionIds: string[] = [];
@@ -301,13 +265,6 @@ export class TeamRuntimeV2 {
       clearInterval(this.scalingTimer);
       this.scalingTimer = undefined;
     }
-    if (this.integrationStrategy?.close) {
-      try {
-        await this.integrationStrategy.close();
-      } catch {
-        // Best-effort
-      }
-    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -346,9 +303,6 @@ export class TeamRuntimeV2 {
     return [...this.companionAgentIds];
   }
 
-  getIntegrationStrategy(): IntegrationStrategy | undefined {
-    return this.integrationStrategy;
-  }
 
   getTeamStreamId(): string | undefined {
     return this.teamStreamId;
@@ -864,80 +818,23 @@ Focus on correctness — your changes go live immediately.`);
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Workspace Integration (simplified — no merge request polling)
+  // Workspace Integration
   // ─────────────────────────────────────────────────────────────
 
-  private setupWorkspaceIntegration(rootAgentId: AgentId): void {
+  private setupWorkspaceIntegration(): void {
     const { workspaceManager } = this.services;
-    if (!workspaceManager || !this.integrationStrategy) return;
+    if (!workspaceManager) return;
 
-    // V3 coexistence: if TeamManagerV2 has already wired a YamlDrivenTopology
-    // from `macro_agent.workspace`, that policy owns the team root stream.
-    // Don't create a second one via the legacy createIntegrationStream.
-    const hasV3Topology =
-      typeof (
-        this.services.agentManager as {
-          getTopologyPolicy?: () => unknown;
-        }
-      ).getTopologyPolicy === 'function';
-    // AgentManager doesn't expose a getter today, so detect indirectly: a
-    // V3-wired team has already created a stream owned by `team:<name>`.
+    // The YamlDrivenTopology (wired by TeamManagerV2 from
+    // `macro_agent.workspace`) owns the team root stream. Just record its id;
+    // landing/integration is handled per-role by LandingStrategy at done()
+    // time, not by a merge-queue polling loop here.
     const existingTeamRoot = workspaceManager
       .listStreams({ ownerId: `team:${this.manifest.name}` } as never)
       .find((s: { name: string }) => s.name === this.manifest.name);
 
     if (existingTeamRoot) {
       this.teamStreamId = existingTeamRoot.id;
-      return;
     }
-
-    try {
-      this.teamStreamId = workspaceManager.createIntegrationStream(
-        rootAgentId,
-        { name: this.manifest.name, forkFrom: "main" }
-      );
-    } catch {
-      return; // Workspace isolation unavailable
-    }
-
-    // Subscribe to merge queue events — wake integrator on mr:submitted
-    try {
-      const mergeQueue = workspaceManager.getMergeQueue();
-      if (mergeQueue?.onEvent) {
-        mergeQueue.onEvent((event) => {
-          if (event.type !== "mr:submitted") return;
-
-          for (const [agentId, roleName] of this.agentRoleMap) {
-            const resolved = this.resolved.resolvedRoles.get(roleName);
-            const caps = resolved?.capabilities ?? [];
-            if (caps.includes(WORKSPACE_CAPABILITIES.INTEGRATE)) {
-              try {
-                // prompt() returns AsyncIterable — drain in background (fire-and-forget)
-                const iter = this.services.agentManager.prompt(
-                  agentId,
-                  `Merge request submitted. Process the merge queue.`
-                );
-                (async () => {
-                  try {
-                    for await (const _ of iter) { /* drain */ }
-                  } catch {
-                    // Best-effort wake — ignore errors
-                  }
-                })();
-              } catch {
-                // Best-effort wake
-              }
-              break;
-            }
-          }
-        });
-      }
-    } catch {
-      // Merge queue not available
-    }
-
-    // NOTE: No merge request polling. AgentManagerV2.terminate() handles
-    // merge request submission directly when a worker with a workspace
-    // completes. This eliminates the 2-second EventStore polling loop.
   }
 }
