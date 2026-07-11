@@ -12,6 +12,11 @@
 import { WebSocketServer, WebSocket } from "ws";
 import * as http from "node:http";
 import {
+  assertBindAllowed,
+  isRequestAuthorized,
+  resolveServerToken,
+} from "../auth/server-auth.js";
+import {
   AgentSideConnection,
   type Stream,
   type AnyMessage,
@@ -43,6 +48,12 @@ export interface WebSocketACPServerConfig {
   host?: string;
   path?: string;
   initConfig?: MacroAgentInitConfig;
+  /**
+   * Bearer token required to open a connection. Falls back to the
+   * `MACRO_SERVER_TOKEN` env var. When unset, the server refuses to bind to a
+   * non-loopback host (see auth/server-auth).
+   */
+  token?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -103,6 +114,7 @@ export function createWebSocketACPServer(
   const host = config?.host ?? "127.0.0.1";
   const wsPath = config?.path ?? "/acp";
   const initConfig = config?.initConfig;
+  const token = resolveServerToken(config?.token);
 
   let httpServer: http.Server | null = null;
   let wss: WebSocketServer | null = null;
@@ -131,6 +143,15 @@ export function createWebSocketACPServer(
       wss = new WebSocketServer({
         server: httpServer,
         path: wsPath,
+        // Authenticate at the WebSocket handshake. No-op when no token is
+        // configured (the bind guard keeps such servers loopback-only).
+        verifyClient: (info, done) => {
+          if (isRequestAuthorized(token, info.req)) {
+            done(true);
+          } else {
+            done(false, 401, "Unauthorized");
+          }
+        },
       });
 
       wss.on("connection", (ws: WebSocket) => {
@@ -159,6 +180,7 @@ export function createWebSocketACPServer(
         });
       });
 
+      assertBindAllowed("acp", host, token);
       await new Promise<void>((resolve, reject) => {
         httpServer!.on("error", reject);
         httpServer!.listen(port, host, () => {

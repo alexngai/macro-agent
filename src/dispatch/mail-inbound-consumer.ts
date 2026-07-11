@@ -27,9 +27,19 @@
  * @module dispatch/mail-inbound-consumer
  */
 
+import * as path from "node:path";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-store.js";
 import { loadoutToSpawnOptions, type WireLoadout } from "./loadout-translation.js";
+import {
+  assertSafeGitRef,
+  assertSafeRepoUrl,
+  containPath,
+  GitInputError,
+} from "../util/git-safety.js";
+
+/** Base directory under which hub-requested repos may be cloned. */
+const CLONE_BASE_DIR = "/tmp/openhive-repos";
 
 // ─────────────────────────────────────────────────────────────────
 // Dependency interfaces (narrow — keeps the module testable without
@@ -239,41 +249,70 @@ export function createMailInboundConsumer(
       return undefined;
     }
 
-    const clonePath = repoMeta.clone_path ?? `/tmp/openhive-repos/${repoMeta.repo_id}`;
+    // Validate the untrusted, hub-supplied repo metadata before any of it
+    // reaches git. `canonical_url`, `clone_path`, `repo_id`, and `branch` all
+    // arrive verbatim from the network envelope, so a shell-string git call
+    // here would be a command-injection sink. Reject anything that isn't a
+    // plain URL / ref / contained path, and only ever invoke git via
+    // execFileSync array args (no shell).
+    let cloneUrl: string;
+    let clonePath: string;
+    let safeBranch: string | undefined;
     try {
-      const { execSync } = await import("node:child_process");
+      cloneUrl = assertSafeRepoUrl(canonicalUrl);
+      const requestedLeaf = repoMeta.clone_path ?? repoMeta.repo_id;
+      if (!requestedLeaf) {
+        log(`[mail-inbound] Missing repo_id/clone_path for taskId=${taskId} — skipping mount`);
+        return undefined;
+      }
+      // Contain under a fixed base and collapse to a single leaf so a
+      // hub-supplied absolute path or `../` cannot escape the clone root.
+      clonePath = containPath(CLONE_BASE_DIR, path.basename(requestedLeaf));
+      safeBranch = repoMeta.branch
+        ? assertSafeGitRef(repoMeta.branch, "branch")
+        : undefined;
+    } catch (err) {
+      if (err instanceof GitInputError) {
+        log(`[mail-inbound] Rejected unsafe repo metadata for taskId=${taskId}: ${err.message}`);
+        return undefined;
+      }
+      throw err;
+    }
+
+    try {
+      const { execFileSync } = await import("node:child_process");
 
       // Clone if the directory doesn't exist yet.
       const fs = await import("node:fs");
       if (!fs.existsSync(clonePath)) {
-        log(`[mail-inbound] Cloning ${canonicalUrl} → ${clonePath} for taskId=${taskId}`);
-        execSync(`git clone --depth 1 ${canonicalUrl} ${clonePath}`, {
+        log(`[mail-inbound] Cloning ${cloneUrl} → ${clonePath} for taskId=${taskId}`);
+        execFileSync("git", ["clone", "--depth", "1", "--", cloneUrl, clonePath], {
           stdio: "pipe",
           timeout: 120_000,
         });
       }
 
       // Checkout target branch if specified.
-      if (repoMeta.branch) {
+      if (safeBranch) {
         try {
-          execSync(`git -C ${clonePath} fetch origin ${repoMeta.branch} --depth 1`, {
+          execFileSync("git", ["-C", clonePath, "fetch", "origin", safeBranch, "--depth", "1"], {
             stdio: "pipe",
             timeout: 60_000,
           });
-          execSync(`git -C ${clonePath} checkout ${repoMeta.branch}`, {
+          execFileSync("git", ["-C", clonePath, "checkout", safeBranch], {
             stdio: "pipe",
             timeout: 30_000,
           });
         } catch {
-          log(`[mail-inbound] Branch checkout failed for ${repoMeta.branch} — continuing on default branch`);
+          log(`[mail-inbound] Branch checkout failed for ${safeBranch} — continuing on default branch`);
         }
       }
 
       // Attach to the repo manager so future dispatches find it.
       const handle = await manager.attach({
-        remoteUrl: canonicalUrl,
+        remoteUrl: cloneUrl,
         localPath: clonePath,
-        currentBranch: repoMeta.branch,
+        currentBranch: safeBranch,
       });
 
       // Declare the new workspace to the hub (best-effort).

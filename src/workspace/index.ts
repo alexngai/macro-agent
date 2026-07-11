@@ -55,24 +55,6 @@ export {
   type WorkspaceManagerConfig,
 } from './workspace-manager.js';
 
-// Merge queue
-export {
-  MergeQueue,
-  createMergeQueue,
-  MergeRequestNotFoundError,
-  MergeRequestStateError,
-  initMergeQueueSchema,
-  mergeQueueTableExists,
-  type MergeQueueConfig,
-  type MergeRequest,
-  type MergeRequestStatus,
-  type SubmitMergeRequestOptions,
-  type ListMergeRequestsOptions,
-  type MergeQueueInterface,
-  type MergeQueueEvent,
-  type MergeQueueEventType,
-  type MergeQueueEventCallback,
-} from './merge-queue/index.js';
 
 // Worktree pool
 export {

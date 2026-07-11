@@ -98,11 +98,12 @@ describe("Federation", () => {
   });
 
   describe("createRemoteSpawnHandler", () => {
-    it("should spawn agent on remote_spawn_request", async () => {
+    it("should spawn agent on remote_spawn_request from an allowlisted system", async () => {
       const handler = createRemoteSpawnHandler(
         agentManager,
         inboxAdapter,
-        "local-instance"
+        "local-instance",
+        ["remote"]
       );
 
       await handler(
@@ -125,7 +126,8 @@ describe("Federation", () => {
       const handler = createRemoteSpawnHandler(
         agentManager,
         inboxAdapter,
-        "local-instance"
+        "local-instance",
+        ["remote"]
       );
 
       await handler(
@@ -159,7 +161,8 @@ describe("Federation", () => {
       const handler = createRemoteSpawnHandler(
         agentManager,
         inboxAdapter,
-        "local-instance"
+        "local-instance",
+        ["remote"]
       );
 
       await handler(
@@ -213,6 +216,62 @@ describe("Federation", () => {
           requestedBy: "coordinator@remote",
         })
       );
+
+      expect(agentManager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("should reject a request from a system not on the allowlist", async () => {
+      const handler = createRemoteSpawnHandler(
+        agentManager,
+        inboxAdapter,
+        "local-instance",
+        ["trusted-peer"] // sender system is "remote", not allowlisted
+      );
+
+      await handler(
+        makeSpawnRequestEvent("local-instance", {
+          task: "Run tests",
+          requestedBy: "coordinator@remote",
+        })
+      );
+
+      expect(agentManager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("should reject a request when no allowlist is configured (fail closed)", async () => {
+      const handler = createRemoteSpawnHandler(
+        agentManager,
+        inboxAdapter,
+        "local-instance"
+        // no allowedSystems
+      );
+
+      await handler(
+        makeSpawnRequestEvent("local-instance", {
+          task: "Run tests",
+          requestedBy: "coordinator@remote",
+        })
+      );
+
+      expect(agentManager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("should reject a request from a local (non-federated) sender", async () => {
+      const handler = createRemoteSpawnHandler(
+        agentManager,
+        inboxAdapter,
+        "local-instance",
+        ["remote"]
+      );
+
+      const event = makeSpawnRequestEvent("local-instance", {
+        task: "Run tests",
+        requestedBy: "local-coordinator",
+      });
+      // Local sender: no "@systemId" suffix.
+      (event.message as any).sender_id = "local-coordinator";
+
+      await handler(event);
 
       expect(agentManager.spawn).not.toHaveBeenCalled();
     });

@@ -25,7 +25,7 @@ macro-agent handles **orchestration** (agent lifecycle, team topology, workspace
   - [Why V3 was needed](#why-v3-was-needed)
   - [Workspace interfaces](#workspace-interfaces)
   - [Conflict recovery mechanics](#conflict-recovery-mechanics)
-  - [Implementation status](#implementation-status)
+  - [Project status](#project-status)
 - [Advanced integrations](#advanced-integrations)
 - [Dependencies](#dependencies)
 - [Testing](#testing)
@@ -39,7 +39,7 @@ macro-agent handles **orchestration** (agent lifecycle, team topology, workspace
 npm install macro-agent
 ```
 
-Peer dependency: [git-cascade](https://github.com/alexngai/git-cascade) `>=0.0.3` for the workspace layer.
+The workspace layer is powered by [git-cascade](https://github.com/alexngai/git-cascade), installed automatically as a dependency.
 
 ---
 
@@ -276,7 +276,7 @@ roles:
 
 ### Six team shapes
 
-The workspace layer is designed to express 6 common multi-agent patterns. See [docs/git-cascade-integration-gaps.md](docs/git-cascade-integration-gaps.md) §5 for traces.
+The workspace layer is designed to express 6 common multi-agent patterns. See [docs/design/git-cascade-integration-gaps.md](docs/design/git-cascade-integration-gaps.md) §5 for traces.
 
 **1. Solo stack** — one agent, chain of forked streams:
 ```yaml
@@ -362,6 +362,9 @@ npx multiagent-cli run <teamName> [--task "..."] [--cwd <path>] [--base-path <pa
 
 # Interactive chat with a head manager (no team)
 npx multiagent-cli chat [--cwd <path>]
+
+# Start the long-running server (REST/ACP as configured)
+npx multiagent-cli start [--port <port>] [--host <host>] [--cwd <path>]
 
 # System status (agent count, active sessions)
 npx multiagent-cli status
@@ -511,10 +514,10 @@ Three subsystems:
 - **opentasks** — task management (separate daemon, IPC client)
 
 For full design rationale and interface contracts:
-- [docs/workspace-interfaces.md](docs/workspace-interfaces.md) — V3 TypeScript contracts
-- [docs/git-cascade-integration-gaps.md](docs/git-cascade-integration-gaps.md) — design narrative + 6 workflow traces
-- [docs/conflict-recovery.md](docs/conflict-recovery.md) — recovery strategy design
-- [docs/workspace-redesign-plan.md](docs/workspace-redesign-plan.md) — implementation plan + status
+- [docs/design/workspace-interfaces.md](docs/design/workspace-interfaces.md) — V3 TypeScript contracts
+- [docs/design/git-cascade-integration-gaps.md](docs/design/git-cascade-integration-gaps.md) — design narrative + 6 workflow traces
+- [docs/design/conflict-recovery.md](docs/design/conflict-recovery.md) — recovery strategy design
+- [docs/design/workspace-redesign-plan.md](docs/design/workspace-redesign-plan.md) — implementation plan + status
 
 The four subsections below summarize those docs so this README is useful standalone.
 
@@ -764,57 +767,28 @@ type ConflictResolution =
 
 Recursion: if a resolver agent's resolution itself produces a new conflict, `recoveryDepth` increments. When it exceeds `max_recovery_depth`, the strategy falls back to `escalate`.
 
-### Implementation status
+### Project status
 
-The V3 redesign shipped as 10 phases plus 6 follow-up fixes. All are in `main`.
+macro-agent is pre-1.0, but the core is stable and in active use. The V3
+stream-first workspace layer (topology, landing, conflict recovery), teams,
+triggers, the ACP and REST servers, federation, and the OpenHive/MAP bridge are
+all implemented and covered by unit and end-to-end tests — the e2e suite drives
+real Claude Code subprocesses behind the `RUN_FULL_AGENT_TESTS` flag.
 
-**Completed:**
+**Known limitations:**
 
-| # | Phase | What shipped |
-|---|---|---|
-| 0 | GitCascadeAdapter expansion | 40+ git-cascade primitives surfaced (streams, forks, merges, cascade, changes, events) |
-| 1 | WorkspaceManager V3 surface | Stream-first methods alongside legacy role-shaped ones |
-| 2 | YAML Zod schema | `macro_agent.workspace` validated at team load |
-| 3 | TopologyPolicy + YamlDrivenTopology | Declarative topology compiler |
-| 4 | AgentManagerV2 delegates to TopologyPolicy | V3 dispatch path with legacy capability fallback |
-| 5 | LandingStrategy integration | 4 built-in strategies registered |
-| 6 | MergeQueue marked `@deprecated` | Duplicate kept for legacy callers; scheduled for removal |
-| 7 | ConflictRecoveryStrategy | 5 built-in strategies (including real-git `auto-resolve` + `spawn-resolver`) |
-| 8 | Role-name fallback removed | `switch(role)` deleted; capability-based path retained |
-| 9 | Legacy methods retained (not hard-removed) | Reframed: they serve programmatic callers |
-| 10 | `macro-agent run <team>` CLI | Single-command team launch |
+- `on_team_complete: merge_to_main` currently leaves the team stream active
+  (merge it manually); `keep` and `abandon` work as documented.
+- Cross-team conflicts apply the owning team's recovery policy; some
+  federation-specific edge cases are unspecified.
+- There is no built-in dashboard for conflict/recovery observability — the
+  `conflict:*` workspace events fire, but you wire your own consumer.
 
-**Follow-up fixes (post-plan):**
+The legacy capability-based dispatch path is intentionally retained as the
+programmatic API for library consumers that don't load team YAML — it's a
+supported path, not a deprecated one.
 
-| # | Fix | Verified by |
-|---|---|---|
-| a | git-cascade 0.0.3 event wiring + cascade namespace | Adapter forwards `x-cascade/*` events into `WorkspaceEvent` stream |
-| b | `macro-agent run` CLI e2e (subprocess spawn, SIGINT exit) | 2 e2e tests |
-| c | self-driving team migrated to V3 YAML | 4 e2e tests; caught duplicate-stream bug in TeamRuntime |
-| d | `spawn-resolver` real-spawn e2e | 4 unit + 2 e2e tests |
-| e | Shared worktree ref-counting (Gap 3) | Fixed 2 latent bugs: sharer dealloc leaked refs; owner dealloc tore down path while sharers alive. 6 unit tests cover lifecycle |
-| f | Cascade worktree provider (Gap 1) | Replaced null-returning stub with real provider: reuses live worktrees, allocates ephemeral `system:cascade-<id>` worktrees, cleans up in `finally`. Per-root-stream lock prevents parallel cascades racing. 4 e2e tests |
-| g | `on_parent_advanced: sync_with_parent` auto-sync (Gap 2) | Full implementation: event subscription, 2-second coalescing debounce, role-scoped dispatch. 3 e2e tests |
-
-**Test counts after all fixes:**
-
-- 998 unit tests (59 files)
-- 183 e2e tests (25 files) — all previously skipped `RUN_FULL_AGENT_TESTS` tests pass with real Claude Code
-- Zero regressions, clean typecheck
-
-**Known open items / follow-ups:**
-
-| Item | Severity | Notes |
-|---|---|---|
-| Hard removal of legacy capability dispatch | Low | Retained as programmatic API; not a gap, a supported path |
-| `on_team_complete: merge_to_main` implementation | Low | Currently leaves stream active. Requires landing strategy on team stream; deferred |
-| Cross-team conflict policy | Low | When conflicts span teams, owner team's policy applies; federation-specific edge cases |
-| Recovery observability dashboard | Low | `conflict:*` events fire; no built-in UI yet |
-
-**Coverage gaps intentionally accepted:**
-
-- Cascade with >3 levels under `stop_on_conflict` — tested at 3 levels only
-- Shared worktree edge case: sharer outlives owner for >1 hour (no TTL) — accepted; `reconcileV3` cleans stale entries on boot
+See the [CHANGELOG](CHANGELOG.md) for release history.
 
 ---
 
@@ -822,7 +796,7 @@ The V3 redesign shipped as 10 phases plus 6 follow-up fixes. All are in `main`.
 
 ### ACP Protocol Server
 
-Bridges the [Agent Client Protocol](https://github.com/anthropics/acp) to macro-agent so external clients can connect:
+Bridges the [Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) to macro-agent so external clients can connect:
 
 ```typescript
 const system = await bootV2({ acp: { enabled: true, port: 8080 } });
@@ -858,7 +832,7 @@ const system = await bootV2({
 Serve as compute backend for [cognitive-core](https://github.com/alexngai/cognitive-core) / OpenHive:
 
 ```typescript
-import { MacroAgentBackend } from 'macro-agent/cognitive';
+import { MacroAgentBackend } from 'macro-agent';
 const backend = new MacroAgentBackend(system.agentManager, {
   tasksAdapter: system.tasksAdapter,
   inboxAdapter: system.inboxAdapter,
@@ -877,7 +851,7 @@ The swarm is pure compute — atlas, trajectory extraction, and team coordinatio
 | [opentasks](https://github.com/alexngai/opentasks) | Task graph, dependencies, claiming |
 | [acp-factory](https://github.com/alexngai/acp-factory) | Agent process management |
 | [openteams](https://github.com/alexngai/openteams) | Team template resolution |
-| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktrees, stream/fork/merge, Change-Id tracking, cascade rebase (≥0.0.3) |
+| [git-cascade](https://github.com/alexngai/git-cascade) | Git worktrees, stream/fork/merge, Change-Id tracking, cascade rebase |
 | express | REST API server |
 | ws | ACP WebSocket transport |
 

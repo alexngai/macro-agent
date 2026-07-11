@@ -1,0 +1,16 @@
+name: planner
+extends: coordinator
+description: "Plans and assigns work to grinders"
+prompt: prompts/planner.md
+
+capabilities_add:
+  - task.claim
+
+capabilities_remove:
+  - agent.spawn.integrator
+  - agent.spawn.monitor
+
+macro_agent:
+  lifecycle:
+    type: daemon
+    cascade_terminate: true

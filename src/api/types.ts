@@ -22,6 +22,12 @@ export interface ApiServer {
 export interface ApiServerConfig {
   port?: number;
   host?: string;
+  /**
+   * Bearer token required on every request except `/api/health`. Falls back to
+   * the `MACRO_SERVER_TOKEN` env var. When unset, the server refuses to bind to
+   * a non-loopback host (see auth/server-auth).
+   */
+  token?: string;
 }
 
 // =============================================================================

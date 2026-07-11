@@ -9,7 +9,6 @@
  */
 
 import type { Stream, WorkerTask, StartTaskResult } from 'git-cascade';
-import type { MergeQueueInterface } from './merge-queue/types.js';
 
 /**
  * Agent identifier type
@@ -309,23 +308,6 @@ export interface WorkspaceManager {
     childId: AgentId,
     childPath: string
   ): void;
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Merge Queue
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Get the merge queue for coordinating worker merges.
-   *
-   * @deprecated Use git-cascade's built-in queue via the V3 surface —
-   *   `workspaceManager.addToMergeQueue` (when exposed) or the
-   *   `queue-to-branch` `LandingStrategy`. This method returns the legacy
-   *   macro-agent MergeQueue that duplicates git-cascade's schema; kept for
-   *   legacy callers until teams migrate to `macro_agent.workspace` YAML.
-   *
-   * @returns Legacy MergeQueue instance (duplicate of git-cascade's queue)
-   */
-  getMergeQueue(): MergeQueueInterface;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // V3 — Stream-first surface (additive; coexists with role-shaped methods above)

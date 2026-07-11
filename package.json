@@ -5,6 +5,19 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "multiagent": "./dist/cli/acp.js",
     "multiagent-cli": "./dist/cli/index.js",
@@ -26,14 +39,27 @@
   },
   "keywords": [
     "multi-agent",
+    "multi-agent-orchestration",
+    "orchestration",
+    "agent",
+    "ai-agents",
     "claude",
-    "orchestration"
+    "claude-code",
+    "acp",
+    "mcp"
   ],
   "author": "Alex Ngai",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/macro-agent.git"
+  },
+  "homepage": "https://github.com/alexngai/macro-agent#readme",
+  "bugs": {
+    "url": "https://github.com/alexngai/macro-agent/issues"
   },
   "devDependencies": {
     "@sudocode-ai/cli": "^0.1.19",
