@@ -11,6 +11,7 @@
 
 import type { AgentId } from "../store/types/index.js";
 import type { TasksAdapter, InboxAdapter } from "../adapters/types.js";
+import type { MCPServerConfig } from "../agent/types.js";
 
 // ─────────────────────────────────────────────────────────────────
 // Agent Session Types (matches cognitive-core/src/runtime/types.ts)
@@ -78,6 +79,13 @@ export interface CognitiveAgentSpawnConfig {
   cwd?: string;
   timeout?: number;
   onMessage?: (message: CognitiveAgentMessage) => void;
+  /**
+   * MCP servers to mount on the spawned agent. Forwarded to
+   * agentManager.spawn's `config.mcpServers`, which is how the underlying
+   * AgentManager mounts them (see agent-manager-v2 spawn). Without this,
+   * callers passing MCP tools would have them silently dropped.
+   */
+  mcpServers?: MCPServerConfig[];
 }
 
 // ─────────────────────────────────────────────────────────────────

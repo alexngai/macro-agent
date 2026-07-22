@@ -197,7 +197,16 @@ export class MacroAgentBackend {
         ? this.config.coordinatorAgentId
         : null,
       cwd: config.cwd,
-      config: config.env ? { env: config.env } : undefined,
+      // Forward env + MCP servers via AgentManager's `config.mcpServers` —
+      // that is where agent-manager-v2 reads and mounts them. Only include
+      // keys that are actually set so an absent field stays absent.
+      config:
+        config.env || config.mcpServers
+          ? {
+              ...(config.env ? { env: config.env } : {}),
+              ...(config.mcpServers ? { mcpServers: config.mcpServers } : {}),
+            }
+          : undefined,
       customPrompt: config.systemPromptAdditions,
     });
 

@@ -189,6 +189,57 @@ describe("MacroAgentBackend", () => {
       );
     });
 
+    it("forwards mcpServers to agentManager.spawn config", async () => {
+      const mcpServers = [
+        {
+          name: "memory",
+          command: "node",
+          args: ["memory-server.js"],
+          env: { MEM_DIR: "/tmp/mem" },
+        },
+      ];
+
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "test" },
+        mcpServers,
+      });
+
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ mcpServers }),
+        }),
+      );
+    });
+
+    it("forwards both env and mcpServers together", async () => {
+      const mcpServers = [{ name: "memory", command: "memory-cli" }];
+
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "test" },
+        env: { FOO: "bar" },
+        mcpServers,
+      });
+
+      expect(agentManager.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: { env: { FOO: "bar" }, mcpServers },
+        }),
+      );
+    });
+
+    it("omits config when neither env nor mcpServers provided (backward compat)", async () => {
+      await backend.spawn({
+        agentType: "claude-code",
+        task: { description: "test" },
+      });
+
+      const spawnArg = (agentManager.spawn as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0];
+      expect(spawnArg.config).toBeUndefined();
+    });
+
     it("passes custom prompt when provided", async () => {
       await backend.spawn({
         agentType: "claude-code",
